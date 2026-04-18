@@ -71,7 +71,7 @@ export function StatCard({ title, value, change, changeType = 'neutral', icon, c
   return (
     <div className={twMerge('relative bg-white rounded-xl border border-gray-100 p-6 shadow-card hover:shadow-stat transition-all duration-300 group overflow-hidden', className)}>
       {/* Subtle gradient overlay on hover */}
-      <div className="absolute inset-0 bg-gradient-card opacity-0 group-hover:opacity-100 transition-opacity duration-300 rounded-xl" />
+      <div className="absolute inset-0 bg-gradient-to-br from-primary-600/5 to-accent-600/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300 rounded-xl" />
       <div className="relative">
         <div className="flex items-start justify-between">
           <div>

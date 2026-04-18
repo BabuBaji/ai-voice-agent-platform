@@ -33,7 +33,7 @@ export function CallPlayer({ recordingUrl, duration }: CallPlayerProps) {
           </button>
           <button
             onClick={togglePlay}
-            className="p-3 bg-gradient-brand text-white rounded-full hover:shadow-glow transition-all"
+            className="p-3 bg-gradient-to-br from-primary-600 to-accent-600 text-white rounded-full hover:shadow-lg shadow-primary-600/20 transition-all"
           >
             {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
           </button>
@@ -49,7 +49,7 @@ export function CallPlayer({ recordingUrl, duration }: CallPlayerProps) {
               const pct = (e.clientX - rect.left) / rect.width;
               setCurrentTime(Math.floor(pct * duration));
             }}>
-            <div className="absolute h-full bg-gradient-brand rounded-full transition-all" style={{ width: `${progress}%` }} />
+            <div className="absolute h-full bg-gradient-to-br from-primary-600 to-accent-600 rounded-full transition-all" style={{ width: `${progress}%` }} />
           </div>
           <div className="flex justify-between mt-1.5">
             <span className="text-xs text-gray-400 font-mono">{formatDuration(currentTime)}</span>

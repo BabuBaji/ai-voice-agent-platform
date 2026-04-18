@@ -66,12 +66,12 @@ const pricing = [
 
 export function LandingPage() {
   return (
-    <div className="min-h-screen bg-dark-bg text-white">
+    <div className="min-h-screen bg-[#0a0a0f] text-white">
       {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/5 bg-dark-bg/80 backdrop-blur-xl">
+      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-brand flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center">
               <Mic className="h-5 w-5 text-white" />
             </div>
             <span className="text-lg font-bold text-white">VoiceAgent AI</span>
@@ -136,7 +136,7 @@ export function LandingPage() {
       </section>
 
       {/* Stats bar */}
-      <section className="relative border-y border-white/5 bg-dark-surface/50">
+      <section className="relative border-y border-white/5 bg-[#16161f]/50">
         <div className="max-w-5xl mx-auto px-6 py-12">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
             {stats.map((stat, i) => (
@@ -177,7 +177,7 @@ export function LandingPage() {
       </section>
 
       {/* How it works */}
-      <section className="py-24 px-6 border-y border-white/5 bg-dark-surface/30">
+      <section className="py-24 px-6 border-y border-white/5 bg-[#16161f]/30">
         <div className="max-w-5xl mx-auto">
           <div className="text-center mb-16">
             <p className="text-sm font-semibold text-primary-400 uppercase tracking-wider mb-3">How it works</p>
@@ -222,7 +222,7 @@ export function LandingPage() {
       </section>
 
       {/* Pricing */}
-      <section id="pricing" className="py-24 px-6 border-y border-white/5 bg-dark-surface/30">
+      <section id="pricing" className="py-24 px-6 border-y border-white/5 bg-[#16161f]/30">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-16">
             <p className="text-sm font-semibold text-primary-400 uppercase tracking-wider mb-3">Pricing</p>
@@ -236,13 +236,13 @@ export function LandingPage() {
                 key={plan.name}
                 className={`rounded-2xl border p-8 transition-all duration-300 ${
                   plan.highlighted
-                    ? 'border-primary-500/50 bg-gradient-to-b from-primary-600/10 to-transparent shadow-glow relative'
+                    ? 'border-primary-500/50 bg-gradient-to-b from-primary-600/10 to-transparent shadow-lg shadow-primary-600/20 relative'
                     : 'border-white/10 bg-white/[0.02] hover:border-white/20'
                 }`}
               >
                 {plan.highlighted && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <span className="px-4 py-1 rounded-full text-xs font-semibold bg-gradient-brand text-white">Most Popular</span>
+                    <span className="px-4 py-1 rounded-full text-xs font-semibold bg-gradient-to-br from-primary-600 to-accent-600 text-white">Most Popular</span>
                   </div>
                 )}
                 <h3 className="text-lg font-semibold text-white">{plan.name}</h3>
@@ -296,7 +296,7 @@ export function LandingPage() {
           <div className="grid grid-cols-2 md:grid-cols-5 gap-8">
             <div className="col-span-2 md:col-span-1">
               <div className="flex items-center gap-2.5 mb-4">
-                <div className="w-8 h-8 rounded-lg bg-gradient-brand flex items-center justify-center">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center">
                   <Mic className="h-4 w-4 text-white" />
                 </div>
                 <span className="font-bold text-white">VoiceAgent AI</span>

@@ -57,7 +57,7 @@ export function AgentTestPage() {
 
       <Card className="h-[600px] flex flex-col" padding={false}>
         <div className="px-6 py-3 border-b border-gray-100 flex items-center gap-3 bg-gray-50/50">
-          <div className="w-8 h-8 rounded-full bg-gradient-brand flex items-center justify-center shadow-sm">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center shadow-sm">
             <Bot className="h-4 w-4 text-white" />
           </div>
           <div>

@@ -14,7 +14,7 @@ const buttonVariants = cva(
         outline: 'border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-primary-500',
         ghost: 'text-gray-700 hover:bg-gray-100 focus:ring-gray-500',
         danger: 'bg-danger-600 text-white hover:bg-danger-700 focus:ring-danger-500',
-        gradient: 'text-white font-semibold shadow-lg hover:shadow-xl hover:-translate-y-0.5 focus:ring-primary-500 bg-gradient-brand hover:bg-gradient-brand-hover',
+        gradient: 'btn-gradient text-white font-semibold focus:ring-primary-500',
         'ghost-dark': 'text-gray-300 hover:text-white hover:bg-white/10 focus:ring-white/20',
         'outline-dark': 'border border-white/20 text-white hover:bg-white/10 focus:ring-white/20',
       },

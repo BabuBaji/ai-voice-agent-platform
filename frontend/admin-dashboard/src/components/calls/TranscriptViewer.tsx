@@ -27,7 +27,7 @@ export function TranscriptViewer({ messages }: TranscriptViewerProps) {
                 className={`inline-block px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                   isAssistant
                     ? 'bg-white border border-gray-100 text-gray-800 rounded-tl-none shadow-card'
-                    : 'bg-gradient-brand text-white rounded-tr-none shadow-sm'
+                    : 'bg-gradient-to-br from-primary-600 to-accent-600 text-white rounded-tr-none shadow-sm'
                 }`}
               >
                 {msg.content}

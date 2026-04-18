@@ -14,7 +14,7 @@ export function AuthLayout() {
       {/* Left - branding panel */}
       <div className="hidden lg:flex lg:w-[55%] relative overflow-hidden">
         {/* Dark gradient background */}
-        <div className="absolute inset-0 bg-dark-bg" />
+        <div className="absolute inset-0 bg-[#0a0a0f]" />
         <div className="absolute inset-0 hero-gradient" />
         <div className="absolute inset-0 grid-pattern" />
 
@@ -25,7 +25,7 @@ export function AuthLayout() {
         <div className="relative z-10 p-12 flex flex-col justify-between w-full">
           {/* Logo */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-brand flex items-center justify-center shadow-glow">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center shadow-lg shadow-primary-600/20">
               <Mic className="h-6 w-6 text-white" />
             </div>
             <span className="text-xl font-bold text-white">VoiceAgent AI</span>

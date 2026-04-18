@@ -37,7 +37,7 @@ export function LoginPage() {
       await login(data.email, data.password);
       navigate('/');
     } catch (err: any) {
-      const message = err?.response?.data?.message || err?.message || 'Invalid email or password';
+      const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || 'Invalid email or password';
       setError(message);
     } finally {
       setLoading(false);
@@ -48,7 +48,7 @@ export function LoginPage() {
     <div className="animate-fade-in">
       {/* Mobile logo */}
       <div className="lg:hidden flex items-center gap-2.5 mb-8">
-        <div className="w-9 h-9 rounded-xl bg-gradient-brand flex items-center justify-center">
+        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center">
           <Mic className="h-5 w-5 text-white" />
         </div>
         <span className="text-lg font-bold text-gray-900">VoiceAgent AI</span>

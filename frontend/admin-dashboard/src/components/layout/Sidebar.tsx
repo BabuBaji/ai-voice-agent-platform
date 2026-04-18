@@ -75,20 +75,20 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
   return (
     <aside
-      className={`fixed left-0 top-0 h-full bg-sidebar-bg z-30 transition-all duration-300 flex flex-col ${
+      className={`fixed left-0 top-0 h-full bg-[#0f172a] z-30 transition-all duration-300 flex flex-col ${
         collapsed ? 'w-[72px]' : 'w-[260px]'
       }`}
     >
       {/* Logo */}
-      <div className="h-16 flex items-center px-4 border-b border-sidebar-border">
+      <div className="h-16 flex items-center px-4 border-b border-white/10">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-brand flex items-center justify-center flex-shrink-0 shadow-glow">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center flex-shrink-0 shadow-lg shadow-primary-600/20">
             <Mic className="h-5 w-5 text-white" />
           </div>
           {!collapsed && (
             <div>
               <h1 className="text-white font-bold text-sm tracking-tight">VoiceAgent AI</h1>
-              <p className="text-[10px] text-sidebar-text opacity-60">Enterprise Platform</p>
+              <p className="text-[10px] text-slate-400 opacity-60">Enterprise Platform</p>
             </div>
           )}
         </div>
@@ -109,7 +109,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
                       groupActive
                         ? 'text-white bg-sidebar-active'
-                        : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
+                        : 'text-slate-400 hover:text-white hover:bg-[#1e293b]'
                     }`}
                   >
                     {iconMap[item.icon]}
@@ -123,7 +123,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                     )}
                   </button>
                   {!collapsed && isExpanded && (
-                    <ul className="mt-1 ml-5 pl-4 border-l border-sidebar-border space-y-0.5">
+                    <ul className="mt-1 ml-5 pl-4 border-l border-white/10 space-y-0.5">
                       {item.children.map((child) => (
                         <li key={child.path}>
                           <NavLink
@@ -131,7 +131,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                             className={`block px-3 py-2 rounded-lg text-sm transition-all duration-200 ${
                               isActive(child.path)
                                 ? 'text-white bg-primary-600/20 font-medium'
-                                : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
+                                : 'text-slate-400 hover:text-white hover:bg-[#1e293b]'
                             }`}
                           >
                             {child.label}
@@ -151,7 +151,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
                     isActive(item.path)
                       ? 'text-white bg-sidebar-active'
-                      : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
+                      : 'text-slate-400 hover:text-white hover:bg-[#1e293b]'
                   }`}
                 >
                   {iconMap[item.icon]}
@@ -180,23 +180,23 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       )}
 
       {/* User + Collapse */}
-      <div className="p-3 border-t border-sidebar-border">
+      <div className="p-3 border-t border-white/10">
         {/* User */}
         {!collapsed && user && (
           <div className="flex items-center gap-3 px-3 py-2 mb-2">
-            <div className="w-8 h-8 rounded-full bg-gradient-brand flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-600 to-accent-600 flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">
               {(user.name || 'A')[0].toUpperCase()}
             </div>
             <div className="min-w-0">
               <p className="text-sm font-medium text-white truncate">{user.name || 'Admin'}</p>
-              <p className="text-[11px] text-sidebar-text truncate">{user.email || ''}</p>
+              <p className="text-[11px] text-slate-400 truncate">{user.email || ''}</p>
             </div>
           </div>
         )}
 
         <button
           onClick={onToggle}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sidebar-text hover:text-white hover:bg-sidebar-hover transition-all duration-200 text-sm"
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-[#1e293b] transition-all duration-200 text-sm"
         >
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           {!collapsed && <span>Collapse</span>}

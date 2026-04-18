@@ -71,7 +71,7 @@ export function Header() {
                 <p className="text-sm font-medium text-gray-900 leading-tight">{user?.name || 'Admin User'}</p>
                 <p className="text-[11px] text-gray-500 capitalize">{user?.role || 'admin'}</p>
               </div>
-              <div className="w-8 h-8 rounded-full bg-gradient-brand text-white flex items-center justify-center text-sm font-semibold shadow-sm">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-600 to-accent-600 text-white flex items-center justify-center text-sm font-semibold shadow-sm">
                 {(user?.name || 'A')[0].toUpperCase()}
               </div>
             </div>

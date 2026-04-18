@@ -134,7 +134,7 @@ export function BillingPage() {
                 >
                   {plan.current && (
                     <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                      <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gradient-brand text-white flex items-center gap-1">
+                      <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gradient-to-br from-primary-600 to-accent-600 text-white flex items-center gap-1">
                         <Sparkles className="h-3 w-3" />
                         Current
                       </span>
