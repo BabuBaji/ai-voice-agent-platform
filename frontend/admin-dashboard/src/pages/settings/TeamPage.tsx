@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Settings, Phone, Puzzle, Users, CreditCard, Plus, Mail } from 'lucide-react';
+import { Settings, Phone, Puzzle, Users, CreditCard, Mail } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Table } from '@/components/ui/Table';
@@ -41,7 +41,7 @@ export function TeamPage() {
       label: 'Member',
       render: (item: TeamMember) => (
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center text-sm font-medium">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 text-primary-600 flex items-center justify-center text-sm font-semibold">
             {item.name[0]}
           </div>
           <div>
@@ -99,8 +99,8 @@ export function TeamPage() {
                   to={item.path}
                   end={item.end}
                   className={({ isActive }) =>
-                    `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      isActive ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-100'
+                    `flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${
+                      isActive ? 'bg-primary-50 text-primary-700 shadow-sm' : 'text-gray-600 hover:bg-gray-50'
                     }`
                   }
                 >
@@ -113,13 +113,13 @@ export function TeamPage() {
         </nav>
 
         <div className="flex-1">
-          <Card padding={false}>
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <Card padding={false} className="shadow-card">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Team Members</h3>
                 <p className="text-sm text-gray-500">{mockMembers.length} members</p>
               </div>
-              <Button size="sm" onClick={() => setShowInviteModal(true)}>
+              <Button variant="gradient" size="sm" onClick={() => setShowInviteModal(true)} className="rounded-xl">
                 <Mail className="h-4 w-4" />
                 Invite Member
               </Button>
@@ -138,8 +138,8 @@ export function TeamPage() {
             { value: 'admin', label: 'Admin' },
           ]} />
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setShowInviteModal(false)}>Cancel</Button>
-            <Button onClick={() => setShowInviteModal(false)}>
+            <Button variant="outline" onClick={() => setShowInviteModal(false)} className="rounded-xl">Cancel</Button>
+            <Button variant="gradient" onClick={() => setShowInviteModal(false)} className="rounded-xl">
               <Mail className="h-4 w-4" />
               Send Invite
             </Button>

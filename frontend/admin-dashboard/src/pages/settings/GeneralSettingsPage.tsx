@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { Settings, Phone, Puzzle, Users, CreditCard, Save } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader } from '@/components/ui/Card';
@@ -52,7 +52,6 @@ export function GeneralSettingsPage() {
       </div>
 
       <div className="flex gap-6">
-        {/* Settings nav */}
         <nav className="w-56 flex-shrink-0">
           <ul className="space-y-1">
             {settingsNav.map((item) => (
@@ -61,10 +60,10 @@ export function GeneralSettingsPage() {
                   to={item.path}
                   end={item.end}
                   className={({ isActive }) =>
-                    `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    `flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${
                       isActive
-                        ? 'bg-primary-50 text-primary-700'
-                        : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                        ? 'bg-primary-50 text-primary-700 shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-50'
                     }`
                   }
                 >
@@ -76,7 +75,6 @@ export function GeneralSettingsPage() {
           </ul>
         </nav>
 
-        {/* Content */}
         {isGeneralPage ? (
           <div className="flex-1 space-y-6">
             <Card>
@@ -84,7 +82,7 @@ export function GeneralSettingsPage() {
                 title="General Settings"
                 subtitle="Basic configuration for your organization"
                 action={
-                  <Button onClick={handleSave} loading={saving} size="sm">
+                  <Button variant="gradient" onClick={handleSave} loading={saving} size="sm" className="rounded-xl">
                     <Save className="h-4 w-4" />
                     Save Changes
                   </Button>

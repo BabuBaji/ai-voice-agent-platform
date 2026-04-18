@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { PipelineKanban } from '@/components/crm/PipelineKanban';
 import { formatCurrency } from '@/utils/formatters';
@@ -32,12 +32,22 @@ export function PipelinePage() {
     <div className="max-w-full mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Pipeline</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {deals.length} deals -- Total: {formatCurrency(totalValue)} -- Weighted: {formatCurrency(weightedValue)}
-          </p>
+          <div className="flex items-center gap-3 mb-1">
+            <h1 className="text-2xl font-bold text-gray-900">Pipeline</h1>
+            <button className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+              <span>Sales Pipeline</span>
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex items-center gap-4 text-sm text-gray-500">
+            <span>{deals.length} deals</span>
+            <span className="w-1 h-1 rounded-full bg-gray-300" />
+            <span>Total: <span className="font-semibold text-gray-900">{formatCurrency(totalValue)}</span></span>
+            <span className="w-1 h-1 rounded-full bg-gray-300" />
+            <span>Weighted: <span className="font-semibold text-primary-600">{formatCurrency(weightedValue)}</span></span>
+          </div>
         </div>
-        <Button>
+        <Button variant="gradient" className="rounded-xl">
           <Plus className="h-4 w-4" />
           Add Deal
         </Button>

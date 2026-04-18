@@ -1,5 +1,8 @@
 import type { RouteObject } from 'react-router-dom';
 
+// Landing
+import { LandingPage } from '@/pages/LandingPage';
+
 // Auth pages
 import { LoginPage } from '@/pages/auth/LoginPage';
 import { RegisterPage } from '@/pages/auth/RegisterPage';
@@ -45,6 +48,12 @@ import { AuthLayout } from '@/routes/layouts/AuthLayout';
 import { ProtectedRoute } from '@/routes/ProtectedRoute';
 
 export const routes: RouteObject[] = [
+  // Public landing page
+  {
+    path: '/landing',
+    element: <LandingPage />,
+  },
+  // Auth pages
   {
     element: <AuthLayout />,
     children: [
@@ -52,6 +61,7 @@ export const routes: RouteObject[] = [
       { path: '/register', element: <RegisterPage /> },
     ],
   },
+  // Dashboard (protected)
   {
     element: (
       <ProtectedRoute>

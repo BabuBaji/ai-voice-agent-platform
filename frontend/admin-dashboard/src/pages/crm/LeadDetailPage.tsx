@@ -33,24 +33,19 @@ export function LeadDetailPage() {
   const [note, setNote] = useState('');
 
   const iconForType: Record<string, React.ReactNode> = {
-    call: <Phone className="h-4 w-4" />,
-    note: <MessageSquare className="h-4 w-4" />,
-    email: <Mail className="h-4 w-4" />,
-    status: <Calendar className="h-4 w-4" />,
+    call: <Phone className="h-4 w-4" />, note: <MessageSquare className="h-4 w-4" />,
+    email: <Mail className="h-4 w-4" />, status: <Calendar className="h-4 w-4" />,
   };
-
   const colorForType: Record<string, string> = {
-    call: 'bg-primary-100 text-primary-600',
-    note: 'bg-warning-100 text-warning-600',
-    email: 'bg-success-100 text-success-600',
-    status: 'bg-purple-100 text-purple-600',
+    call: 'bg-primary-100 text-primary-600', note: 'bg-warning-100 text-warning-600',
+    email: 'bg-success-100 text-success-600', status: 'bg-purple-100 text-purple-600',
   };
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/crm/leads')} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100">
+          <button onClick={() => navigate('/crm/leads')} className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div>
@@ -58,39 +53,26 @@ export function LeadDetailPage() {
             <p className="text-sm text-gray-500">{mockLead.company}</p>
           </div>
         </div>
-        <Button variant="outline" onClick={() => setIsEditing(!isEditing)}>
-          <Edit className="h-4 w-4" />
-          {isEditing ? 'Cancel' : 'Edit'}
+        <Button variant="outline" onClick={() => setIsEditing(!isEditing)} className="rounded-xl">
+          <Edit className="h-4 w-4" />{isEditing ? 'Cancel' : 'Edit'}
         </Button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Activity timeline */}
         <div className="lg:col-span-2 space-y-4">
-          {/* Notes input */}
           <Card>
             <div className="flex items-start gap-3">
-              <Textarea
-                placeholder="Add a note..."
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                rows={2}
-                className="flex-1"
-              />
-              <Button disabled={!note.trim()} size="sm" className="mt-1">
-                <Plus className="h-3.5 w-3.5" />
-                Add
-              </Button>
+              <Textarea placeholder="Add a note..." value={note} onChange={(e) => setNote(e.target.value)} rows={2} className="flex-1" />
+              <Button disabled={!note.trim()} size="sm" variant="gradient" className="mt-1 rounded-xl"><Plus className="h-3.5 w-3.5" />Add</Button>
             </div>
           </Card>
 
-          {/* Activity Timeline */}
           <Card>
             <CardHeader title="Activity Timeline" />
             <div className="space-y-6">
               {activityTimeline.map((activity) => (
                 <div key={activity.id} className="flex gap-4">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${colorForType[activity.type]}`}>
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 ${colorForType[activity.type]}`}>
                     {iconForType[activity.type]}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -105,16 +87,12 @@ export function LeadDetailPage() {
             </div>
           </Card>
 
-          {/* Linked Calls */}
           <Card>
             <CardHeader title="Linked Calls" />
             <div className="space-y-3">
               {linkedCalls.map((call) => (
-                <div
-                  key={call.id}
-                  onClick={() => navigate(`/calls/${call.id}`)}
-                  className="flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
-                >
+                <div key={call.id} onClick={() => navigate(`/calls/${call.id}`)}
+                  className="flex items-center justify-between p-3.5 rounded-xl border border-gray-100 hover:bg-gray-50 cursor-pointer transition-all shadow-card">
                   <div className="flex items-center gap-3">
                     <Phone className="h-4 w-4 text-gray-400" />
                     <div>
@@ -123,7 +101,7 @@ export function LeadDetailPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm text-gray-500">{call.duration}</span>
+                    <span className="text-sm text-gray-500 font-mono">{call.duration}</span>
                     <StatusBadge status={call.outcome} />
                     <StatusBadge status={call.sentiment} />
                   </div>
@@ -133,7 +111,6 @@ export function LeadDetailPage() {
           </Card>
         </div>
 
-        {/* Right: Lead info */}
         <div className="space-y-4">
           <Card>
             <CardHeader title="Lead Information" />
@@ -144,35 +121,23 @@ export function LeadDetailPage() {
                 <Input label="Phone" defaultValue={mockLead.phone} />
                 <Input label="Company" defaultValue={mockLead.company} />
                 <Input label="Value" type="number" defaultValue={mockLead.value} />
-                <Button className="w-full">Save Changes</Button>
+                <Button variant="gradient" className="w-full rounded-xl">Save Changes</Button>
               </div>
             ) : (
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-500">Status</span>
-                  <StatusBadge status={mockLead.status} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-500">Score</span>
-                  <span className="text-sm font-bold text-success-600">{mockLead.score}/100</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-500">Value</span>
-                  <span className="text-sm font-semibold">{formatCurrency(mockLead.value)}</span>
-                </div>
+                {[
+                  { label: 'Status', value: <StatusBadge status={mockLead.status} /> },
+                  { label: 'Score', value: <span className="text-sm font-bold text-success-600">{mockLead.score}/100</span> },
+                  { label: 'Value', value: <span className="text-sm font-semibold">{formatCurrency(mockLead.value)}</span> },
+                ].map((item) => (
+                  <div key={item.label} className="flex items-center justify-between">
+                    <span className="text-sm text-gray-500">{item.label}</span>{item.value}
+                  </div>
+                ))}
                 <div className="border-t border-gray-100 pt-4 space-y-3">
-                  <div className="flex items-center gap-2 text-sm">
-                    <Mail className="h-4 w-4 text-gray-400" />
-                    <span className="text-gray-700">{mockLead.email}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <Phone className="h-4 w-4 text-gray-400" />
-                    <span className="text-gray-700">{mockLead.phone}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <Building2 className="h-4 w-4 text-gray-400" />
-                    <span className="text-gray-700">{mockLead.company}</span>
-                  </div>
+                  <div className="flex items-center gap-2 text-sm"><Mail className="h-4 w-4 text-gray-400" /><span className="text-gray-700">{mockLead.email}</span></div>
+                  <div className="flex items-center gap-2 text-sm"><Phone className="h-4 w-4 text-gray-400" /><span className="text-gray-700 font-mono">{mockLead.phone}</span></div>
+                  <div className="flex items-center gap-2 text-sm"><Building2 className="h-4 w-4 text-gray-400" /><span className="text-gray-700">{mockLead.company}</span></div>
                 </div>
                 <div className="border-t border-gray-100 pt-4">
                   <p className="text-sm text-gray-500 mb-2">Source</p>
@@ -181,9 +146,7 @@ export function LeadDetailPage() {
                 <div className="border-t border-gray-100 pt-4">
                   <p className="text-sm text-gray-500 mb-2">Tags</p>
                   <div className="flex flex-wrap gap-1.5">
-                    {mockLead.tags.map((tag) => (
-                      <Badge key={tag} variant="default">{tag}</Badge>
-                    ))}
+                    {mockLead.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}
                   </div>
                 </div>
                 <div className="border-t border-gray-100 pt-4">

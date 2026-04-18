@@ -29,12 +29,10 @@ export function ContactsPage() {
 
   const columns = [
     {
-      key: 'name',
-      label: 'Name',
-      sortable: true,
+      key: 'name', label: 'Name', sortable: true,
       render: (item: Contact) => (
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center text-sm font-medium">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 text-primary-600 flex items-center justify-center text-sm font-semibold">
             {item.name[0]}
           </div>
           <div>
@@ -45,8 +43,7 @@ export function ContactsPage() {
       ),
     },
     {
-      key: 'email',
-      label: 'Email',
+      key: 'email', label: 'Email',
       render: (item: Contact) => (
         <div className="flex items-center gap-1.5 text-gray-600">
           <Mail className="h-3.5 w-3.5 text-gray-400" />
@@ -55,20 +52,17 @@ export function ContactsPage() {
       ),
     },
     {
-      key: 'phone',
-      label: 'Phone',
+      key: 'phone', label: 'Phone',
       render: (item: Contact) => (
         <div className="flex items-center gap-1.5 text-gray-600">
           <Phone className="h-3.5 w-3.5 text-gray-400" />
-          <span className="text-sm">{item.phone}</span>
+          <span className="text-sm font-mono">{item.phone}</span>
         </div>
       ),
     },
     { key: 'company', label: 'Company', sortable: true },
     {
-      key: 'lastContactedAt',
-      label: 'Last Contacted',
-      sortable: true,
+      key: 'lastContactedAt', label: 'Last Contacted', sortable: true,
       render: (item: Contact) => (
         <span className="text-sm text-gray-500">
           {item.lastContactedAt ? formatDate(item.lastContactedAt) : 'Never'}
@@ -84,7 +78,7 @@ export function ContactsPage() {
           <h1 className="text-2xl font-bold text-gray-900">Contacts</h1>
           <p className="text-sm text-gray-500 mt-1">Manage your contact directory</p>
         </div>
-        <Button onClick={() => setShowCreateModal(true)}>
+        <Button variant="gradient" onClick={() => setShowCreateModal(true)} className="rounded-xl">
           <Plus className="h-4 w-4" />
           Add Contact
         </Button>
@@ -92,29 +86,17 @@ export function ContactsPage() {
 
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-        <input
-          type="text"
-          placeholder="Search contacts..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"
-        />
+        <input type="text" placeholder="Search contacts..." value={search} onChange={(e) => setSearch(e.target.value)}
+          className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all" />
       </div>
 
-      <Card padding={false}>
+      <Card padding={false} className="shadow-card">
         <Table columns={columns} data={filtered} />
       </Card>
 
-      <Modal
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        title="Add Contact"
-      >
+      <Modal isOpen={showCreateModal} onClose={() => setShowCreateModal(false)} title="Add Contact">
         <ContactForm
-          onSubmit={(data) => {
-            console.log('Create contact:', data);
-            setShowCreateModal(false);
-          }}
+          onSubmit={(data) => { console.log('Create contact:', data); setShowCreateModal(false); }}
           onCancel={() => setShowCreateModal(false)}
         />
       </Modal>

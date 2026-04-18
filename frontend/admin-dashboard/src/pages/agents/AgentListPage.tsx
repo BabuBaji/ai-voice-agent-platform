@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Search, LayoutGrid, List, MoreVertical, Bot, Phone, Clock, TrendingUp, Copy, Trash2, Edit, Loader2, AlertCircle } from 'lucide-react';
+import {
+  Plus, Search, LayoutGrid, List, MoreVertical, Bot, Phone, Clock,
+  TrendingUp, Copy, Trash2, Edit, Loader2, AlertCircle, Sparkles,
+} from 'lucide-react';
 import { Button } from '@/components/ui/Button';
-import { StatusBadge } from '@/components/ui/Badge';
+import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { Dropdown } from '@/components/ui/Dropdown';
 import { formatNumber } from '@/utils/formatters';
 import { agentApi } from '@/services/agent.api';
@@ -41,6 +44,13 @@ const mockAgents: Agent[] = [
   },
 ];
 
+const providerLabels: Record<string, string> = {
+  elevenlabs: 'ElevenLabs',
+  azure: 'Azure',
+  google: 'Google',
+  aws: 'AWS',
+};
+
 export function AgentListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
@@ -63,7 +73,6 @@ export function AgentListPage() {
     } catch (err: any) {
       const message = err?.response?.data?.message || err?.message || 'Failed to load agents';
       setError(message);
-      // Fall back to mock data so UI still looks good
       setAgents(mockAgents);
     } finally {
       setLoading(false);
@@ -105,7 +114,10 @@ export function AgentListPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin text-primary-600 mx-auto" />
+          <p className="text-sm text-gray-400 mt-3">Loading agents...</p>
+        </div>
       </div>
     );
   }
@@ -114,20 +126,20 @@ export function AgentListPage() {
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Agents</h1>
+          <h1 className="text-2xl font-bold text-gray-900">AI Agents</h1>
           <p className="text-sm text-gray-500 mt-1">Create and manage your AI voice agents</p>
         </div>
-        <Button onClick={() => navigate('/agents/new')}>
+        <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-xl">
           <Plus className="h-4 w-4" />
           Create Agent
         </Button>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span>Service unavailable: showing demo data. ({error})</span>
-          <button onClick={fetchAgents} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+          <button onClick={fetchAgents} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
         </div>
       )}
 
@@ -140,14 +152,14 @@ export function AgentListPage() {
             placeholder="Search agents..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"
+            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
           />
         </div>
 
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
+          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition-all"
         >
           <option value="all">All Status</option>
           <option value="active">Active</option>
@@ -155,16 +167,16 @@ export function AgentListPage() {
           <option value="draft">Draft</option>
         </select>
 
-        <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+        <div className="flex border border-gray-200 rounded-xl overflow-hidden">
           <button
             onClick={() => setViewMode('grid')}
-            className={`p-2 ${viewMode === 'grid' ? 'bg-primary-50 text-primary-600' : 'text-gray-500 hover:bg-gray-50'}`}
+            className={`p-2.5 transition-colors ${viewMode === 'grid' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
           >
             <LayoutGrid className="h-4 w-4" />
           </button>
           <button
             onClick={() => setViewMode('list')}
-            className={`p-2 ${viewMode === 'list' ? 'bg-primary-50 text-primary-600' : 'text-gray-500 hover:bg-gray-50'}`}
+            className={`p-2.5 transition-colors ${viewMode === 'list' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
           >
             <List className="h-4 w-4" />
           </button>
@@ -173,13 +185,15 @@ export function AgentListPage() {
 
       {/* Empty state */}
       {!loading && filtered.length === 0 && !error && (
-        <div className="text-center py-16">
-          <Bot className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 mb-1">No agents found</h3>
-          <p className="text-sm text-gray-500 mb-4">Get started by creating your first voice agent.</p>
-          <Button onClick={() => navigate('/agents/new')}>
+        <div className="text-center py-20 bg-white rounded-2xl border border-gray-100 shadow-card">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-50 to-accent-50 flex items-center justify-center mx-auto mb-4">
+            <Bot className="h-8 w-8 text-primary-400" />
+          </div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-1">No agents found</h3>
+          <p className="text-sm text-gray-500 mb-6 max-w-sm mx-auto">Get started by creating your first AI voice agent. It only takes a few minutes.</p>
+          <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-xl">
             <Plus className="h-4 w-4" />
-            Create Agent
+            Create Your First Agent
           </Button>
         </div>
       )}
@@ -190,23 +204,26 @@ export function AgentListPage() {
           {filtered.map((agent) => (
             <div
               key={agent.id}
-              className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-all cursor-pointer group"
+              className="bg-white rounded-xl border border-gray-100 p-5 hover:shadow-card-hover hover:-translate-y-0.5 transition-all duration-300 cursor-pointer group shadow-card"
               onClick={() => navigate(`/agents/${agent.id}`)}
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-primary-100 text-primary-600 flex items-center justify-center">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center">
                     <Bot className="h-5 w-5" />
                   </div>
                   <div>
                     <h3 className="font-semibold text-gray-900">{agent.name}</h3>
-                    <StatusBadge status={agent.status} />
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <StatusBadge status={agent.status} />
+                      <Badge variant="outline" className="text-[10px]">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge>
+                    </div>
                   </div>
                 </div>
                 <div onClick={(e) => e.stopPropagation()}>
                   <Dropdown
                     trigger={
-                      <button className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-all">
+                      <button className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-all">
                         <MoreVertical className="h-4 w-4" />
                       </button>
                     }
@@ -214,7 +231,9 @@ export function AgentListPage() {
                   />
                 </div>
               </div>
+
               <p className="text-sm text-gray-500 mb-4 line-clamp-2">{agent.description}</p>
+
               <div className="grid grid-cols-3 gap-3 pt-3 border-t border-gray-100">
                 <div className="text-center">
                   <div className="flex items-center justify-center gap-1 text-gray-400 mb-0.5">
@@ -242,39 +261,41 @@ export function AgentListPage() {
           ))}
         </div>
       ) : filtered.length > 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-card">
           <table className="w-full">
             <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Agent</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Calls</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Avg Duration</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Success Rate</th>
+              <tr className="border-b border-gray-100 bg-gray-50/50">
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Agent</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Provider</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Calls</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Avg Duration</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Success Rate</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-gray-50">
               {filtered.map((agent) => (
-                <tr key={agent.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
+                <tr key={agent.id} className="hover:bg-gray-50/50 cursor-pointer transition-colors" onClick={() => navigate(`/agents/${agent.id}`)}>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-primary-100 text-primary-600 flex items-center justify-center">
+                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center">
                         <Bot className="h-4 w-4" />
                       </div>
                       <div>
                         <p className="text-sm font-medium text-gray-900">{agent.name}</p>
-                        <p className="text-xs text-gray-500">{agent.description}</p>
+                        <p className="text-xs text-gray-500 line-clamp-1">{agent.description}</p>
                       </div>
                     </div>
                   </td>
                   <td className="px-4 py-3"><StatusBadge status={agent.status} /></td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{formatNumber(agent.totalCalls)}</td>
+                  <td className="px-4 py-3"><Badge variant="outline">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge></td>
+                  <td className="px-4 py-3 text-sm text-gray-700 font-medium">{formatNumber(agent.totalCalls)}</td>
                   <td className="px-4 py-3 text-sm text-gray-700">{Math.floor(agent.avgDuration / 60)}m {agent.avgDuration % 60}s</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{agent.successRate}%</td>
+                  <td className="px-4 py-3 text-sm text-gray-700 font-medium">{agent.successRate}%</td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <Dropdown
-                      trigger={<button className="p-1 text-gray-400 hover:text-gray-600"><MoreVertical className="h-4 w-4" /></button>}
+                      trigger={<button className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"><MoreVertical className="h-4 w-4" /></button>}
                       items={agentMenuItems(agent)}
                     />
                   </td>

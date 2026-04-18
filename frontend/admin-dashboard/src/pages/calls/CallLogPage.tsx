@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Download, ChevronLeft, ChevronRight, Loader2, AlertCircle } from 'lucide-react';
+import {
+  Search, Download, ChevronLeft, ChevronRight, Loader2, AlertCircle,
+  PhoneIncoming, PhoneOutgoing, Phone, Calendar,
+} from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/Badge';
@@ -56,7 +59,6 @@ export function CallLogPage() {
     } catch (err: any) {
       const message = err?.response?.data?.message || err?.message || 'Failed to load calls';
       setError(message);
-      // Fall back to mock data
       setCalls(mockCalls);
       setTotal(mockCalls.length);
     } finally {
@@ -64,15 +66,9 @@ export function CallLogPage() {
     }
   }, [page, search, outcomeFilter]);
 
-  useEffect(() => {
-    fetchCalls();
-  }, [fetchCalls]);
+  useEffect(() => { fetchCalls(); }, [fetchCalls]);
+  useEffect(() => { setPage(1); }, [search, outcomeFilter]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [search, outcomeFilter]);
-
-  // Client-side filter for mock fallback
   const displayed = error
     ? calls.filter((c) => {
         const matchSearch = !search || c.caller.toLowerCase().includes(search.toLowerCase()) ||
@@ -84,24 +80,42 @@ export function CallLogPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
+  const sentimentIcon = (s: string) => {
+    if (s === 'positive') return <span className="text-success-500">+</span>;
+    if (s === 'negative') return <span className="text-danger-500">-</span>;
+    return <span className="text-gray-400">~</span>;
+  };
+
   const columns = [
     {
       key: 'caller',
       label: 'Caller',
       sortable: true,
       render: (item: CallRow) => (
-        <div>
-          <p className="font-medium text-gray-900">{item.caller}</p>
-          <p className="text-xs text-gray-400">{item.callerPhone}</p>
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500 text-xs font-semibold">
+            {item.caller[0]}
+          </div>
+          <div>
+            <p className="font-medium text-gray-900 text-sm">{item.caller}</p>
+            <p className="text-xs text-gray-400 font-mono">{item.callerPhone}</p>
+          </div>
         </div>
       ),
     },
     { key: 'agentName', label: 'Agent', sortable: true },
     {
+      key: 'direction',
+      label: 'Dir.',
+      render: () => (
+        <PhoneIncoming className="h-4 w-4 text-success-500" />
+      ),
+    },
+    {
       key: 'duration',
       label: 'Duration',
       sortable: true,
-      render: (item: CallRow) => formatDuration(item.duration),
+      render: (item: CallRow) => <span className="font-mono text-sm">{formatDuration(item.duration)}</span>,
     },
     {
       key: 'outcome',
@@ -127,25 +141,31 @@ export function CallLogPage() {
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Call Log</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Call Logs</h1>
           <p className="text-sm text-gray-500 mt-1">View and analyze all call history</p>
         </div>
-        <Button variant="outline">
-          <Download className="h-4 w-4" />
-          Export
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button variant="outline" className="rounded-xl">
+            <Calendar className="h-4 w-4" />
+            Date Range
+          </Button>
+          <Button variant="outline" className="rounded-xl">
+            <Download className="h-4 w-4" />
+            Export
+          </Button>
+        </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span>Service unavailable: showing demo data. ({error})</span>
-          <button onClick={fetchCalls} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+          <button onClick={fetchCalls} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
         </div>
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-4 flex-wrap">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <input
@@ -153,13 +173,13 @@ export function CallLogPage() {
             placeholder="Search by caller or agent..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"
+            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
           />
         </div>
         <select
           value={outcomeFilter}
           onChange={(e) => setOutcomeFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
+          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
         >
           <option value="all">All Outcomes</option>
           <option value="completed">Completed</option>
@@ -173,10 +193,13 @@ export function CallLogPage() {
       {/* Table */}
       {loading ? (
         <div className="flex items-center justify-center h-64">
-          <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+          <div className="text-center">
+            <Loader2 className="h-8 w-8 animate-spin text-primary-600 mx-auto" />
+            <p className="text-sm text-gray-400 mt-3">Loading calls...</p>
+          </div>
         </div>
       ) : (
-        <Card padding={false}>
+        <Card padding={false} className="shadow-card">
           <Table
             columns={columns}
             data={displayed}
@@ -184,16 +207,16 @@ export function CallLogPage() {
           />
 
           {/* Pagination */}
-          <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between">
             <p className="text-sm text-gray-500">
               Showing {displayed.length} of {total} calls
             </p>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg">
                 <ChevronLeft className="h-4 w-4" />
               </Button>
               <span className="text-sm text-gray-700 px-2">Page {page} of {totalPages}</span>
-              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg">
                 <ChevronRight className="h-4 w-4" />
               </Button>
             </div>

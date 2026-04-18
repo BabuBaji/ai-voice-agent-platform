@@ -6,13 +6,14 @@ import { z } from 'zod';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
-import { Mic } from 'lucide-react';
+import { Mic, Eye, EyeOff } from 'lucide-react';
 
 const registerSchema = z
   .object({
     companyName: z.string().min(2, 'Company name is required'),
     name: z.string().min(2, 'Name is required'),
     email: z.string().email('Please enter a valid email'),
+    phone: z.string().optional(),
     password: z.string().min(8, 'Password must be at least 8 characters'),
     confirmPassword: z.string(),
   })
@@ -28,6 +29,7 @@ export function RegisterPage() {
   const { register: registerUser } = useAuth();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const {
     register,
@@ -52,22 +54,23 @@ export function RegisterPage() {
   };
 
   return (
-    <div>
-      <div className="lg:hidden flex items-center gap-2 mb-8">
-        <div className="w-9 h-9 rounded-lg bg-primary-600 flex items-center justify-center">
+    <div className="animate-fade-in">
+      {/* Mobile logo */}
+      <div className="lg:hidden flex items-center gap-2.5 mb-8">
+        <div className="w-9 h-9 rounded-xl bg-gradient-brand flex items-center justify-center">
           <Mic className="h-5 w-5 text-white" />
         </div>
-        <span className="text-lg font-bold text-gray-900">VoiceAgent</span>
+        <span className="text-lg font-bold text-gray-900">VoiceAgent AI</span>
       </div>
 
       <div>
         <h2 className="text-2xl font-bold text-gray-900">Create your account</h2>
-        <p className="text-sm text-gray-500 mt-1">Start building voice agents in minutes</p>
+        <p className="text-sm text-gray-500 mt-1">Start building voice agents for free</p>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="mt-8 space-y-4">
         {error && (
-          <div className="p-3 rounded-lg bg-danger-50 border border-danger-200 text-sm text-danger-700">
+          <div className="p-3 rounded-xl bg-danger-50 border border-danger-200 text-sm text-danger-700 animate-slide-down">
             {error}
           </div>
         )}
@@ -95,12 +98,29 @@ export function RegisterPage() {
         />
 
         <Input
-          label="Password"
-          type="password"
-          placeholder="Min. 8 characters"
-          {...register('password')}
-          error={errors.password?.message}
+          label="Phone Number"
+          type="tel"
+          placeholder="+1 (555) 123-4567"
+          {...register('phone')}
+          error={errors.phone?.message}
         />
+
+        <div className="relative">
+          <Input
+            label="Password"
+            type={showPassword ? 'text' : 'password'}
+            placeholder="Min. 8 characters"
+            {...register('password')}
+            error={errors.password?.message}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-3 top-[34px] text-gray-400 hover:text-gray-600 transition-colors"
+          >
+            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
 
         <Input
           label="Confirm Password"
@@ -110,15 +130,15 @@ export function RegisterPage() {
           error={errors.confirmPassword?.message}
         />
 
-        <Button type="submit" className="w-full" size="lg" loading={loading}>
-          Create account
+        <Button type="submit" variant="gradient" className="w-full rounded-xl" size="lg" loading={loading}>
+          Create Account
         </Button>
       </form>
 
       <p className="mt-6 text-center text-sm text-gray-500">
         Already have an account?{' '}
-        <Link to="/login" className="text-primary-600 hover:text-primary-700 font-medium">
-          Sign in
+        <Link to="/login" className="text-primary-600 hover:text-primary-700 font-semibold">
+          Log in
         </Link>
       </p>
     </div>

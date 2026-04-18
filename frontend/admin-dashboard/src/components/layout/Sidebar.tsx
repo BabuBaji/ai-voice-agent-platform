@@ -1,29 +1,22 @@
 import React, { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Bot,
-  Phone,
-  Users,
-  BookOpen,
-  Workflow,
-  BarChart3,
-  Settings,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Mic,
+  LayoutDashboard, Bot, Phone, Users, BookOpen, Workflow,
+  BarChart3, Settings, ChevronDown, ChevronLeft, ChevronRight,
+  Mic, MessageSquare, Sparkles, Crown,
 } from 'lucide-react';
+import { useAuthStore } from '@/stores/auth.store';
 
 const iconMap: Record<string, React.ReactNode> = {
-  LayoutDashboard: <LayoutDashboard className="h-5 w-5" />,
-  Bot: <Bot className="h-5 w-5" />,
-  Phone: <Phone className="h-5 w-5" />,
-  Users: <Users className="h-5 w-5" />,
-  BookOpen: <BookOpen className="h-5 w-5" />,
-  Workflow: <Workflow className="h-5 w-5" />,
-  BarChart3: <BarChart3 className="h-5 w-5" />,
-  Settings: <Settings className="h-5 w-5" />,
+  LayoutDashboard: <LayoutDashboard className="h-[18px] w-[18px]" />,
+  Bot: <Bot className="h-[18px] w-[18px]" />,
+  Phone: <Phone className="h-[18px] w-[18px]" />,
+  Users: <Users className="h-[18px] w-[18px]" />,
+  BookOpen: <BookOpen className="h-[18px] w-[18px]" />,
+  Workflow: <Workflow className="h-[18px] w-[18px]" />,
+  BarChart3: <BarChart3 className="h-[18px] w-[18px]" />,
+  Settings: <Settings className="h-[18px] w-[18px]" />,
+  MessageSquare: <MessageSquare className="h-[18px] w-[18px]" />,
 };
 
 interface NavItem {
@@ -36,7 +29,10 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: 'Dashboard', path: '/', icon: 'LayoutDashboard' },
   { label: 'Agents', path: '/agents', icon: 'Bot' },
-  { label: 'Calls', path: '/calls', icon: 'Phone' },
+  { label: 'Phone Numbers', path: '/settings/phone-numbers', icon: 'Phone' },
+  { label: 'Call Logs', path: '/calls', icon: 'Phone' },
+  { label: 'Conversations', path: '/calls', icon: 'MessageSquare' },
+  { label: 'Knowledge Base', path: '/knowledge', icon: 'BookOpen' },
   {
     label: 'CRM',
     icon: 'Users',
@@ -46,7 +42,6 @@ const navItems: NavItem[] = [
       { label: 'Pipeline', path: '/crm/pipeline' },
     ],
   },
-  { label: 'Knowledge', path: '/knowledge', icon: 'BookOpen' },
   { label: 'Workflows', path: '/workflows', icon: 'Workflow' },
   { label: 'Analytics', path: '/analytics', icon: 'BarChart3' },
   { label: 'Settings', path: '/settings', icon: 'Settings' },
@@ -59,6 +54,7 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const location = useLocation();
+  const user = useAuthStore((s) => s.user);
   const [expandedGroups, setExpandedGroups] = useState<string[]>(['CRM']);
 
   const toggleGroup = (label: string) => {
@@ -79,28 +75,28 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
   return (
     <aside
-      className={`fixed left-0 top-0 h-full bg-sidebar-bg text-sidebar-text z-30 transition-all duration-300 flex flex-col ${
+      className={`fixed left-0 top-0 h-full bg-sidebar-bg z-30 transition-all duration-300 flex flex-col ${
         collapsed ? 'w-[72px]' : 'w-[260px]'
       }`}
     >
       {/* Logo */}
-      <div className="h-16 flex items-center px-4 border-b border-white/10">
+      <div className="h-16 flex items-center px-4 border-b border-sidebar-border">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-primary-600 flex items-center justify-center flex-shrink-0">
+          <div className="w-9 h-9 rounded-xl bg-gradient-brand flex items-center justify-center flex-shrink-0 shadow-glow">
             <Mic className="h-5 w-5 text-white" />
           </div>
           {!collapsed && (
             <div>
-              <h1 className="text-white font-bold text-sm">VoiceAgent</h1>
-              <p className="text-[10px] text-sidebar-text opacity-70">AI Platform</p>
+              <h1 className="text-white font-bold text-sm tracking-tight">VoiceAgent AI</h1>
+              <p className="text-[10px] text-sidebar-text opacity-60">Enterprise Platform</p>
             </div>
           )}
         </div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 py-4 overflow-y-auto scrollbar-thin">
-        <ul className="space-y-1 px-3">
+      <nav className="flex-1 py-4 overflow-y-auto scrollbar-thin scrollbar-dark">
+        <ul className="space-y-0.5 px-3">
           {navItems.map((item) => {
             if (item.children) {
               const groupActive = isGroupActive(item.children);
@@ -110,9 +106,9 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 <li key={item.label}>
                   <button
                     onClick={() => !collapsed && toggleGroup(item.label)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
                       groupActive
-                        ? 'text-white bg-sidebar-hover'
+                        ? 'text-white bg-sidebar-active'
                         : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
                     }`}
                   >
@@ -121,20 +117,20 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                       <>
                         <span className="flex-1 text-left">{item.label}</span>
                         <ChevronDown
-                          className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                          className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
                         />
                       </>
                     )}
                   </button>
                   {!collapsed && isExpanded && (
-                    <ul className="mt-1 ml-5 pl-4 border-l border-white/10 space-y-1">
+                    <ul className="mt-1 ml-5 pl-4 border-l border-sidebar-border space-y-0.5">
                       {item.children.map((child) => (
                         <li key={child.path}>
                           <NavLink
                             to={child.path}
-                            className={`block px-3 py-2 rounded-lg text-sm transition-colors ${
+                            className={`block px-3 py-2 rounded-lg text-sm transition-all duration-200 ${
                               isActive(child.path)
-                                ? 'text-white bg-primary-600/30'
+                                ? 'text-white bg-primary-600/20 font-medium'
                                 : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
                             }`}
                           >
@@ -149,10 +145,10 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             }
 
             return (
-              <li key={item.path}>
+              <li key={item.label}>
                 <NavLink
                   to={item.path!}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
                     isActive(item.path)
                       ? 'text-white bg-sidebar-active'
                       : 'text-sidebar-text hover:text-white hover:bg-sidebar-hover'
@@ -167,11 +163,40 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </ul>
       </nav>
 
-      {/* Collapse toggle */}
-      <div className="p-3 border-t border-white/10">
+      {/* Upgrade card */}
+      {!collapsed && (
+        <div className="px-3 pb-2">
+          <div className="p-4 rounded-xl bg-gradient-to-r from-primary-600/20 to-accent-600/20 border border-primary-500/20">
+            <div className="flex items-center gap-2 mb-2">
+              <Crown className="h-4 w-4 text-yellow-400" />
+              <span className="text-xs font-semibold text-white">Upgrade to Pro</span>
+            </div>
+            <p className="text-[11px] text-gray-400 mb-3">Get unlimited agents, calls, and premium features.</p>
+            <button className="w-full py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors">
+              View Plans
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* User + Collapse */}
+      <div className="p-3 border-t border-sidebar-border">
+        {/* User */}
+        {!collapsed && user && (
+          <div className="flex items-center gap-3 px-3 py-2 mb-2">
+            <div className="w-8 h-8 rounded-full bg-gradient-brand flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">
+              {(user.name || 'A')[0].toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-white truncate">{user.name || 'Admin'}</p>
+              <p className="text-[11px] text-sidebar-text truncate">{user.email || ''}</p>
+            </div>
+          </div>
+        )}
+
         <button
           onClick={onToggle}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sidebar-text hover:text-white hover:bg-sidebar-hover transition-colors text-sm"
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sidebar-text hover:text-white hover:bg-sidebar-hover transition-all duration-200 text-sm"
         >
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           {!collapsed && <span>Collapse</span>}

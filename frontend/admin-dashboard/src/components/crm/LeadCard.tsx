@@ -13,7 +13,7 @@ export function LeadCard({ lead, onClick }: LeadCardProps) {
   return (
     <div
       onClick={onClick}
-      className="p-4 bg-white rounded-lg border border-gray-200 hover:shadow-md transition-all cursor-pointer"
+      className="p-4 bg-white rounded-xl border border-gray-100 hover:shadow-card-hover hover:-translate-y-0.5 transition-all duration-300 cursor-pointer shadow-card"
     >
       <div className="flex items-start justify-between mb-2">
         <h4 className="text-sm font-semibold text-gray-900">{lead.name}</h4>

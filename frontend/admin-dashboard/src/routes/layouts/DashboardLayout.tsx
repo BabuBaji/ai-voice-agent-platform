@@ -7,7 +7,7 @@ export function DashboardLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-dashboard-bg">
       <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
       <div
         className={`transition-all duration-300 ${
@@ -15,7 +15,7 @@ export function DashboardLayout() {
         }`}
       >
         <Header />
-        <main className="p-6">
+        <main className="p-6 animate-fade-in">
           <Outlet />
         </main>
       </div>

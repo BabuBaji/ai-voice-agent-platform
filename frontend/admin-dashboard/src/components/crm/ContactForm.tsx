@@ -47,10 +47,10 @@ export function ContactForm({ initialData, onSubmit, onCancel, isLoading }: Cont
       <Input label="Job Title" {...register('title')} error={errors.title?.message} />
 
       <div className="flex justify-end gap-3 pt-4">
-        <Button type="button" variant="outline" onClick={onCancel}>
+        <Button type="button" variant="outline" onClick={onCancel} className="rounded-xl">
           Cancel
         </Button>
-        <Button type="submit" loading={isLoading}>
+        <Button type="submit" variant="gradient" loading={isLoading} className="rounded-xl">
           {initialData ? 'Update Contact' : 'Create Contact'}
         </Button>
       </div>

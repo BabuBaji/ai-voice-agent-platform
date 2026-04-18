@@ -1,16 +1,21 @@
 import { useState, useEffect } from 'react';
-import { Phone, Bot, Users, TrendingUp, ArrowUpRight, ArrowDownRight, Loader2, AlertCircle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Phone, Bot, Users, TrendingUp, ArrowUpRight, ArrowDownRight,
+  Loader2, AlertCircle, Plus, Upload, BarChart3, Sparkles,
+} from 'lucide-react';
 import { StatCard, Card, CardHeader } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Table } from '@/components/ui/Table';
 import { formatDuration, formatDate, timeAgo } from '@/utils/formatters';
+import { useAuthStore } from '@/stores/auth.store';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import api from '@/services/api';
 import { callApi } from '@/services/call.api';
 
-// Mock/fallback data
 const defaultChartData = [
   { date: 'Mon', calls: 0 },
   { date: 'Tue', calls: 0 },
@@ -67,6 +72,19 @@ interface RecentCall {
   createdAt: string;
 }
 
+function getGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+const quickActions = [
+  { label: 'Create Agent', icon: Plus, path: '/agents/new', color: 'from-primary-600 to-primary-700' },
+  { label: 'Import Leads', icon: Upload, path: '/crm/leads', color: 'from-accent-600 to-accent-700' },
+  { label: 'View Analytics', icon: BarChart3, path: '/analytics', color: 'from-success-600 to-success-700' },
+];
+
 const callColumns = [
   { key: 'caller', label: 'Caller', sortable: true },
   { key: 'agentName', label: 'Agent', sortable: true },
@@ -74,7 +92,9 @@ const callColumns = [
     key: 'duration',
     label: 'Duration',
     sortable: true,
-    render: (item: RecentCall) => formatDuration(item.duration),
+    render: (item: RecentCall) => (
+      <span className="font-mono text-sm">{formatDuration(item.duration)}</span>
+    ),
   },
   {
     key: 'outcome',
@@ -90,12 +110,14 @@ const callColumns = [
     key: 'createdAt',
     label: 'Time',
     render: (item: RecentCall) => (
-      <span className="text-gray-500">{timeAgo(item.createdAt)}</span>
+      <span className="text-gray-500 text-sm">{timeAgo(item.createdAt)}</span>
     ),
   },
 ];
 
 export function DashboardPage() {
+  const user = useAuthStore((s) => s.user);
+  const navigate = useNavigate();
   const [stats, setStats] = useState<DashboardStats>(defaultStats);
   const [chartData, setChartData] = useState(defaultChartData);
   const [recentCalls, setRecentCalls] = useState<RecentCall[]>([]);
@@ -110,7 +132,6 @@ export function DashboardPage() {
     setLoading(true);
     setError('');
 
-    // Fetch analytics and recent calls in parallel, gracefully handle failures
     const results = await Promise.allSettled([
       api.get('/analytics/dashboard').then((r) => r.data),
       callApi.list({ page: 1, limit: 5 }),
@@ -152,25 +173,48 @@ export function DashboardPage() {
   };
 
   const formatStatValue = (val: number) => val.toLocaleString();
+  const firstName = user?.name?.split(' ')[0] || 'there';
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-sm text-gray-500 mt-1">Welcome back. Here is what is happening today.</p>
+      {/* Welcome header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {getGreeting()}, {firstName}!
+          </h1>
+          <p className="text-sm text-gray-500 mt-1">Here is what is happening with your voice agents today.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {quickActions.map((action) => (
+            <Button
+              key={action.label}
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(action.path)}
+              className="hidden md:inline-flex"
+            >
+              <action.icon className="h-4 w-4" />
+              {action.label}
+            </Button>
+          ))}
+        </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span>{error}</span>
-          <button onClick={fetchDashboardData} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+          <button onClick={fetchDashboardData} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
         </div>
       )}
 
       {loading ? (
         <div className="flex items-center justify-center h-64">
-          <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+          <div className="text-center">
+            <Loader2 className="h-8 w-8 animate-spin text-primary-600 mx-auto" />
+            <p className="text-sm text-gray-400 mt-3">Loading dashboard...</p>
+          </div>
         </div>
       ) : (
         <>
@@ -213,70 +257,62 @@ export function DashboardPage() {
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
+                    <defs>
+                      <linearGradient id="callsGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.1}/>
+                        <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                     <XAxis dataKey="date" tick={{ fontSize: 12 }} stroke="#94a3b8" />
                     <YAxis tick={{ fontSize: 12 }} stroke="#94a3b8" />
                     <Tooltip
                       contentStyle={{
-                        borderRadius: '8px',
+                        borderRadius: '12px',
                         border: '1px solid #e2e8f0',
-                        boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
+                        boxShadow: '0 10px 25px rgba(0,0,0,0.08)',
+                        padding: '8px 12px',
                       }}
                     />
                     <Line
                       type="monotone"
                       dataKey="calls"
-                      stroke="#2563eb"
+                      stroke="#4f46e5"
                       strokeWidth={2.5}
-                      dot={{ r: 4, fill: '#2563eb' }}
-                      activeDot={{ r: 6 }}
+                      dot={{ r: 4, fill: '#4f46e5', strokeWidth: 2, stroke: '#fff' }}
+                      activeDot={{ r: 6, fill: '#4f46e5', stroke: '#fff', strokeWidth: 2 }}
+                      fill="url(#callsGradient)"
                     />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
             </Card>
 
-            {/* Quick stats */}
+            {/* Performance */}
             <Card>
               <CardHeader title="Performance" subtitle="This month" />
               <div className="space-y-5">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm text-gray-600">Avg. Call Duration</span>
-                    <span className="text-sm font-semibold text-gray-900">{stats.avgDuration}</span>
+                {[
+                  { label: 'Avg. Call Duration', value: stats.avgDuration, pct: stats.avgDurationPct, color: 'bg-primary-500' },
+                  { label: 'Resolution Rate', value: `${stats.resolutionRate}%`, pct: stats.resolutionRate, color: 'bg-success-500' },
+                  { label: 'Transfer Rate', value: `${stats.transferRate}%`, pct: stats.transferRate, color: 'bg-warning-500' },
+                  { label: 'Positive Sentiment', value: `${stats.positiveSentiment}%`, pct: stats.positiveSentiment, color: 'bg-accent-500' },
+                ].map((metric) => (
+                  <div key={metric.label}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-sm text-gray-600">{metric.label}</span>
+                      <span className="text-sm font-semibold text-gray-900">{metric.value}</span>
+                    </div>
+                    <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-2 ${metric.color} rounded-full transition-all duration-1000`}
+                        style={{ width: `${Math.min(metric.pct, 100)}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="w-full h-2 bg-gray-100 rounded-full">
-                    <div className="h-2 bg-primary-500 rounded-full" style={{ width: `${stats.avgDurationPct}%` }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm text-gray-600">Resolution Rate</span>
-                    <span className="text-sm font-semibold text-gray-900">{stats.resolutionRate}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-gray-100 rounded-full">
-                    <div className="h-2 bg-success-500 rounded-full" style={{ width: `${stats.resolutionRate}%` }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm text-gray-600">Transfer Rate</span>
-                    <span className="text-sm font-semibold text-gray-900">{stats.transferRate}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-gray-100 rounded-full">
-                    <div className="h-2 bg-warning-500 rounded-full" style={{ width: `${stats.transferRate}%` }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm text-gray-600">Positive Sentiment</span>
-                    <span className="text-sm font-semibold text-gray-900">{stats.positiveSentiment}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-gray-100 rounded-full">
-                    <div className="h-2 bg-primary-500 rounded-full" style={{ width: `${stats.positiveSentiment}%` }} />
-                  </div>
-                </div>
-                <div className="pt-3 border-t border-gray-100 space-y-2">
+                ))}
+
+                <div className="pt-3 border-t border-gray-100 space-y-2.5">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-gray-500">Revenue Generated</span>
                     <div className="flex items-center gap-1 text-success-600 font-semibold">
@@ -296,16 +332,21 @@ export function DashboardPage() {
             </Card>
           </div>
 
-          {/* Recent calls table */}
+          {/* Recent calls */}
           <Card padding={false}>
-            <div className="px-6 py-4 border-b border-gray-200">
-              <CardHeader title="Recent Calls" subtitle="Latest incoming and outgoing calls" />
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <CardHeader title="Recent Calls" subtitle="Latest incoming and outgoing calls" className="mb-0" />
+              <Button variant="ghost" size="sm" onClick={() => navigate('/calls')}>
+                View All
+              </Button>
             </div>
             {recentCalls.length > 0 ? (
-              <Table columns={callColumns} data={recentCalls} />
+              <Table columns={callColumns} data={recentCalls} onRowClick={(item) => navigate(`/calls/${item.id}`)} />
             ) : (
-              <div className="px-6 py-12 text-center text-sm text-gray-500">
-                No recent calls to display.
+              <div className="px-6 py-16 text-center">
+                <Phone className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                <p className="text-sm text-gray-500 font-medium">No recent calls</p>
+                <p className="text-xs text-gray-400 mt-1">Calls will appear here once your agents start handling them.</p>
               </div>
             )}
           </Card>

@@ -30,14 +30,8 @@ export function useAuth() {
 
   const getCurrentUser = async () => {
     if (user) return user;
-    try {
-      const currentUser = await authApi.getCurrentUser();
-      setUser(currentUser);
-      return currentUser;
-    } catch {
-      clearAuth();
-      return null;
-    }
+    clearAuth();
+    return null;
   };
 
   return { user, token: accessToken, isAuthenticated, login, register, logout, getCurrentUser };

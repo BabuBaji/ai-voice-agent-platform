@@ -20,32 +20,26 @@ export function KnowledgeAttacher({ attachedIds, onAttach, onDetach }: Knowledge
 
   return (
     <div className="space-y-6">
-      {/* Attached */}
       <div>
         <h4 className="text-sm font-medium text-gray-700 mb-3">Attached Knowledge Bases</h4>
         {attached.length === 0 ? (
-          <p className="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-300 rounded-lg">
+          <p className="text-sm text-gray-400 py-6 text-center border border-dashed border-gray-200 rounded-xl">
             No knowledge bases attached yet
           </p>
         ) : (
           <div className="space-y-2">
             {attached.map((kb) => (
-              <div
-                key={kb.id}
-                className="flex items-center justify-between p-3 rounded-lg bg-primary-50 border border-primary-200"
-              >
+              <div key={kb.id} className="flex items-center justify-between p-3.5 rounded-xl bg-primary-50/50 border border-primary-200">
                 <div className="flex items-center gap-3">
-                  <BookOpen className="h-4 w-4 text-primary-600" />
+                  <div className="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center">
+                    <BookOpen className="h-4 w-4 text-primary-600" />
+                  </div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">{kb.name}</p>
                     <p className="text-xs text-gray-500">{kb.documentCount} documents</p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onDetach(kb.id)}
-                  className="p-1 text-gray-400 hover:text-danger-600 transition-colors"
-                >
+                <button type="button" onClick={() => onDetach(kb.id)} className="p-1.5 text-gray-400 hover:text-danger-600 rounded-lg hover:bg-danger-50 transition-colors">
                   <X className="h-4 w-4" />
                 </button>
               </div>
@@ -54,32 +48,23 @@ export function KnowledgeAttacher({ attachedIds, onAttach, onDetach }: Knowledge
         )}
       </div>
 
-      {/* Available */}
       {available.length > 0 && (
         <div>
           <h4 className="text-sm font-medium text-gray-700 mb-3">Available Knowledge Bases</h4>
           <div className="space-y-2">
             {available.map((kb) => (
-              <div
-                key={kb.id}
-                className="flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-gray-300 transition-colors"
-              >
+              <div key={kb.id} className="flex items-center justify-between p-3.5 rounded-xl border border-gray-100 hover:border-gray-200 transition-all shadow-card">
                 <div className="flex items-center gap-3">
-                  <BookOpen className="h-4 w-4 text-gray-400" />
+                  <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center">
+                    <BookOpen className="h-4 w-4 text-gray-400" />
+                  </div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">{kb.name}</p>
                     <p className="text-xs text-gray-500">{kb.documentCount} documents</p>
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onAttach(kb.id)}
-                  disabled={kb.status !== 'ready'}
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Attach
+                <Button type="button" variant="outline" size="sm" onClick={() => onAttach(kb.id)} disabled={kb.status !== 'ready'} className="rounded-lg">
+                  <Plus className="h-3.5 w-3.5" />Attach
                 </Button>
               </div>
             ))}

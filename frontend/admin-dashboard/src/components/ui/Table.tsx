@@ -47,12 +47,12 @@ export function Table<T extends { id?: string }>({
     <div className="overflow-x-auto">
       <table className="w-full">
         <thead>
-          <tr className="border-b border-gray-200 bg-gray-50">
+          <tr className="border-b border-gray-100 bg-gray-50/50">
             {columns.map((col) => (
               <th
                 key={col.key}
                 className={`px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider ${
-                  col.sortable ? 'cursor-pointer select-none hover:text-gray-700' : ''
+                  col.sortable ? 'cursor-pointer select-none hover:text-gray-700 transition-colors' : ''
                 } ${col.className || ''}`}
                 onClick={() => col.sortable && handleSort(col.key)}
               >
@@ -76,10 +76,10 @@ export function Table<T extends { id?: string }>({
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-gray-100">
+        <tbody className="divide-y divide-gray-50">
           {sortedData.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} className="px-4 py-12 text-center text-gray-500">
+              <td colSpan={columns.length} className="px-4 py-16 text-center text-gray-400">
                 {emptyMessage}
               </td>
             </tr>
@@ -87,7 +87,7 @@ export function Table<T extends { id?: string }>({
             sortedData.map((item, idx) => (
               <tr
                 key={(item as Record<string, unknown>).id as string || idx}
-                className={`hover:bg-gray-50 transition-colors ${onRowClick ? 'cursor-pointer' : ''}`}
+                className={`hover:bg-gray-50/50 transition-colors ${onRowClick ? 'cursor-pointer' : ''}`}
                 onClick={() => onRowClick?.(item)}
               >
                 {columns.map((col) => (

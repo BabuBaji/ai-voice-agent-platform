@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Plus, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
-import { Card, CardHeader } from '@/components/ui/Card';
+import { Card } from '@/components/ui/Card';
 import { Table } from '@/components/ui/Table';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
@@ -41,7 +41,9 @@ export function PhoneNumbersPage() {
       label: 'Phone Number',
       render: (item: PhoneNumber) => (
         <div className="flex items-center gap-2">
-          <Phone className="h-4 w-4 text-gray-400" />
+          <div className="w-8 h-8 rounded-lg bg-primary-50 flex items-center justify-center">
+            <Phone className="h-4 w-4 text-primary-500" />
+          </div>
           <span className="font-mono font-medium text-gray-900">{formatPhone(item.number)}</span>
         </div>
       ),
@@ -59,13 +61,12 @@ export function PhoneNumbersPage() {
       key: 'agentName',
       label: 'Assigned Agent',
       render: (item: PhoneNumber) => (
-        <span className="text-sm text-gray-700">{item.agentName || 'Unassigned'}</span>
+        <span className={`text-sm ${item.agentName ? 'text-gray-700 font-medium' : 'text-gray-400'}`}>
+          {item.agentName || 'Unassigned'}
+        </span>
       ),
     },
-    {
-      key: 'country',
-      label: 'Country',
-    },
+    { key: 'country', label: 'Country' },
     {
       key: 'status',
       label: 'Status',
@@ -89,8 +90,8 @@ export function PhoneNumbersPage() {
                   to={item.path}
                   end={item.end}
                   className={({ isActive }) =>
-                    `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      isActive ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-100'
+                    `flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${
+                      isActive ? 'bg-primary-50 text-primary-700 shadow-sm' : 'text-gray-600 hover:bg-gray-50'
                     }`
                   }
                 >
@@ -103,15 +104,15 @@ export function PhoneNumbersPage() {
         </nav>
 
         <div className="flex-1">
-          <Card padding={false}>
-            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <Card padding={false} className="shadow-card">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Phone Numbers</h3>
                 <p className="text-sm text-gray-500">Manage phone numbers and assign them to agents</p>
               </div>
-              <Button size="sm" onClick={() => setShowAddModal(true)}>
+              <Button variant="gradient" size="sm" onClick={() => setShowAddModal(true)} className="rounded-xl">
                 <Plus className="h-4 w-4" />
-                Add Number
+                Buy Number
               </Button>
             </div>
             <Table columns={columns} data={mockNumbers} />
@@ -134,8 +135,8 @@ export function PhoneNumbersPage() {
             { value: '3', label: 'Booking Agent' },
           ]} />
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setShowAddModal(false)}>Cancel</Button>
-            <Button onClick={() => setShowAddModal(false)}>Add Number</Button>
+            <Button variant="outline" onClick={() => setShowAddModal(false)} className="rounded-xl">Cancel</Button>
+            <Button variant="gradient" onClick={() => setShowAddModal(false)} className="rounded-xl">Add Number</Button>
           </div>
         </div>
       </Modal>

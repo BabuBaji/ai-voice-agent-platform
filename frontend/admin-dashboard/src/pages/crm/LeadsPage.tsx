@@ -21,11 +21,7 @@ const mockLeads: Lead[] = [
 ];
 
 const sourceLabels: Record<string, string> = {
-  'inbound-call': 'Inbound Call',
-  website: 'Website',
-  referral: 'Referral',
-  outbound: 'Outbound',
-  campaign: 'Campaign',
+  'inbound-call': 'Inbound Call', website: 'Website', referral: 'Referral', outbound: 'Outbound', campaign: 'Campaign',
 };
 
 export function LeadsPage() {
@@ -55,7 +51,6 @@ export function LeadsPage() {
     } catch (err: any) {
       const message = err?.response?.data?.message || err?.message || 'Failed to load leads';
       setError(message);
-      // Fall back to mock data
       setLeads(mockLeads);
       setTotal(mockLeads.length);
     } finally {
@@ -63,16 +58,9 @@ export function LeadsPage() {
     }
   }, [page, statusFilter, sourceFilter, search]);
 
-  useEffect(() => {
-    fetchLeads();
-  }, [fetchLeads]);
+  useEffect(() => { fetchLeads(); }, [fetchLeads]);
+  useEffect(() => { setPage(1); }, [statusFilter, sourceFilter, search]);
 
-  // When filters change, reset to page 1
-  useEffect(() => {
-    setPage(1);
-  }, [statusFilter, sourceFilter, search]);
-
-  // Client-side filter for mock data fallback (API handles filtering server-side)
   const displayed = error
     ? leads.filter((l) => {
         const matchSearch = !search || l.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -88,94 +76,59 @@ export function LeadsPage() {
     setSelectedIds((prev) => prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]);
   };
 
-  const toggleAll = () => {
-    setSelectedIds((prev) => prev.length === displayed.length ? [] : displayed.map((l) => l.id));
-  };
-
   const handleDeleteSelected = async () => {
     if (!confirm(`Delete ${selectedIds.length} lead(s)?`)) return;
     try {
       await Promise.all(selectedIds.map((id) => crmApi.deleteLead(id)));
       setSelectedIds([]);
       fetchLeads();
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   };
 
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
   const columns = [
     {
-      key: 'select',
-      label: '',
-      className: 'w-10',
+      key: 'select', label: '', className: 'w-10',
       render: (item: Lead) => (
-        <input
-          type="checkbox"
-          checked={selectedIds.includes(item.id)}
+        <input type="checkbox" checked={selectedIds.includes(item.id)}
           onChange={(e) => { e.stopPropagation(); toggleSelect(item.id); }}
-          className="rounded border-gray-300 text-primary-600"
-        />
+          className="rounded border-gray-300 text-primary-600" />
       ),
     },
     {
-      key: 'name',
-      label: 'Lead',
-      sortable: true,
+      key: 'name', label: 'Lead', sortable: true,
       render: (item: Lead) => (
-        <div>
-          <p className="font-medium text-gray-900">{item.name}</p>
-          <p className="text-xs text-gray-400">{item.company}</p>
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 text-primary-600 flex items-center justify-center text-xs font-semibold">
+            {item.name[0]}
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">{item.name}</p>
+            <p className="text-xs text-gray-400">{item.company}</p>
+          </div>
         </div>
       ),
     },
     { key: 'email', label: 'Email', sortable: true },
+    { key: 'status', label: 'Status', render: (item: Lead) => <StatusBadge status={item.status} /> },
+    { key: 'source', label: 'Source', render: (item: Lead) => <Badge variant="outline">{sourceLabels[item.source] || item.source}</Badge> },
     {
-      key: 'status',
-      label: 'Status',
-      render: (item: Lead) => <StatusBadge status={item.status} />,
-    },
-    {
-      key: 'source',
-      label: 'Source',
-      render: (item: Lead) => (
-        <Badge variant="default">{sourceLabels[item.source] || item.source}</Badge>
-      ),
-    },
-    {
-      key: 'score',
-      label: 'Score',
-      sortable: true,
+      key: 'score', label: 'Score', sortable: true,
       render: (item: Lead) => {
         const color = item.score >= 80 ? 'text-success-600' : item.score >= 50 ? 'text-warning-600' : 'text-gray-400';
         return (
           <div className="flex items-center gap-2">
-            <div className="w-12 h-1.5 bg-gray-100 rounded-full">
-              <div
-                className={`h-full rounded-full ${item.score >= 80 ? 'bg-success-500' : item.score >= 50 ? 'bg-warning-500' : 'bg-gray-300'}`}
-                style={{ width: `${item.score}%` }}
-              />
+            <div className="w-12 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div className={`h-full rounded-full ${item.score >= 80 ? 'bg-success-500' : item.score >= 50 ? 'bg-warning-500' : 'bg-gray-300'}`} style={{ width: `${item.score}%` }} />
             </div>
-            <span className={`text-sm font-medium ${color}`}>{item.score}</span>
+            <span className={`text-sm font-semibold ${color}`}>{item.score}</span>
           </div>
         );
       },
     },
-    {
-      key: 'value',
-      label: 'Value',
-      sortable: true,
-      render: (item: Lead) => (
-        <span className="text-sm font-medium">{item.value > 0 ? formatCurrency(item.value) : '--'}</span>
-      ),
-    },
-    {
-      key: 'createdAt',
-      label: 'Created',
-      sortable: true,
-      render: (item: Lead) => <span className="text-sm text-gray-500">{formatDate(item.createdAt)}</span>,
-    },
+    { key: 'value', label: 'Value', sortable: true, render: (item: Lead) => <span className="text-sm font-medium">{item.value > 0 ? formatCurrency(item.value) : '--'}</span> },
+    { key: 'createdAt', label: 'Created', sortable: true, render: (item: Lead) => <span className="text-sm text-gray-500">{formatDate(item.createdAt)}</span> },
   ];
 
   return (
@@ -186,69 +139,44 @@ export function LeadsPage() {
           <p className="text-sm text-gray-500 mt-1">Manage and track your sales leads</p>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="outline">
-            <Download className="h-4 w-4" />
-            Export
-          </Button>
-          <Button>
-            <Plus className="h-4 w-4" />
-            Add Lead
-          </Button>
+          <Button variant="outline" className="rounded-xl"><Download className="h-4 w-4" />Export</Button>
+          <Button variant="gradient" className="rounded-xl"><Plus className="h-4 w-4" />Add Lead</Button>
         </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span>Service unavailable: showing demo data. ({error})</span>
-          <button onClick={fetchLeads} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+          <button onClick={fetchLeads} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
         </div>
       )}
 
-      {/* Filters */}
       <div className="flex items-center gap-4 flex-wrap">
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search leads..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"
-          />
+          <input type="text" placeholder="Search leads..." value={search} onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all" />
         </div>
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
-        >
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100">
           <option value="all">All Status</option>
-          <option value="new">New</option>
-          <option value="contacted">Contacted</option>
-          <option value="qualified">Qualified</option>
-          <option value="proposal">Proposal</option>
-          <option value="won">Won</option>
-          <option value="lost">Lost</option>
+          <option value="new">New</option><option value="contacted">Contacted</option>
+          <option value="qualified">Qualified</option><option value="proposal">Proposal</option>
+          <option value="won">Won</option><option value="lost">Lost</option>
         </select>
-        <select
-          value={sourceFilter}
-          onChange={(e) => setSourceFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
-        >
+        <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
+          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100">
           <option value="all">All Sources</option>
-          <option value="inbound-call">Inbound Call</option>
-          <option value="website">Website</option>
-          <option value="referral">Referral</option>
-          <option value="outbound">Outbound</option>
+          <option value="inbound-call">Inbound Call</option><option value="website">Website</option>
+          <option value="referral">Referral</option><option value="outbound">Outbound</option>
           <option value="campaign">Campaign</option>
         </select>
-
         {selectedIds.length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
             <span className="text-sm text-gray-500">{selectedIds.length} selected</span>
-            <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
+            <Button variant="danger" size="sm" onClick={handleDeleteSelected} className="rounded-lg">
+              <Trash2 className="h-3.5 w-3.5" />Delete
             </Button>
           </div>
         )}
@@ -259,26 +187,14 @@ export function LeadsPage() {
           <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
         </div>
       ) : (
-        <Card padding={false}>
-          <Table
-            columns={columns}
-            data={displayed}
-            onRowClick={(item) => navigate(`/crm/leads/${item.id}`)}
-          />
-
-          {/* Pagination */}
-          <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
-            <p className="text-sm text-gray-500">
-              Showing {displayed.length} of {total} leads
-            </p>
+        <Card padding={false} className="shadow-card">
+          <Table columns={columns} data={displayed} onRowClick={(item) => navigate(`/crm/leads/${item.id}`)} />
+          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between">
+            <p className="text-sm text-gray-500">Showing {displayed.length} of {total} leads</p>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg"><ChevronLeft className="h-4 w-4" /></Button>
               <span className="text-sm text-gray-700 px-2">Page {page} of {totalPages}</span>
-              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
-                <ChevronRight className="h-4 w-4" />
-              </Button>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg"><ChevronRight className="h-4 w-4" /></Button>
             </div>
           </div>
         </Card>

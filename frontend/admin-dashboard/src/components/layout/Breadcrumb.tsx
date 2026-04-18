@@ -4,12 +4,12 @@ import { ChevronRight, Home } from 'lucide-react';
 const pathLabels: Record<string, string> = {
   '': 'Dashboard',
   agents: 'Agents',
-  calls: 'Calls',
+  calls: 'Call Logs',
   crm: 'CRM',
   leads: 'Leads',
   contacts: 'Contacts',
   pipeline: 'Pipeline',
-  knowledge: 'Knowledge',
+  knowledge: 'Knowledge Base',
   workflows: 'Workflows',
   analytics: 'Analytics',
   settings: 'Settings',
@@ -35,7 +35,7 @@ export function Breadcrumb() {
 
   return (
     <nav className="flex items-center gap-1.5 text-sm">
-      <Link to="/" className="text-gray-400 hover:text-gray-600 transition-colors">
+      <Link to="/" className="text-gray-400 hover:text-gray-600 transition-colors p-0.5">
         <Home className="h-4 w-4" />
       </Link>
       {crumbs.map((crumb) => (

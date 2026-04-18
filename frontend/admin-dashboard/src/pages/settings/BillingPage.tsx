@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Settings, Phone, Puzzle, Users, CreditCard, Check, ArrowRight } from 'lucide-react';
+import { Settings, Phone, Puzzle, Users, CreditCard, Check, ArrowRight, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
@@ -57,8 +57,8 @@ export function BillingPage() {
                   to={item.path}
                   end={item.end}
                   className={({ isActive }) =>
-                    `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      isActive ? 'bg-primary-50 text-primary-700' : 'text-gray-600 hover:bg-gray-100'
+                    `flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${
+                      isActive ? 'bg-primary-50 text-primary-700 shadow-sm' : 'text-gray-600 hover:bg-gray-50'
                     }`
                   }
                 >
@@ -74,11 +74,11 @@ export function BillingPage() {
           {/* Current Plan */}
           <Card>
             <CardHeader title="Current Plan" />
-            <div className="flex items-center justify-between p-4 bg-primary-50 rounded-lg border border-primary-200">
+            <div className="flex items-center justify-between p-5 bg-gradient-to-r from-primary-50 to-accent-50 rounded-xl border border-primary-200">
               <div>
                 <div className="flex items-center gap-2">
                   <h3 className="text-lg font-bold text-gray-900">Professional</h3>
-                  <Badge variant="primary">Current Plan</Badge>
+                  <Badge variant="gradient">Current Plan</Badge>
                 </div>
                 <p className="text-sm text-gray-500 mt-1">Billed monthly -- Next billing: May 1, 2026</p>
               </div>
@@ -104,10 +104,10 @@ export function BillingPage() {
                         {metric.used.toLocaleString()} / {metric.limit.toLocaleString()} {metric.unit}
                       </span>
                     </div>
-                    <div className="w-full h-2.5 bg-gray-100 rounded-full">
+                    <div className="w-full h-2.5 bg-gray-100 rounded-full overflow-hidden">
                       <div
-                        className={`h-full rounded-full transition-all ${
-                          isWarning ? 'bg-warning-500' : 'bg-primary-500'
+                        className={`h-full rounded-full transition-all duration-1000 ${
+                          isWarning ? 'bg-warning-500' : 'bg-gradient-to-r from-primary-500 to-accent-500'
                         }`}
                         style={{ width: `${Math.min(percentage, 100)}%` }}
                       />
@@ -126,31 +126,39 @@ export function BillingPage() {
               {plans.map((plan) => (
                 <div
                   key={plan.name}
-                  className={`rounded-xl border p-5 ${
+                  className={`rounded-2xl border p-6 transition-all duration-300 ${
                     plan.current
-                      ? 'border-primary-300 bg-primary-50/30 shadow-md'
-                      : 'border-gray-200 bg-white hover:border-gray-300'
+                      ? 'border-primary-300 bg-gradient-to-b from-primary-50/50 to-white shadow-stat relative'
+                      : 'border-gray-100 bg-white hover:border-gray-200 hover:shadow-card-hover shadow-card'
                   }`}
                 >
+                  {plan.current && (
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2">
+                      <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gradient-brand text-white flex items-center gap-1">
+                        <Sparkles className="h-3 w-3" />
+                        Current
+                      </span>
+                    </div>
+                  )}
                   <h4 className="font-semibold text-gray-900">{plan.name}</h4>
                   <div className="mt-2 mb-4">
                     <span className="text-3xl font-bold text-gray-900">${plan.price}</span>
                     <span className="text-sm text-gray-500">/mo</span>
                   </div>
-                  <ul className="space-y-2 mb-6">
+                  <ul className="space-y-2.5 mb-6">
                     {plan.features.map((feature) => (
                       <li key={feature} className="flex items-center gap-2 text-sm text-gray-600">
-                        <Check className="h-4 w-4 text-success-500 flex-shrink-0" />
+                        <Check className="h-4 w-4 text-primary-500 flex-shrink-0" />
                         {feature}
                       </li>
                     ))}
                   </ul>
                   {plan.current ? (
-                    <Button variant="outline" className="w-full" disabled>
+                    <Button variant="outline" className="w-full rounded-xl" disabled>
                       Current Plan
                     </Button>
                   ) : (
-                    <Button variant={plan.price > 99 ? 'primary' : 'outline'} className="w-full">
+                    <Button variant={plan.price > 99 ? 'gradient' : 'outline'} className="w-full rounded-xl">
                       {plan.price > 99 ? 'Upgrade' : 'Downgrade'}
                       <ArrowRight className="h-4 w-4" />
                     </Button>

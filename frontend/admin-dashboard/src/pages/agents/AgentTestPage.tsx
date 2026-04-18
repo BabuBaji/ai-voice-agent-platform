@@ -25,28 +25,15 @@ export function AgentTestPage() {
 
   const sendMessage = () => {
     if (!input.trim()) return;
-
-    const userMsg: TranscriptMessage = {
-      role: 'user',
-      content: input,
-      timestamp: messages.length * 5,
-    };
-
-    const assistantMsg: TranscriptMessage = {
-      role: 'assistant',
-      content: sampleResponses[responseIndex % sampleResponses.length],
-      timestamp: messages.length * 5 + 2,
-    };
-
+    const userMsg: TranscriptMessage = { role: 'user', content: input, timestamp: messages.length * 5 };
+    const assistantMsg: TranscriptMessage = { role: 'assistant', content: sampleResponses[responseIndex % sampleResponses.length], timestamp: messages.length * 5 + 2 };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setResponseIndex((i) => i + 1);
     setInput('');
   };
 
   const reset = () => {
-    setMessages([
-      { role: 'assistant', content: "Hi there! Thanks for calling TechCorp. I'm your AI assistant. How can I help you today?", timestamp: 0 },
-    ]);
+    setMessages([{ role: 'assistant', content: "Hi there! Thanks for calling TechCorp. I'm your AI assistant. How can I help you today?", timestamp: 0 }]);
     setResponseIndex(0);
   };
 
@@ -54,10 +41,7 @@ export function AgentTestPage() {
     <div className="max-w-3xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate(`/agents/${id}`)}
-            className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-          >
+          <button onClick={() => navigate(`/agents/${id}`)} className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div>
@@ -65,31 +49,31 @@ export function AgentTestPage() {
             <p className="text-sm text-gray-500">Sales Assistant - Simulated conversation</p>
           </div>
         </div>
-        <Button variant="outline" onClick={reset}>
+        <Button variant="outline" onClick={reset} className="rounded-xl">
           <RotateCcw className="h-4 w-4" />
           Reset
         </Button>
       </div>
 
       <Card className="h-[600px] flex flex-col" padding={false}>
-        {/* Agent info bar */}
-        <div className="px-6 py-3 border-b border-gray-200 flex items-center gap-3 bg-gray-50">
-          <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center">
+        <div className="px-6 py-3 border-b border-gray-100 flex items-center gap-3 bg-gray-50/50">
+          <div className="w-8 h-8 rounded-full bg-gradient-brand flex items-center justify-center shadow-sm">
             <Bot className="h-4 w-4 text-white" />
           </div>
           <div>
             <p className="text-sm font-medium text-gray-900">Sales Assistant</p>
-            <p className="text-xs text-success-600">Active - Testing Mode</p>
+            <p className="text-xs text-success-600 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-success-500" />
+              Active - Testing Mode
+            </p>
           </div>
         </div>
 
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto p-6 scrollbar-thin">
           <TranscriptViewer messages={messages} />
         </div>
 
-        {/* Input */}
-        <div className="p-4 border-t border-gray-200">
+        <div className="p-4 border-t border-gray-100 bg-white">
           <div className="flex items-center gap-3">
             <input
               type="text"
@@ -97,9 +81,9 @@ export function AgentTestPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
               placeholder="Type a message to test the agent..."
-              className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-lg focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none"
+              className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
             />
-            <Button onClick={sendMessage} disabled={!input.trim()}>
+            <Button variant="gradient" onClick={sendMessage} disabled={!input.trim()} className="rounded-xl">
               <Send className="h-4 w-4" />
             </Button>
           </div>

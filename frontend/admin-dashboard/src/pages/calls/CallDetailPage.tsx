@@ -1,8 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Clock, User, Bot, Phone, Tag } from 'lucide-react';
+import { ArrowLeft, Clock, User, Bot, Phone } from 'lucide-react';
 import { Card, CardHeader } from '@/components/ui/Card';
-import { StatusBadge } from '@/components/ui/Badge';
-import { Badge } from '@/components/ui/Badge';
+import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { CallPlayer } from '@/components/calls/CallPlayer';
 import { TranscriptViewer } from '@/components/calls/TranscriptViewer';
 import { formatDuration, formatDate } from '@/utils/formatters';
@@ -31,26 +30,21 @@ export function CallDetailPage() {
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <div className="flex items-center gap-4">
-        <button
-          onClick={() => navigate('/calls')}
-          className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100"
-        >
+        <button onClick={() => navigate('/calls')} className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
           <ArrowLeft className="h-5 w-5" />
         </button>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Call Detail</h1>
-          <p className="text-sm text-gray-500">Call ID: {id}</p>
+          <p className="text-sm text-gray-500 font-mono">Call ID: {id}</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Transcript */}
         <div className="lg:col-span-2 space-y-4">
           <Card>
             <CardHeader title="Recording" />
             <CallPlayer recordingUrl="/sample-recording.wav" duration={245} />
           </Card>
-
           <Card>
             <CardHeader title="Transcript" subtitle="Full conversation transcript" />
             <div className="max-h-[500px] overflow-y-auto scrollbar-thin">
@@ -59,30 +53,21 @@ export function CallDetailPage() {
           </Card>
         </div>
 
-        {/* Right: Metadata */}
         <div className="space-y-4">
           <Card>
             <CardHeader title="Call Information" />
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Status</span>
-                <StatusBadge status="completed" />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Sentiment</span>
-                <StatusBadge status="positive" />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Duration</span>
-                <span className="text-sm font-medium text-gray-900 flex items-center gap-1">
-                  <Clock className="h-3.5 w-3.5 text-gray-400" />
-                  {formatDuration(245)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Date</span>
-                <span className="text-sm text-gray-700">{formatDate('2026-04-18T10:30:00Z')}</span>
-              </div>
+              {[
+                { label: 'Status', value: <StatusBadge status="completed" /> },
+                { label: 'Sentiment', value: <StatusBadge status="positive" /> },
+                { label: 'Duration', value: <span className="text-sm font-medium text-gray-900 flex items-center gap-1"><Clock className="h-3.5 w-3.5 text-gray-400" />{formatDuration(245)}</span> },
+                { label: 'Date', value: <span className="text-sm text-gray-700">{formatDate('2026-04-18T10:30:00Z')}</span> },
+              ].map((item) => (
+                <div key={item.label} className="flex items-center justify-between">
+                  <span className="text-sm text-gray-500">{item.label}</span>
+                  {item.value}
+                </div>
+              ))}
             </div>
           </Card>
 
@@ -90,23 +75,17 @@ export function CallDetailPage() {
             <CardHeader title="Caller" />
             <div className="space-y-3">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
-                  <User className="h-5 w-5 text-gray-500" />
+                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center">
+                  <User className="h-5 w-5 text-primary-500" />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-gray-900">Sarah Johnson</p>
-                  <p className="text-xs text-gray-500">+1 (415) 555-1234</p>
+                  <p className="text-xs text-gray-500 font-mono">+1 (415) 555-1234</p>
                 </div>
               </div>
               <div className="pt-2 border-t border-gray-100 space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-500">Email</span>
-                  <span className="text-gray-700">sarah@healthclinics.com</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-500">Company</span>
-                  <span className="text-gray-700">Health Clinics Inc.</span>
-                </div>
+                <div className="flex justify-between text-sm"><span className="text-gray-500">Email</span><span className="text-gray-700">sarah@healthclinics.com</span></div>
+                <div className="flex justify-between text-sm"><span className="text-gray-500">Company</span><span className="text-gray-700">Health Clinics Inc.</span></div>
               </div>
             </div>
           </Card>
@@ -114,7 +93,7 @@ export function CallDetailPage() {
           <Card>
             <CardHeader title="Agent" />
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-primary-100 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center">
                 <Bot className="h-5 w-5 text-primary-600" />
               </div>
               <div>

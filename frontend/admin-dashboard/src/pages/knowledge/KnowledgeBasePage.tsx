@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Plus, Upload, FileText, Trash2, RotateCcw, FolderOpen } from 'lucide-react';
+import { Plus, Upload, FileText, Trash2, RotateCcw, FolderOpen, Search, File } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/Badge';
@@ -7,6 +7,16 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { formatFileSize, formatDate } from '@/utils/formatters';
 import type { KnowledgeBase, KBDocument } from '@/types';
+
+const typeIcons: Record<string, string> = {
+  pdf: 'text-red-500',
+  docx: 'text-blue-500',
+  txt: 'text-gray-500',
+  csv: 'text-green-500',
+  json: 'text-yellow-500',
+  md: 'text-purple-500',
+  xlsx: 'text-emerald-500',
+};
 
 const mockKBs: KnowledgeBase[] = [
   {
@@ -52,6 +62,7 @@ export function KnowledgeBasePage() {
   const [selectedKB, setSelectedKB] = useState<KnowledgeBase | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -64,7 +75,6 @@ export function KnowledgeBasePage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    // Handle files
     const files = Array.from(e.dataTransfer.files);
     console.log('Dropped files:', files.map((f) => f.name));
   };
@@ -76,7 +86,7 @@ export function KnowledgeBasePage() {
           <h1 className="text-2xl font-bold text-gray-900">Knowledge Base</h1>
           <p className="text-sm text-gray-500 mt-1">Manage documents and data sources for your agents</p>
         </div>
-        <Button onClick={() => setShowCreateModal(true)}>
+        <Button variant="gradient" onClick={() => setShowCreateModal(true)} className="rounded-xl">
           <Plus className="h-4 w-4" />
           New Knowledge Base
         </Button>
@@ -85,25 +95,45 @@ export function KnowledgeBasePage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* KB List */}
         <div className="space-y-3">
-          {mockKBs.map((kb) => (
+          {/* Search */}
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search knowledge bases..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
+            />
+          </div>
+
+          {mockKBs
+            .filter((kb) => kb.name.toLowerCase().includes(searchQuery.toLowerCase()))
+            .map((kb) => (
             <div
               key={kb.id}
               onClick={() => setSelectedKB(kb)}
-              className={`p-4 rounded-xl border cursor-pointer transition-all ${
+              className={`p-4 rounded-xl border cursor-pointer transition-all duration-200 ${
                 selectedKB?.id === kb.id
-                  ? 'border-primary-300 bg-primary-50 shadow-sm'
-                  : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'
+                  ? 'border-primary-300 bg-primary-50/50 shadow-sm'
+                  : 'border-gray-100 bg-white hover:border-gray-200 hover:shadow-card shadow-card'
               }`}
             >
               <div className="flex items-start justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <FolderOpen className={`h-5 w-5 ${selectedKB?.id === kb.id ? 'text-primary-600' : 'text-gray-400'}`} />
-                  <h3 className="font-semibold text-gray-900 text-sm">{kb.name}</h3>
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    selectedKB?.id === kb.id ? 'bg-primary-100 text-primary-600' : 'bg-gray-100 text-gray-400'
+                  }`}>
+                    <FolderOpen className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900 text-sm">{kb.name}</h3>
+                    <p className="text-xs text-gray-400">{kb.documentCount} documents</p>
+                  </div>
                 </div>
                 <StatusBadge status={kb.status} />
               </div>
-              <p className="text-xs text-gray-500 mb-2 ml-7">{kb.description}</p>
-              <p className="text-xs text-gray-400 ml-7">{kb.documentCount} documents</p>
+              <p className="text-xs text-gray-500 ml-[46px]">{kb.description}</p>
             </div>
           ))}
         </div>
@@ -117,11 +147,15 @@ export function KnowledgeBasePage() {
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
-                className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
-                  isDragging ? 'border-primary-400 bg-primary-50' : 'border-gray-300 bg-gray-50'
+                className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-200 ${
+                  isDragging
+                    ? 'border-primary-400 bg-primary-50/50 scale-[1.01]'
+                    : 'border-gray-200 bg-white hover:border-gray-300'
                 }`}
               >
-                <Upload className="h-8 w-8 text-gray-400 mx-auto mb-3" />
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary-50 to-accent-50 flex items-center justify-center mx-auto mb-4">
+                  <Upload className="h-7 w-7 text-primary-500" />
+                </div>
                 <p className="text-sm font-medium text-gray-700 mb-1">
                   Drag and drop files here, or{' '}
                   <button
@@ -131,7 +165,7 @@ export function KnowledgeBasePage() {
                     browse
                   </button>
                 </p>
-                <p className="text-xs text-gray-400">PDF, DOCX, TXT, CSV, JSON (max 50MB)</p>
+                <p className="text-xs text-gray-400">PDF, DOCX, TXT, CSV, JSON, MD, XLSX (max 50MB)</p>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -151,10 +185,12 @@ export function KnowledgeBasePage() {
                   {selectedKB.documents.map((doc) => (
                     <div
                       key={doc.id}
-                      className="flex items-center justify-between p-3 rounded-lg border border-gray-100 hover:bg-gray-50"
+                      className="flex items-center justify-between p-3.5 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors group"
                     >
                       <div className="flex items-center gap-3">
-                        <FileText className="h-5 w-5 text-gray-400" />
+                        <div className={`w-9 h-9 rounded-lg bg-gray-50 flex items-center justify-center ${typeIcons[doc.type] || 'text-gray-400'}`}>
+                          <FileText className="h-5 w-5" />
+                        </div>
                         <div>
                           <p className="text-sm font-medium text-gray-900">{doc.name}</p>
                           <p className="text-xs text-gray-400">
@@ -165,11 +201,11 @@ export function KnowledgeBasePage() {
                       <div className="flex items-center gap-2">
                         <StatusBadge status={doc.status} />
                         {doc.status === 'failed' && (
-                          <button className="p-1 text-gray-400 hover:text-primary-600">
+                          <button className="p-1.5 text-gray-400 hover:text-primary-600 rounded-lg hover:bg-primary-50 transition-colors">
                             <RotateCcw className="h-4 w-4" />
                           </button>
                         )}
-                        <button className="p-1 text-gray-400 hover:text-danger-600">
+                        <button className="p-1.5 text-gray-400 hover:text-danger-600 rounded-lg hover:bg-danger-50 transition-colors opacity-0 group-hover:opacity-100">
                           <Trash2 className="h-4 w-4" />
                         </button>
                       </div>
@@ -179,8 +215,10 @@ export function KnowledgeBasePage() {
               </Card>
             </>
           ) : (
-            <div className="flex items-center justify-center h-64 text-gray-400 text-sm bg-white rounded-xl border border-gray-200">
-              Select a knowledge base to view its documents
+            <div className="flex flex-col items-center justify-center h-80 text-gray-400 bg-white rounded-2xl border border-gray-100 shadow-card">
+              <FolderOpen className="h-12 w-12 text-gray-300 mb-3" />
+              <p className="text-sm font-medium text-gray-500">Select a knowledge base</p>
+              <p className="text-xs text-gray-400 mt-1">Choose from the left panel to view documents</p>
             </div>
           )}
         </div>
@@ -195,8 +233,8 @@ export function KnowledgeBasePage() {
           <Input label="Name" placeholder="e.g., Product Documentation" />
           <Input label="Description" placeholder="Brief description of this knowledge base" />
           <div className="flex justify-end gap-3 pt-2">
-            <Button variant="outline" onClick={() => setShowCreateModal(false)}>Cancel</Button>
-            <Button onClick={() => setShowCreateModal(false)}>Create</Button>
+            <Button variant="outline" onClick={() => setShowCreateModal(false)} className="rounded-xl">Cancel</Button>
+            <Button variant="gradient" onClick={() => setShowCreateModal(false)} className="rounded-xl">Create</Button>
           </div>
         </div>
       </Modal>
