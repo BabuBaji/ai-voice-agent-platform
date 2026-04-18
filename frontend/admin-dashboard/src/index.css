@@ -12,7 +12,8 @@
 
 @layer base {
   body {
-    @apply bg-dashboard-bg text-gray-900 antialiased;
+    @apply text-gray-900 antialiased;
+    background-color: #f8fafc;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
@@ -21,7 +22,8 @@
   }
 
   ::selection {
-    @apply bg-primary-600/20 text-primary-900;
+    background-color: rgba(79, 70, 229, 0.2);
+    color: #312e81;
   }
 }
 
@@ -105,7 +107,8 @@
 
   /* Dark section */
   .dark-section {
-    @apply bg-dark-bg text-white;
+    @apply text-white;
+    background-color: #0a0a0f;
   }
 
   /* Landing page hero gradient */
