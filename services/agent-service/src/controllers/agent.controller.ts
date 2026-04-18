@@ -429,63 +429,77 @@ export async function testAgent(req: Request, res: Response, next: NextFunction)
   try {
     const tenantId = req.headers['x-tenant-id'] as string;
     const { id } = req.params;
-    const { message } = req.body;
+    const { message, history = [] } = req.body;
 
     if (!message) {
-      res.status(400).json({ error: 'Bad Request', message: 'message field is required' });
+      res.status(400).json({ error: 'message is required' });
       return;
     }
 
-    // Verify agent exists
-    const agentCheck = await pool.query(
+    const agentResult = await pool.query(
       'SELECT * FROM agents WHERE id = $1 AND tenant_id = $2',
       [id, tenantId]
     );
-    if (agentCheck.rows.length === 0) {
-      res.status(404).json({ error: 'Not Found', message: 'Agent not found' });
+    if (agentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Agent not found' });
       return;
     }
 
-    // Forward to ai-runtime service
-    try {
-      const fetch = (await import('node:http')).request;
-      const aiRuntimeUrl = process.env.AI_RUNTIME_URL || 'http://localhost:3004';
+    const agent = agentResult.rows[0];
+    const aiRuntimeUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
 
-      const response = await new Promise<string>((resolve, reject) => {
-        const postData = JSON.stringify({
-          agentId: id,
-          tenantId,
-          message,
-          systemPrompt: agentCheck.rows[0].system_prompt,
-          llmProvider: agentCheck.rows[0].llm_provider,
-          llmModel: agentCheck.rows[0].llm_model,
-          temperature: agentCheck.rows[0].temperature,
-          maxTokens: agentCheck.rows[0].max_tokens,
-        });
+    // Build messages from history + new message
+    const messages = [
+      ...history,
+      { role: 'user', content: message }
+    ];
 
-        const url = new URL(`${aiRuntimeUrl}/api/v1/chat`);
-        const req = fetch(
-          { hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } },
-          (resp) => {
-            let data = '';
-            resp.on('data', (chunk) => { data += chunk; });
-            resp.on('end', () => resolve(data));
-          }
-        );
-        req.on('error', reject);
-        req.write(postData);
-        req.end();
-      });
+    // Call ai-runtime simple chat endpoint
+    const http = await import('http');
+    const postData = JSON.stringify({
+      system_prompt: agent.system_prompt,
+      messages,
+      provider: agent.llm_provider || 'openai',
+      model: agent.llm_model || 'gpt-4o',
+      temperature: parseFloat(agent.temperature) || 0.7,
+      max_tokens: agent.max_tokens || 4096,
+    });
 
-      res.json(JSON.parse(response));
-    } catch (err) {
-      // If ai-runtime is not available, return a helpful error
-      res.status(503).json({
-        error: 'Service Unavailable',
-        message: 'AI Runtime service is not available for test chat',
-      });
+    const response = await new Promise<string>((resolve, reject) => {
+      const url = new URL(`${aiRuntimeUrl}/chat/simple`);
+      const httpReq = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        },
+        (resp) => {
+          let data = '';
+          resp.on('data', (chunk: Buffer) => { data += chunk; });
+          resp.on('end', () => resolve(data));
+        }
+      );
+      httpReq.on('error', reject);
+      httpReq.setTimeout(30000, () => { httpReq.destroy(); reject(new Error('Timeout')); });
+      httpReq.write(postData);
+      httpReq.end();
+    });
+
+    const parsed = JSON.parse(response);
+    res.json({
+      reply: parsed.reply,
+      agent: { name: agent.name, provider: agent.llm_provider, model: agent.llm_model },
+    });
+  } catch (err: any) {
+    if (err.message === 'Timeout' || err.code === 'ECONNREFUSED') {
+      res.status(503).json({ error: 'AI Runtime service unavailable. Make sure it is running and OPENAI_API_KEY is set.' });
+      return;
     }
-  } catch (err) {
     next(err);
   }
 }

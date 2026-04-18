@@ -73,24 +73,25 @@ export function AgentBuilderPage() {
     if (!isNew && id) {
       setLoading(true);
       agentApi.get(id)
-        .then((agent) => {
-          setName(agent.name || '');
-          setDescription(agent.description || '');
-          setGreeting(agent.greetingMessage || (agent as any).greeting_message || '');
-          setLlmProvider(agent.llmProvider || (agent as any).llm_provider || 'openai');
-          setLlmModel(agent.llmModel || (agent as any).llm_model || 'gpt-4o');
-          setTemperature(agent.temperature ?? 0.7);
-          setSystemPrompt(agent.systemPrompt || (agent as any).system_prompt || '');
-          if (agent.voiceConfig || (agent as any).voice_config) {
-            const vc = agent.voiceConfig || (agent as any).voice_config || {};
-            setVoiceProvider(vc.ttsProvider || vc.provider || 'elevenlabs');
-            setVoiceId(vc.voiceId || vc.voice_id || 'rachel');
+        .then((data) => {
+          const a = data as any;
+          setName(a.name || '');
+          setDescription(a.description || '');
+          setGreeting(a.greeting_message || a.greetingMessage || '');
+          setLlmProvider(a.llm_provider || a.llmProvider || 'openai');
+          setLlmModel(a.llm_model || a.llmModel || 'gpt-4o');
+          setTemperature(a.temperature != null ? parseFloat(a.temperature) : 0.7);
+          setSystemPrompt(a.system_prompt || a.systemPrompt || '');
+          if (a.voice_config || a.voiceConfig) {
+            const vc = a.voice_config || a.voiceConfig || {};
+            setVoiceProvider(vc.provider || vc.ttsProvider || 'elevenlabs');
+            setVoiceId(vc.voice_id || vc.voiceId || 'rachel');
             setVoiceSpeed(vc.speed ?? 1.0);
             setLanguage(vc.language || 'en-US');
           }
-          const tools = agent.toolsConfig || (agent as any).tools_config || [];
+          const tools = a.tools_config || a.toolsConfig || [];
           setEnabledTools(Array.isArray(tools) ? tools.map((t: any) => typeof t === 'string' ? t : t.name).filter(Boolean) : []);
-          const kbs = agent.knowledgeBaseIds || (agent as any).knowledge_base_ids || [];
+          const kbs = a.knowledge_base_ids || a.knowledgeBaseIds || [];
           setAttachedKBs(kbs);
         })
         .catch((err) => {

@@ -175,3 +175,35 @@ async def chat_completions(request: ChatCompletionRequest):
         message_count=len(request.messages),
     )
     return EventSourceResponse(_stream_response(request))
+
+
+@router.post("/chat/simple")
+async def simple_chat(request: Request):
+    """Non-streaming chat for service-to-service calls."""
+    body = await request.json()
+
+    system_prompt = body.get("system_prompt", "You are a helpful assistant.")
+    messages = body.get("messages", [])
+    provider = body.get("provider", "openai")
+    model = body.get("model", "gpt-4o")
+    temperature = body.get("temperature", 0.7)
+    max_tokens = body.get("max_tokens", 4096)
+
+    # Build messages list with system prompt
+    full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    # Get LLM provider and call non-streaming
+    llm = llm_router.get_provider(provider)
+
+    # Collect streaming response into single string
+    full_response = ""
+    async for chunk in llm.chat_completion(
+        messages=full_messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    ):
+        if chunk.get("type") == "content" and chunk.get("content"):
+            full_response += chunk["content"]
+
+    return {"reply": full_response, "provider": provider, "model": model}

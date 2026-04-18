@@ -1,5 +1,5 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Clock, User, Bot, Phone } from 'lucide-react';
+import { ArrowLeft, Clock, User, Bot, Phone, ThumbsUp, ThumbsDown, Minus, TrendingUp, Tag, BarChart3, Lightbulb, CheckCircle2 } from 'lucide-react';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { CallPlayer } from '@/components/calls/CallPlayer';
@@ -22,6 +22,21 @@ const mockTranscript: TranscriptMessage[] = [
   { role: 'user', content: "No, that's all. Thanks for your help!", timestamp: 100 },
   { role: 'assistant', content: "You're welcome, Sarah! We look forward to speaking with you on Thursday. Have a wonderful day!", timestamp: 105 },
 ];
+
+const mockAnalysis = {
+  summary: 'Caller inquired about the enterprise plan for a 50-person healthcare team. Discussed HIPAA-compliant features including appointment scheduling and patient follow-ups. Successfully scheduled a demo for Thursday at 10 AM. Lead captured with email.',
+  sentiment: 'positive' as string,
+  interestLevel: 85,
+  keyTopics: ['Enterprise Plan', 'Healthcare', 'HIPAA', 'Appointment Scheduling', 'Demo', 'Team Size'],
+  outcome: 'Demo Scheduled',
+  recommendations: [
+    'Follow up with healthcare-specific case studies before the demo',
+    'Prepare HIPAA compliance documentation for the meeting',
+    'Include pricing comparison with competitors in the demo',
+    'Assign a healthcare specialist for the Thursday demo call',
+    'Send a pre-demo questionnaire to understand specific needs',
+  ],
+};
 
 export function CallDetailPage() {
   const { id } = useParams();
@@ -54,12 +69,12 @@ export function CallDetailPage() {
         </div>
 
         <div className="space-y-4">
+          {/* Call Information */}
           <Card>
             <CardHeader title="Call Information" />
             <div className="space-y-4">
               {[
                 { label: 'Status', value: <StatusBadge status="completed" /> },
-                { label: 'Sentiment', value: <StatusBadge status="positive" /> },
                 { label: 'Duration', value: <span className="text-sm font-medium text-gray-900 flex items-center gap-1"><Clock className="h-3.5 w-3.5 text-gray-400" />{formatDuration(245)}</span> },
                 { label: 'Date', value: <span className="text-sm text-gray-700">{formatDate('2026-04-18T10:30:00Z')}</span> },
               ].map((item) => (
@@ -71,6 +86,65 @@ export function CallDetailPage() {
             </div>
           </Card>
 
+          {/* AI Analysis */}
+          <Card>
+            <CardHeader title="AI Analysis" subtitle="Automated call insights" />
+            <div className="space-y-5">
+              {/* Sentiment */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">Sentiment</span>
+                <div className="flex items-center gap-1.5">
+                  {mockAnalysis.sentiment === 'positive' && <ThumbsUp className="h-4 w-4 text-success-500" />}
+                  {mockAnalysis.sentiment === 'negative' && <ThumbsDown className="h-4 w-4 text-danger-500" />}
+                  {mockAnalysis.sentiment === 'neutral' && <Minus className="h-4 w-4 text-gray-400" />}
+                  <StatusBadge status={mockAnalysis.sentiment} />
+                </div>
+              </div>
+
+              {/* Interest Level */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-500 flex items-center gap-1">
+                    <TrendingUp className="h-3.5 w-3.5" /> Interest Level
+                  </span>
+                  <span className="text-sm font-semibold text-gray-900">{mockAnalysis.interestLevel}%</span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2.5">
+                  <div
+                    className={`h-2.5 rounded-full transition-all duration-500 ${
+                      mockAnalysis.interestLevel >= 70 ? 'bg-success-500' :
+                      mockAnalysis.interestLevel >= 40 ? 'bg-warning-500' : 'bg-gray-400'
+                    }`}
+                    style={{ width: `${mockAnalysis.interestLevel}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Outcome */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">Outcome</span>
+                <Badge variant="success" dot>
+                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                  {mockAnalysis.outcome}
+                </Badge>
+              </div>
+            </div>
+          </Card>
+
+          {/* Key Topics */}
+          <Card>
+            <CardHeader title="Key Topics" />
+            <div className="flex flex-wrap gap-2">
+              {mockAnalysis.keyTopics.map((topic) => (
+                <Badge key={topic} variant="outline-primary">
+                  <Tag className="h-3 w-3 mr-1" />
+                  {topic}
+                </Badge>
+              ))}
+            </div>
+          </Card>
+
+          {/* Caller */}
           <Card>
             <CardHeader title="Caller" />
             <div className="space-y-3">
@@ -90,6 +164,7 @@ export function CallDetailPage() {
             </div>
           </Card>
 
+          {/* Agent */}
           <Card>
             <CardHeader title="Agent" />
             <div className="flex items-center gap-3">
@@ -103,18 +178,23 @@ export function CallDetailPage() {
             </div>
           </Card>
 
+          {/* Summary */}
           <Card>
             <CardHeader title="Summary" />
-            <p className="text-sm text-gray-600 leading-relaxed">
-              Caller inquired about the enterprise plan for a 50-person healthcare team.
-              Discussed HIPAA-compliant features including appointment scheduling and patient follow-ups.
-              Successfully scheduled a demo for Thursday at 10 AM. Lead captured with email.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Badge variant="info">Demo Scheduled</Badge>
-              <Badge variant="success">Lead Captured</Badge>
-              <Badge variant="purple">Healthcare</Badge>
-            </div>
+            <p className="text-sm text-gray-600 leading-relaxed">{mockAnalysis.summary}</p>
+          </Card>
+
+          {/* Recommendations */}
+          <Card>
+            <CardHeader title="Recommendations" subtitle="AI-suggested next steps" />
+            <ul className="space-y-3">
+              {mockAnalysis.recommendations.map((rec, i) => (
+                <li key={i} className="flex gap-2.5 text-sm">
+                  <Lightbulb className="h-4 w-4 text-warning-500 flex-shrink-0 mt-0.5" />
+                  <span className="text-gray-600">{rec}</span>
+                </li>
+              ))}
+            </ul>
           </Card>
         </div>
       </div>
