@@ -14,19 +14,17 @@ const app = express();
 app.use(helmet());
 app.use(cors({ origin: config.cors.origin }));
 
-// Body parsing (only for non-proxied routes)
-app.use(express.json({ limit: '10mb' }));
-
 // Request logging
 app.use(requestLogger);
 
 // Rate limiting
 app.use(rateLimiterMiddleware);
 
-// Health check (no auth)
-app.use('/health', healthRouter);
+// Health check (needs body parsing)
+app.use('/health', express.json(), healthRouter);
 
-// Proxy routes
+// Proxy routes — DO NOT use express.json() here.
+// Body parsing consumes the request stream and breaks http-proxy-middleware.
 app.use('/', proxyRouter);
 
 // Error handler

@@ -1,88 +1,118 @@
-import { Router } from 'express';
-import { createProxyMiddleware, Options } from 'http-proxy-middleware';
+import { Router, Request, Response } from 'express';
+import http from 'http';
+import { URL } from 'url';
 import { config } from '../config';
 import { authMiddleware } from '../middleware/auth';
 
 export const proxyRouter = Router();
 
-function createProxy(target: string, pathRewrite?: Record<string, string>): any {
-  const options: Options = {
-    target,
-    changeOrigin: true,
-    pathRewrite,
-    on: {
-      proxyReq: (_proxyReq, req) => {
-        const anyReq = req as any;
-        if (anyReq.user) {
-          _proxyReq.setHeader('x-user-id', anyReq.user.sub || '');
-          _proxyReq.setHeader('x-tenant-id', anyReq.user.tenantId || '');
-        }
+function forwardRequest(target: string, pathRewrite: (path: string) => string) {
+  return (req: Request, res: Response) => {
+    const rewrittenPath = pathRewrite(req.originalUrl);
+    const targetUrl = new URL(rewrittenPath, target);
+
+    const options: http.RequestOptions = {
+      hostname: targetUrl.hostname,
+      port: targetUrl.port,
+      path: targetUrl.pathname + targetUrl.search,
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: targetUrl.host,
       },
-      error: (err, _req, res) => {
-        console.error('Proxy error:', err.message);
-        if ('writeHead' in res && typeof res.writeHead === 'function') {
-          (res as any).status(502).json({ error: 'Bad Gateway', message: 'Downstream service unavailable' });
-        }
-      },
-    },
+    };
+
+    // Forward user context from auth middleware
+    const anyReq = req as any;
+    if (anyReq.user) {
+      options.headers!['x-user-id'] = anyReq.user.sub || '';
+      options.headers!['x-tenant-id'] = anyReq.user.tenantId || '';
+    }
+
+    const proxyReq = http.request(options, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode || 500, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error(`Proxy error to ${target}:`, err.message);
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Bad Gateway', message: 'Downstream service unavailable' });
+      }
+    });
+
+    // Pipe the original request body to the proxy request
+    req.pipe(proxyReq);
   };
-  return createProxyMiddleware(options);
 }
 
-// Path rewrite helpers:
-// identity-service-node: routes are /auth, /tenants, /users, /roles (no /api/v1 prefix)
-const stripApiV1 = { '^/api/v1': '' };
+// Helper: strip /api/v1 prefix
+const stripPrefix = (path: string) => path.replace(/^\/api\/v1/, '');
+// Helper: keep path as-is
+const keepPath = (path: string) => path;
 
-// telephony-adapter, conversation-service, notification-service: routes have /api/v1 prefix
-// crm-service-node: routes are /leads, /contacts, etc. (no /api/v1 prefix)
-// workflow-service-node: routes are /workflows (no /api/v1 prefix)
-// knowledge-service, analytics-service, ai-runtime: Python FastAPI, no /api/v1 prefix
+// --- Auth routes (NO authentication required) ---
+proxyRouter.all('/api/v1/auth/*', forwardRequest(config.services.identity, stripPrefix));
 
-// --- Auth routes (no auth required) ---
-proxyRouter.use('/api/v1/auth', createProxy(config.services.identity, stripApiV1));
+// --- Identity routes (auth required) ---
+proxyRouter.all('/api/v1/tenants/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/tenants', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/users/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/users', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/roles/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/roles', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
 
-// --- Identity service (auth required) ---
-proxyRouter.use('/api/v1/tenants', authMiddleware, createProxy(config.services.identity, stripApiV1));
-proxyRouter.use('/api/v1/users', authMiddleware, createProxy(config.services.identity, stripApiV1));
-proxyRouter.use('/api/v1/roles', authMiddleware, createProxy(config.services.identity, stripApiV1));
+// --- Agent service ---
+proxyRouter.all('/api/v1/agents/*', authMiddleware, forwardRequest(config.services.agent, keepPath));
+proxyRouter.all('/api/v1/agents', authMiddleware, forwardRequest(config.services.agent, keepPath));
 
-// --- Agent service (routes: /api/v1/agents) ---
-proxyRouter.use('/api/v1/agents', authMiddleware, createProxy(config.services.agent));
+// --- Telephony adapter ---
+proxyRouter.all('/api/v1/calls/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/calls', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/phone-numbers/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/phone-numbers', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 
-// --- Telephony adapter (routes: /api/v1/calls, /api/v1/phone-numbers) ---
-proxyRouter.use('/api/v1/calls', authMiddleware, createProxy(config.services.telephony));
-proxyRouter.use('/api/v1/phone-numbers', authMiddleware, createProxy(config.services.telephony));
+// --- Conversation service ---
+proxyRouter.all('/api/v1/conversations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/conversations', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 
-// --- Conversation service (routes: /api/v1/conversations, /api/v1/conversations/:id/messages) ---
-proxyRouter.use('/api/v1/conversations', authMiddleware, createProxy(config.services.conversation));
-proxyRouter.use('/api/v1/messages', authMiddleware, createProxy(config.services.conversation));
+// --- CRM service ---
+proxyRouter.all('/api/v1/leads/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/leads', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/contacts/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/contacts', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/pipelines/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/pipelines', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/deals/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/deals', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/tasks/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/tasks', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/appointments/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/appointments', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/notes/*', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
+proxyRouter.all('/api/v1/notes', authMiddleware, forwardRequest(config.services.crm, stripPrefix));
 
-// --- CRM service (routes: /leads, /contacts, /pipelines, /deals, /tasks, /appointments, /notes) ---
-proxyRouter.use('/api/v1/leads', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/contacts', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/pipelines', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/deals', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/tasks', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/appointments', authMiddleware, createProxy(config.services.crm, stripApiV1));
-proxyRouter.use('/api/v1/notes', authMiddleware, createProxy(config.services.crm, stripApiV1));
+// --- Knowledge service ---
+proxyRouter.all('/api/v1/knowledge/*', authMiddleware, forwardRequest(config.services.knowledge, (p) => p.replace(/^\/api\/v1\/knowledge/, '')));
+proxyRouter.all('/api/v1/knowledge', authMiddleware, forwardRequest(config.services.knowledge, (p) => p.replace(/^\/api\/v1\/knowledge/, '')));
 
-// --- Knowledge service (Python FastAPI routes: /documents, /search, /knowledge-bases) ---
-proxyRouter.use('/api/v1/knowledge', authMiddleware, createProxy(config.services.knowledge, { '^/api/v1/knowledge': '' }));
+// --- Workflow service ---
+proxyRouter.all('/api/v1/workflows/*', authMiddleware, forwardRequest(config.services.workflow, stripPrefix));
+proxyRouter.all('/api/v1/workflows', authMiddleware, forwardRequest(config.services.workflow, stripPrefix));
 
-// --- Workflow service (routes: /workflows) ---
-proxyRouter.use('/api/v1/workflows', authMiddleware, createProxy(config.services.workflow, stripApiV1));
+// --- Analytics service ---
+proxyRouter.all('/api/v1/analytics/*', authMiddleware, forwardRequest(config.services.analytics, (p) => p.replace(/^\/api\/v1\/analytics/, '')));
+proxyRouter.all('/api/v1/analytics', authMiddleware, forwardRequest(config.services.analytics, (p) => p.replace(/^\/api\/v1\/analytics/, '')));
 
-// --- Analytics service (Python FastAPI routes: /metrics, /dashboard) ---
-proxyRouter.use('/api/v1/analytics', authMiddleware, createProxy(config.services.analytics, { '^/api/v1/analytics': '' }));
+// --- Notification service ---
+proxyRouter.all('/api/v1/notifications/*', authMiddleware, forwardRequest(config.services.notification, keepPath));
+proxyRouter.all('/api/v1/notifications', authMiddleware, forwardRequest(config.services.notification, keepPath));
 
-// --- Notification service (routes: /api/v1/notifications, /api/v1/templates) ---
-proxyRouter.use('/api/v1/notifications', authMiddleware, createProxy(config.services.notification));
-proxyRouter.use('/api/v1/templates', authMiddleware, createProxy(config.services.notification));
+// --- AI Runtime ---
+proxyRouter.all('/api/v1/chat/*', authMiddleware, forwardRequest(config.services.aiRuntime, stripPrefix));
+proxyRouter.all('/api/v1/chat', authMiddleware, forwardRequest(config.services.aiRuntime, stripPrefix));
+proxyRouter.all('/api/v1/tools/*', authMiddleware, forwardRequest(config.services.aiRuntime, stripPrefix));
+proxyRouter.all('/api/v1/rag/*', authMiddleware, forwardRequest(config.services.aiRuntime, stripPrefix));
 
-// --- AI Runtime (Python FastAPI routes: /chat, /tools, /rag) ---
-proxyRouter.use('/api/v1/chat', authMiddleware, createProxy(config.services.aiRuntime, stripApiV1));
-proxyRouter.use('/api/v1/tools', authMiddleware, createProxy(config.services.aiRuntime, stripApiV1));
-proxyRouter.use('/api/v1/rag', authMiddleware, createProxy(config.services.aiRuntime, stripApiV1));
-
-// --- Unauthenticated routes ---
-proxyRouter.use('/webhooks', createProxy(config.services.telephony));
+// --- Webhooks (no auth) ---
+proxyRouter.all('/webhooks/*', forwardRequest(config.services.telephony, keepPath));

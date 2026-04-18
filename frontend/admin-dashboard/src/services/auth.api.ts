@@ -27,7 +27,18 @@ export const authApi = {
   },
 
   register: async (data: RegisterRequest): Promise<AuthResponse> => {
-    const response = await api.post('/auth/register', data);
+    // Map frontend fields to backend expected fields
+    const nameParts = data.name.trim().split(/\s+/);
+    const firstName = nameParts[0] || data.name;
+    const lastName = nameParts.slice(1).join(' ') || '';
+
+    const response = await api.post('/auth/register', {
+      tenantName: data.companyName,
+      firstName,
+      lastName,
+      email: data.email,
+      password: data.password,
+    });
     return response.data;
   },
 
@@ -38,10 +49,5 @@ export const authApi = {
 
   logout: async (refreshToken: string): Promise<void> => {
     await api.post('/auth/logout', { refreshToken });
-  },
-
-  getCurrentUser: async (): Promise<User> => {
-    const response = await api.get('/auth/me');
-    return response.data;
   },
 };
