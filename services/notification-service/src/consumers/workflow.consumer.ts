@@ -1,71 +1,104 @@
+import amqplib from 'amqplib';
 import { config } from '../config';
+import { dispatchNotification } from '../routes/notifications';
 import pino from 'pino';
 
 const logger = pino({
+  level: config.logLevel,
   transport: config.nodeEnv === 'development' ? { target: 'pino-pretty' } : undefined,
 });
 
-const QUEUE_NAME = 'notification.workflow';
+const EXCHANGE_NAME = 'voice_agent_events';
+const QUEUE_NAME = 'notification.send';
+const ROUTING_KEY = 'notification.send';
 
-/**
- * RabbitMQ consumer for workflow-triggered notifications.
- *
- * Listens on the 'notification.workflow' queue for messages from the
- * workflow service and dispatches them to the appropriate provider.
- */
+let connection: Awaited<ReturnType<typeof amqplib.connect>> | null = null;
+let channel: Awaited<ReturnType<Awaited<ReturnType<typeof amqplib.connect>>['createChannel']>> | null = null;
+
 export async function startConsumer(): Promise<void> {
-  // TODO: Replace with actual amqplib connection in production
-  // const amqp = await import('amqplib');
-  // const connection = await amqp.connect(config.rabbitmqUrl);
-  // const channel = await connection.createChannel();
-  // await channel.assertQueue(QUEUE_NAME, { durable: true });
+  try {
+    connection = await amqplib.connect(config.rabbitmqUrl);
+    channel = await connection.createChannel();
 
-  logger.info({ queue: QUEUE_NAME }, 'RabbitMQ consumer starting...');
+    // Declare exchange
+    await channel.assertExchange(EXCHANGE_NAME, 'topic', { durable: true });
 
-  // Stub: log that consumer would be running
-  // In production:
-  // channel.consume(QUEUE_NAME, async (msg) => {
-  //   if (!msg) return;
-  //   try {
-  //     const payload = JSON.parse(msg.content.toString());
-  //     await dispatchNotification(payload);
-  //     channel.ack(msg);
-  //   } catch (err) {
-  //     logger.error({ err }, 'Failed to process notification message');
-  //     channel.nack(msg, false, true);
-  //   }
-  // });
+    // Declare queue
+    await channel.assertQueue(QUEUE_NAME, { durable: true });
 
-  logger.info({ queue: QUEUE_NAME }, 'RabbitMQ consumer ready (stub mode - not connected)');
+    // Bind queue
+    await channel.bindQueue(QUEUE_NAME, EXCHANGE_NAME, ROUTING_KEY);
+    // Also listen for specific notification types
+    await channel.bindQueue(QUEUE_NAME, EXCHANGE_NAME, 'notification.*');
+
+    // Prefetch 5 messages for throughput
+    await channel.prefetch(5);
+
+    // Start consuming
+    await channel.consume(QUEUE_NAME, async (msg) => {
+      if (!msg) return;
+
+      try {
+        const payload = JSON.parse(msg.content.toString());
+        const data = payload.data || payload;
+
+        logger.info(
+          { type: data.type || data.channel, recipient: data.recipient },
+          'Received notification event'
+        );
+
+        const tenantId = data.tenantId || data.tenant_id || '';
+        const type = data.type || data.channel || 'email';
+        const recipient = data.recipient || '';
+        const subject = data.subject || '';
+        const body = data.body || '';
+        const metadata = data.metadata || {};
+
+        if (!tenantId || !recipient) {
+          logger.warn({ payload: data }, 'Notification event missing tenantId or recipient');
+          channel!.ack(msg);
+          return;
+        }
+
+        await dispatchNotification(tenantId, type, recipient, subject, body, metadata);
+        logger.info({ type, recipient }, 'Notification dispatched successfully');
+        channel!.ack(msg);
+      } catch (err: any) {
+        logger.error({ error: err.message }, 'Failed to process notification message');
+
+        if (msg.fields.redelivered) {
+          // Already retried once, dead-letter it
+          channel!.nack(msg, false, false);
+        } else {
+          // Requeue for one retry
+          channel!.nack(msg, false, true);
+        }
+      }
+    });
+
+    logger.info({ queue: QUEUE_NAME }, 'Notification consumer started');
+
+    // Reconnect on close
+    connection.on('close', () => {
+      logger.warn('RabbitMQ connection closed, reconnecting in 5s...');
+      setTimeout(() => startConsumer().catch(() => {}), 5000);
+    });
+
+    connection.on('error', (err) => {
+      logger.error({ error: err.message }, 'RabbitMQ connection error');
+    });
+  } catch (err: any) {
+    logger.error({ error: err.message }, 'Failed to start notification consumer');
+    throw err;
+  }
 }
 
-interface NotificationPayload {
-  tenantId: string;
-  channel: 'email' | 'sms' | 'whatsapp' | 'push';
-  recipient: string;
-  templateId?: string;
-  subject?: string;
-  body?: string;
-  data?: Record<string, unknown>;
-}
-
-async function dispatchNotification(payload: NotificationPayload): Promise<void> {
-  logger.info({ channel: payload.channel, recipient: payload.recipient }, 'Dispatching notification');
-
-  switch (payload.channel) {
-    case 'email':
-      // await emailProvider.send({ ... });
-      break;
-    case 'sms':
-      // await smsProvider.send({ ... });
-      break;
-    case 'whatsapp':
-      // await whatsappProvider.send({ ... });
-      break;
-    case 'push':
-      // await pushProvider.send({ ... });
-      break;
-    default:
-      logger.warn({ channel: payload.channel }, 'Unknown notification channel');
+export async function stopConsumer(): Promise<void> {
+  try {
+    if (channel) await channel.close();
+    if (connection) await connection.close();
+    logger.info('Notification consumer stopped');
+  } catch (err: any) {
+    logger.error({ error: err.message }, 'Error stopping consumer');
   }
 }

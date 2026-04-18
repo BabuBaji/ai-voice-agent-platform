@@ -17,9 +17,9 @@ app.use(requestLogger);
 // Health check
 app.use('/health', healthRouter);
 
-// API routes
+// API routes - tenant middleware is inline in routes
 app.use('/api/v1/conversations', conversationRouter);
-app.use('/api/v1/messages', messageRouter);
+app.use('/api/v1', messageRouter);
 
 app.use(errorHandler);
 

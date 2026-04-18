@@ -1,9 +1,18 @@
 export const config = {
   port: parseInt(process.env.PORT || '3004', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  logLevel: process.env.LOG_LEVEL || 'info',
   jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-me',
   rabbitmqUrl: process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
+
+  db: {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    database: process.env.DB_NAME || 'ai_voice_agent',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || 'postgres',
+    max: parseInt(process.env.DB_POOL_MAX || '20', 10),
+  },
 
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY || '',

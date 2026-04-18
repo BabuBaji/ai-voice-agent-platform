@@ -7,7 +7,7 @@ type EventHandler = (data: unknown) => void;
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const handlersRef = useRef<Map<string, EventHandler[]>>(new Map());
-  const token = useAuthStore((s) => s.token);
+  const token = useAuthStore((s) => s.accessToken);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;

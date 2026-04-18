@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Search, LayoutGrid, List, MoreVertical, Bot, Phone, Clock, TrendingUp, Copy, Trash2, Edit } from 'lucide-react';
+import { Plus, Search, LayoutGrid, List, MoreVertical, Bot, Phone, Clock, TrendingUp, Copy, Trash2, Edit, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/ui/Badge';
 import { Dropdown } from '@/components/ui/Dropdown';
 import { formatNumber } from '@/utils/formatters';
+import { agentApi } from '@/services/agent.api';
 import type { Agent } from '@/types';
 
 const mockAgents: Agent[] = [
@@ -45,8 +46,50 @@ export function AgentListPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const filtered = mockAgents.filter((a) => {
+  useEffect(() => {
+    fetchAgents();
+  }, []);
+
+  const fetchAgents = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await agentApi.list();
+      setAgents(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      const message = err?.response?.data?.message || err?.message || 'Failed to load agents';
+      setError(message);
+      // Fall back to mock data so UI still looks good
+      setAgents(mockAgents);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDelete = async (agent: Agent) => {
+    if (!confirm(`Delete agent "${agent.name}"?`)) return;
+    try {
+      await agentApi.delete(agent.id);
+      setAgents((prev) => prev.filter((a) => a.id !== agent.id));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleClone = async (agent: Agent) => {
+    try {
+      const cloned = await agentApi.clone(agent.id);
+      setAgents((prev) => [...prev, cloned]);
+    } catch {
+      // ignore
+    }
+  };
+
+  const filtered = agents.filter((a) => {
     const matchSearch = a.name.toLowerCase().includes(search.toLowerCase()) ||
       a.description.toLowerCase().includes(search.toLowerCase());
     const matchStatus = statusFilter === 'all' || a.status === statusFilter;
@@ -55,9 +98,17 @@ export function AgentListPage() {
 
   const agentMenuItems = (agent: Agent) => [
     { label: 'Edit', icon: <Edit className="h-4 w-4" />, onClick: () => navigate(`/agents/${agent.id}`) },
-    { label: 'Duplicate', icon: <Copy className="h-4 w-4" />, onClick: () => {} },
-    { label: 'Delete', icon: <Trash2 className="h-4 w-4" />, onClick: () => {}, danger: true, divider: true },
+    { label: 'Duplicate', icon: <Copy className="h-4 w-4" />, onClick: () => handleClone(agent) },
+    { label: 'Delete', icon: <Trash2 className="h-4 w-4" />, onClick: () => handleDelete(agent), danger: true, divider: true },
   ];
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -71,6 +122,14 @@ export function AgentListPage() {
           Create Agent
         </Button>
       </div>
+
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <span>Service unavailable: showing demo data. ({error})</span>
+          <button onClick={fetchAgents} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex items-center gap-4">
@@ -112,8 +171,21 @@ export function AgentListPage() {
         </div>
       </div>
 
+      {/* Empty state */}
+      {!loading && filtered.length === 0 && !error && (
+        <div className="text-center py-16">
+          <Bot className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 mb-1">No agents found</h3>
+          <p className="text-sm text-gray-500 mb-4">Get started by creating your first voice agent.</p>
+          <Button onClick={() => navigate('/agents/new')}>
+            <Plus className="h-4 w-4" />
+            Create Agent
+          </Button>
+        </div>
+      )}
+
       {/* Grid view */}
-      {viewMode === 'grid' ? (
+      {filtered.length > 0 && viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((agent) => (
             <div
@@ -169,7 +241,7 @@ export function AgentListPage() {
             </div>
           ))}
         </div>
-      ) : (
+      ) : filtered.length > 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
           <table className="w-full">
             <thead>
@@ -211,7 +283,7 @@ export function AgentListPage() {
             </tbody>
           </table>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

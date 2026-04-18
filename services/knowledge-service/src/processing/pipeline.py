@@ -1,4 +1,6 @@
-from common import get_logger
+import asyncio
+
+from common import get_logger, get_db_pool
 from .chunker import RecursiveChunker
 from .embedder import Embedder
 from ..storage.s3_client import S3Client
@@ -9,7 +11,11 @@ logger = get_logger("processing-pipeline")
 
 
 class ProcessingPipeline:
-    """Orchestrates: upload -> parse -> chunk -> embed -> store."""
+    """Orchestrates: upload -> parse -> chunk -> embed -> store.
+
+    Handles the full document processing lifecycle with proper
+    status tracking in the database.
+    """
 
     def __init__(self):
         self.chunker = RecursiveChunker(
@@ -29,39 +35,61 @@ class ProcessingPipeline:
     ) -> dict:
         """Process a document through the full pipeline.
 
-        1. Store raw file in S3
-        2. Parse file to text
-        3. Chunk text
-        4. Generate embeddings
-        5. Store chunks + embeddings in vector store
+        1. Update status to 'processing'
+        2. Store raw file in S3
+        3. Parse file to text
+        4. Chunk text
+        5. Generate embeddings
+        6. Store chunks + embeddings in vector store
+        7. Update status to 'completed' (or 'failed')
         """
         logger.info("processing_start", document_id=document_id, filename=filename)
 
-        # 1. Store raw file
-        s3_key = f"documents/{knowledge_base_id}/{document_id}/{filename}"
-        await self.s3.upload(s3_key, content)
+        try:
+            # Update status to processing
+            await self._update_document_status(document_id, "processing")
 
-        # 2. Parse file to text
-        text = await self._parse(filename, content)
+            # 1. Store raw file in S3
+            s3_key = f"documents/{knowledge_base_id}/{document_id}/{filename}"
+            await self.s3.upload(s3_key, content, content_type=self._get_content_type(filename))
 
-        # 3. Chunk
-        chunks = self.chunker.chunk(text)
-        logger.info("chunking_complete", document_id=document_id, chunk_count=len(chunks))
+            # 2. Parse file to text
+            text = await self._parse(filename, content)
+            if not text.strip():
+                logger.warning("empty_document", document_id=document_id)
+                await self._update_document_status(document_id, "completed", chunk_count=0)
+                return {"document_id": document_id, "chunk_count": 0, "status": "completed"}
 
-        # 4. Embed
-        chunk_texts = [c["content"] for c in chunks]
-        embeddings = await self.embedder.embed(chunk_texts)
+            # 3. Chunk
+            chunks = self.chunker.chunk(text)
+            logger.info("chunking_complete", document_id=document_id, chunk_count=len(chunks))
 
-        # 5. Store in vector store
-        await self.vector_store.insert_chunks(
-            document_id=document_id,
-            knowledge_base_id=knowledge_base_id,
-            chunks=chunks,
-            embeddings=embeddings,
-        )
+            if not chunks:
+                await self._update_document_status(document_id, "completed", chunk_count=0)
+                return {"document_id": document_id, "chunk_count": 0, "status": "completed"}
 
-        logger.info("processing_complete", document_id=document_id, chunk_count=len(chunks))
-        return {"document_id": document_id, "chunk_count": len(chunks), "status": "completed"}
+            # 4. Embed
+            chunk_texts = [c["content"] for c in chunks]
+            embeddings = await self.embedder.embed(chunk_texts)
+
+            # 5. Store in vector store
+            await self.vector_store.insert_chunks(
+                document_id=document_id,
+                knowledge_base_id=knowledge_base_id,
+                chunks=chunks,
+                embeddings=embeddings,
+            )
+
+            # 6. Update status
+            await self._update_document_status(document_id, "completed", chunk_count=len(chunks))
+
+            logger.info("processing_complete", document_id=document_id, chunk_count=len(chunks))
+            return {"document_id": document_id, "chunk_count": len(chunks), "status": "completed"}
+
+        except Exception as e:
+            logger.error("processing_failed", document_id=document_id, error=str(e))
+            await self._update_document_status(document_id, "failed", error=str(e))
+            return {"document_id": document_id, "chunk_count": 0, "status": "failed", "error": str(e)}
 
     async def _parse(self, filename: str, content: bytes) -> str:
         """Route to appropriate parser based on file extension."""
@@ -73,10 +101,49 @@ class ProcessingPipeline:
         elif ext == "docx":
             from .parsers.docx_parser import parse_docx
             return await parse_docx(content)
-        elif ext in ("txt", "md", "csv"):
+        elif ext in ("txt", "md", "csv", "json", "yaml", "yml"):
             from .parsers.txt_parser import parse_txt
             return await parse_txt(content)
         else:
-            # Fallback: try as plain text
             from .parsers.txt_parser import parse_txt
             return await parse_txt(content)
+
+    async def _update_document_status(
+        self,
+        document_id: str,
+        status: str,
+        chunk_count: int = 0,
+        error: str = "",
+    ):
+        """Update document status in the database."""
+        try:
+            pool = await get_db_pool(settings.database_url)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE documents
+                    SET status = $1, chunk_count = $2, error_message = $3,
+                        updated_at = NOW()
+                    WHERE id = $4
+                    """,
+                    status,
+                    chunk_count,
+                    error,
+                    document_id,
+                )
+        except Exception as e:
+            logger.warning("status_update_failed", document_id=document_id, error=str(e))
+
+    @staticmethod
+    def _get_content_type(filename: str) -> str:
+        """Determine content type from filename."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        content_types = {
+            "pdf": "application/pdf",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "txt": "text/plain",
+            "md": "text/markdown",
+            "csv": "text/csv",
+            "json": "application/json",
+        }
+        return content_types.get(ext, "application/octet-stream")

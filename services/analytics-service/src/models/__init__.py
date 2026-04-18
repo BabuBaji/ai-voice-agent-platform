@@ -43,5 +43,6 @@ class DashboardData(BaseModel):
     calls: CallMetrics
     leads: LeadMetrics
     top_agents: list[AgentMetrics] = Field(default_factory=list)
+    answer_rate: float = 0.0
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None

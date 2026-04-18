@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, Download, Filter, Trash2 } from 'lucide-react';
+import { Search, Plus, Download, Trash2, Loader2, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { Table } from '@/components/ui/Table';
 import { formatDate, formatCurrency } from '@/utils/formatters';
+import { crmApi } from '@/services/crm.api';
 import type { Lead } from '@/types';
 
 const mockLeads: Lead[] = [
@@ -33,23 +34,76 @@ export function LeadsPage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const limit = 20;
 
-  const filtered = mockLeads.filter((l) => {
-    const matchSearch = l.name.toLowerCase().includes(search.toLowerCase()) ||
-      l.company.toLowerCase().includes(search.toLowerCase()) ||
-      l.email.toLowerCase().includes(search.toLowerCase());
-    const matchStatus = statusFilter === 'all' || l.status === statusFilter;
-    const matchSource = sourceFilter === 'all' || l.source === sourceFilter;
-    return matchSearch && matchStatus && matchSource;
-  });
+  const fetchLeads = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const params: Record<string, any> = { page, limit };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      if (sourceFilter !== 'all') params.source = sourceFilter;
+      if (search) params.search = search;
+      const result = await crmApi.listLeads(params);
+      setLeads(result.data);
+      setTotal(result.total);
+    } catch (err: any) {
+      const message = err?.response?.data?.message || err?.message || 'Failed to load leads';
+      setError(message);
+      // Fall back to mock data
+      setLeads(mockLeads);
+      setTotal(mockLeads.length);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, statusFilter, sourceFilter, search]);
+
+  useEffect(() => {
+    fetchLeads();
+  }, [fetchLeads]);
+
+  // When filters change, reset to page 1
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, sourceFilter, search]);
+
+  // Client-side filter for mock data fallback (API handles filtering server-side)
+  const displayed = error
+    ? leads.filter((l) => {
+        const matchSearch = !search || l.name.toLowerCase().includes(search.toLowerCase()) ||
+          l.company.toLowerCase().includes(search.toLowerCase()) ||
+          l.email.toLowerCase().includes(search.toLowerCase());
+        const matchStatus = statusFilter === 'all' || l.status === statusFilter;
+        const matchSource = sourceFilter === 'all' || l.source === sourceFilter;
+        return matchSearch && matchStatus && matchSource;
+      })
+    : leads;
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]);
   };
 
   const toggleAll = () => {
-    setSelectedIds((prev) => prev.length === filtered.length ? [] : filtered.map((l) => l.id));
+    setSelectedIds((prev) => prev.length === displayed.length ? [] : displayed.map((l) => l.id));
   };
+
+  const handleDeleteSelected = async () => {
+    if (!confirm(`Delete ${selectedIds.length} lead(s)?`)) return;
+    try {
+      await Promise.all(selectedIds.map((id) => crmApi.deleteLead(id)));
+      setSelectedIds([]);
+      fetchLeads();
+    } catch {
+      // ignore
+    }
+  };
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   const columns = [
     {
@@ -143,6 +197,14 @@ export function LeadsPage() {
         </div>
       </div>
 
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-sm text-warning-700">
+          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <span>Service unavailable: showing demo data. ({error})</span>
+          <button onClick={fetchLeads} className="ml-auto text-warning-800 underline text-xs">Retry</button>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex items-center gap-4 flex-wrap">
         <div className="relative flex-1 max-w-md">
@@ -184,7 +246,7 @@ export function LeadsPage() {
         {selectedIds.length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
             <span className="text-sm text-gray-500">{selectedIds.length} selected</span>
-            <Button variant="danger" size="sm">
+            <Button variant="danger" size="sm" onClick={handleDeleteSelected}>
               <Trash2 className="h-3.5 w-3.5" />
               Delete
             </Button>
@@ -192,13 +254,35 @@ export function LeadsPage() {
         )}
       </div>
 
-      <Card padding={false}>
-        <Table
-          columns={columns}
-          data={filtered}
-          onRowClick={(item) => navigate(`/crm/leads/${item.id}`)}
-        />
-      </Card>
+      {loading ? (
+        <div className="flex items-center justify-center h-64">
+          <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+        </div>
+      ) : (
+        <Card padding={false}>
+          <Table
+            columns={columns}
+            data={displayed}
+            onRowClick={(item) => navigate(`/crm/leads/${item.id}`)}
+          />
+
+          {/* Pagination */}
+          <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+            <p className="text-sm text-gray-500">
+              Showing {displayed.length} of {total} leads
+            </p>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="text-sm text-gray-700 px-2">Page {page} of {totalPages}</span>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

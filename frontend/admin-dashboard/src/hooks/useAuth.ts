@@ -1,45 +1,29 @@
 import { useAuthStore } from '@/stores/auth.store';
 import { authApi } from '@/services/auth.api';
-import type { User } from '@/types';
 
 export function useAuth() {
-  const { user, token, isAuthenticated, login: setAuth, logout: clearAuth, setUser } = useAuthStore();
+  const { user, accessToken, refreshToken, isAuthenticated, login: setAuth, logout: clearAuth, setUser } = useAuthStore();
 
   const login = async (email: string, password: string) => {
-    // In demo mode, simulate login
-    const mockUser: User = {
-      id: '1',
-      email,
-      name: 'Admin User',
-      role: 'admin',
-      tenantId: 'tenant-1',
-    };
-    setAuth(mockUser, 'mock-jwt-token');
-    return mockUser;
-
-    // Production:
-    // const { user, tokens } = await authApi.login({ email, password });
-    // setAuth(user, tokens.accessToken);
-    // return user;
+    const response = await authApi.login({ email, password });
+    setAuth(response.user, response.accessToken, response.refreshToken);
+    return response.user;
   };
 
   const register = async (companyName: string, name: string, email: string, password: string) => {
-    const mockUser: User = {
-      id: '1',
-      email,
-      name,
-      role: 'admin',
-      tenantId: 'tenant-1',
-    };
-    setAuth(mockUser, 'mock-jwt-token');
-    return mockUser;
+    const response = await authApi.register({ companyName, name, email, password });
+    setAuth(response.user, response.accessToken, response.refreshToken);
+    return response.user;
   };
 
   const logout = async () => {
     try {
-      await authApi.logout();
+      const rt = refreshToken || localStorage.getItem('va-refresh-token');
+      if (rt) {
+        await authApi.logout(rt);
+      }
     } catch {
-      // ignore
+      // ignore logout API errors - clear local state regardless
     }
     clearAuth();
   };
@@ -56,5 +40,5 @@ export function useAuth() {
     }
   };
 
-  return { user, token, isAuthenticated, login, register, logout, getCurrentUser };
+  return { user, token: accessToken, isAuthenticated, login, register, logout, getCurrentUser };
 }

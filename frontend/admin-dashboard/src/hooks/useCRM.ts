@@ -2,13 +2,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { crmApi } from '@/services/crm.api';
 import type { Lead, Contact, Deal } from '@/types';
 
-export function useLeads() {
+export function useLeads(params?: { page?: number; limit?: number; status?: string; source?: string; search?: string }) {
   const queryClient = useQueryClient();
 
   const leadsQuery = useQuery({
-    queryKey: ['leads'],
-    queryFn: crmApi.listLeads,
-    placeholderData: [],
+    queryKey: ['leads', params],
+    queryFn: () => crmApi.listLeads(params),
+    placeholderData: { data: [], total: 0, page: 1, limit: 20 },
   });
 
   const createMutation = useMutation({
@@ -22,21 +22,30 @@ export function useLeads() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['leads'] }),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => crmApi.deleteLead(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['leads'] }),
+  });
+
   return {
-    leads: leadsQuery.data || [],
+    leads: leadsQuery.data?.data || [],
+    total: leadsQuery.data?.total || 0,
     isLoading: leadsQuery.isLoading,
+    isError: leadsQuery.isError,
+    error: leadsQuery.error,
     createLead: createMutation.mutate,
     updateLead: updateMutation.mutate,
+    deleteLead: deleteMutation.mutate,
   };
 }
 
-export function useContacts() {
+export function useContacts(params?: { page?: number; limit?: number; search?: string }) {
   const queryClient = useQueryClient();
 
   const contactsQuery = useQuery({
-    queryKey: ['contacts'],
-    queryFn: crmApi.listContacts,
-    placeholderData: [],
+    queryKey: ['contacts', params],
+    queryFn: () => crmApi.listContacts(params),
+    placeholderData: { data: [], total: 0, page: 1, limit: 20 },
   });
 
   const createMutation = useMutation({
@@ -45,29 +54,31 @@ export function useContacts() {
   });
 
   return {
-    contacts: contactsQuery.data || [],
+    contacts: contactsQuery.data?.data || [],
+    total: contactsQuery.data?.total || 0,
     isLoading: contactsQuery.isLoading,
     createContact: createMutation.mutate,
   };
 }
 
-export function useDeals() {
+export function useDeals(params?: { page?: number; limit?: number }) {
   const queryClient = useQueryClient();
 
   const dealsQuery = useQuery({
-    queryKey: ['deals'],
-    queryFn: crmApi.listDeals,
-    placeholderData: [],
+    queryKey: ['deals', params],
+    queryFn: () => crmApi.listDeals(params),
+    placeholderData: { data: [], total: 0, page: 1, limit: 20 },
   });
 
   const moveMutation = useMutation({
-    mutationFn: ({ id, stage }: { id: string; stage: string }) =>
-      crmApi.moveDeal(id, stage),
+    mutationFn: ({ id, stageId }: { id: string; stageId: string }) =>
+      crmApi.moveDeal(id, stageId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['deals'] }),
   });
 
   return {
-    deals: dealsQuery.data || [],
+    deals: dealsQuery.data?.data || [],
+    total: dealsQuery.data?.total || 0,
     isLoading: dealsQuery.isLoading,
     moveDeal: moveMutation.mutate,
   };

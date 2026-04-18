@@ -43,8 +43,9 @@ export function RegisterPage() {
     try {
       await registerUser(data.companyName, data.name, data.email, data.password);
       navigate('/');
-    } catch {
-      setError('Registration failed. Please try again.');
+    } catch (err: any) {
+      const message = err?.response?.data?.message || err?.message || 'Registration failed. Please try again.';
+      setError(message);
     } finally {
       setLoading(false);
     }

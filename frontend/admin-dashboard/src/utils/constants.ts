@@ -1,5 +1,5 @@
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
-export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws';
+export const API_URL = import.meta.env.VITE_API_URL || '/api/v1';
+export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:3003/ws';
 
 export const NAV_ITEMS = [
   { label: 'Dashboard', path: '/', icon: 'LayoutDashboard' },

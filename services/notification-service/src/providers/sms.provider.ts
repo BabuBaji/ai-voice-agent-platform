@@ -1,9 +1,7 @@
 import { config } from '../config';
+import pino from 'pino';
 
-/**
- * SMS notification provider using Twilio.
- * Stub implementation.
- */
+const logger = pino({ level: config.logLevel });
 
 export interface SmsOptions {
   to: string;
@@ -12,20 +10,56 @@ export interface SmsOptions {
 }
 
 export class SmsProvider {
+  private client: any = null;
+
+  private init(): void {
+    if (this.client) return;
+    if (config.twilio.accountSid && config.twilio.authToken) {
+      try {
+        // Dynamic import to avoid crash when twilio is not installed
+        const Twilio = require('twilio');
+        this.client = Twilio(config.twilio.accountSid, config.twilio.authToken);
+        logger.info('Twilio SMS provider initialized');
+      } catch (err: any) {
+        logger.warn({ error: err.message }, 'Failed to initialize Twilio client');
+      }
+    }
+  }
+
   async send(options: SmsOptions): Promise<{ messageId: string; status: string }> {
-    console.log('SmsProvider.send', {
-      to: options.to,
-      from: options.from || config.twilio.fromNumber,
-    });
+    this.init();
 
-    // TODO: Use Twilio SDK
-    // const client = twilio(config.twilio.accountSid, config.twilio.authToken);
-    // await client.messages.create({ ... });
+    const from = options.from || config.twilio.fromNumber;
 
-    return {
-      messageId: `sms-${Date.now()}`,
-      status: 'sent',
-    };
+    if (!this.client || !config.twilio.accountSid) {
+      // Fallback: log instead of sending
+      logger.info(
+        { to: options.to, from, bodyLength: options.body.length },
+        'SMS (dry-run, no TWILIO credentials configured)'
+      );
+      return {
+        messageId: `sms-dryrun-${Date.now()}`,
+        status: 'dry_run',
+      };
+    }
+
+    try {
+      const message = await this.client.messages.create({
+        to: options.to,
+        from,
+        body: options.body,
+      });
+
+      logger.info({ to: options.to, sid: message.sid }, 'SMS sent via Twilio');
+
+      return {
+        messageId: message.sid,
+        status: 'sent',
+      };
+    } catch (err: any) {
+      logger.error({ to: options.to, error: err.message }, 'Twilio SMS send failed');
+      throw new Error(`SMS send failed: ${err.message}`);
+    }
   }
 }
 

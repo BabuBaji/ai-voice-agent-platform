@@ -12,8 +12,11 @@ agentRouter.delete('/:id', agentController.deleteAgent);
 
 // Actions
 agentRouter.post('/:id/publish', agentController.publishAgent);
+agentRouter.post('/:id/unpublish', agentController.unpublishAgent);
 agentRouter.post('/:id/clone', agentController.cloneAgent);
+agentRouter.post('/:id/test', agentController.testAgent);
 
 // Prompts
 agentRouter.get('/:id/prompts', agentController.getAgentPrompts);
-agentRouter.put('/:id/prompts', agentController.updateAgentPrompts);
+agentRouter.post('/:id/prompts', agentController.createAgentPrompt);
+agentRouter.put('/:id/prompts/:promptId', agentController.updateAgentPrompt);

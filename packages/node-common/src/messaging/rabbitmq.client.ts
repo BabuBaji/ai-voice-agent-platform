@@ -1,9 +1,9 @@
-import amqplib, { Connection, Channel } from 'amqplib';
+import amqplib from 'amqplib';
 import { logger } from '../utils/logger';
 
 export interface RabbitMQClient {
-  connection: Connection;
-  channel: Channel;
+  connection: Awaited<ReturnType<typeof amqplib.connect>>;
+  channel: Awaited<ReturnType<Awaited<ReturnType<typeof amqplib.connect>>['createChannel']>>;
   publish(exchange: string, routingKey: string, data: unknown): void;
   subscribe(
     exchange: string,

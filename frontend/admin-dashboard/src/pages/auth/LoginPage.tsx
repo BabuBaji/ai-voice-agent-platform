@@ -35,8 +35,9 @@ export function LoginPage() {
     try {
       await login(data.email, data.password);
       navigate('/');
-    } catch {
-      setError('Invalid email or password');
+    } catch (err: any) {
+      const message = err?.response?.data?.message || err?.message || 'Invalid email or password';
+      setError(message);
     } finally {
       setLoading(false);
     }

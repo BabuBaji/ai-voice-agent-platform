@@ -1,5 +1,5 @@
 import api from './api';
-import type { User, AuthTokens } from '@/types';
+import type { User } from '@/types';
 
 export interface LoginRequest {
   email: string;
@@ -13,24 +13,31 @@ export interface RegisterRequest {
   password: string;
 }
 
+export interface AuthResponse {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: User;
+}
+
 export const authApi = {
-  login: async (data: LoginRequest): Promise<{ user: User; tokens: AuthTokens }> => {
+  login: async (data: LoginRequest): Promise<AuthResponse> => {
     const response = await api.post('/auth/login', data);
     return response.data;
   },
 
-  register: async (data: RegisterRequest): Promise<{ user: User; tokens: AuthTokens }> => {
+  register: async (data: RegisterRequest): Promise<AuthResponse> => {
     const response = await api.post('/auth/register', data);
     return response.data;
   },
 
-  refreshToken: async (refreshToken: string): Promise<AuthTokens> => {
+  refreshToken: async (refreshToken: string): Promise<AuthResponse> => {
     const response = await api.post('/auth/refresh', { refreshToken });
     return response.data;
   },
 
-  logout: async (): Promise<void> => {
-    await api.post('/auth/logout');
+  logout: async (refreshToken: string): Promise<void> => {
+    await api.post('/auth/logout', { refreshToken });
   },
 
   getCurrentUser: async (): Promise<User> => {

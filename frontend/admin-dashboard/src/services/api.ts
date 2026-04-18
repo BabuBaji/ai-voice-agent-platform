@@ -9,16 +9,9 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const storage = localStorage.getItem('va-auth-storage');
-  if (storage) {
-    try {
-      const { state } = JSON.parse(storage);
-      if (state?.token) {
-        config.headers.Authorization = `Bearer ${state.token}`;
-      }
-    } catch {
-      // ignore parse errors
-    }
+  const token = localStorage.getItem('va-access-token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
@@ -27,6 +20,8 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      localStorage.removeItem('va-access-token');
+      localStorage.removeItem('va-refresh-token');
       localStorage.removeItem('va-auth-storage');
       window.location.href = '/login';
     }

@@ -1,22 +1,46 @@
+import { Pool } from 'pg';
 import { app } from './app';
 import { config } from './config';
+import { initDatabase } from './db/init';
 import pino from 'pino';
 
 const logger = pino({
   transport: config.nodeEnv === 'development' ? { target: 'pino-pretty' } : undefined,
 });
 
-const server = app.listen(config.port, () => {
-  logger.info(`Agent Service started on port ${config.port}`);
-  logger.info(`Environment: ${config.nodeEnv}`);
+export const pool = new Pool({
+  connectionString: config.databaseUrl,
 });
 
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down...');
-  server.close(() => process.exit(0));
-});
+async function start(): Promise<void> {
+  try {
+    // Test database connection
+    const client = await pool.connect();
+    logger.info('Connected to PostgreSQL');
+    client.release();
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down...');
-  server.close(() => process.exit(0));
-});
+    // Initialize tables
+    await initDatabase(pool);
+
+    // Start server
+    const server = app.listen(config.port, () => {
+      logger.info(`Agent Service started on port ${config.port}`);
+      logger.info(`Environment: ${config.nodeEnv}`);
+    });
+
+    const shutdown = async () => {
+      logger.info('Shutting down...');
+      server.close();
+      await pool.end();
+      process.exit(0);
+    };
+
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+  } catch (err) {
+    logger.error({ err }, 'Failed to start agent service');
+    process.exit(1);
+  }
+}
+
+start();

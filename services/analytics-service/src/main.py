@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from common import get_db_pool, close_db_pool, RabbitMQClient, EventBus, get_logger
 from .config import settings
+from .db.init import init_analytics_tables
 from .api.router import api_router
 from .consumer import start_consumers
 
@@ -15,13 +16,20 @@ async def lifespan(app: FastAPI):
     logger.info("starting analytics-service", port=settings.port)
     app.state.db = await get_db_pool(settings.database_url)
 
+    # Initialize analytics-specific tables
+    try:
+        await init_analytics_tables(app.state.db)
+        logger.info("analytics_tables_ready")
+    except Exception as e:
+        logger.warning("analytics_table_init_failed", error=str(e))
+
     # Connect to RabbitMQ for real-time metric updates
     mq = RabbitMQClient()
     try:
         await mq.connect(settings.rabbitmq_url)
         app.state.mq = mq
         app.state.event_bus = EventBus(mq)
-        await start_consumers(app.state.event_bus)
+        await start_consumers(app.state.event_bus, app.state.db)
         logger.info("rabbitmq_consumers_started")
     except Exception as e:
         logger.warning("rabbitmq_connection_failed", error=str(e))

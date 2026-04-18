@@ -2,17 +2,24 @@ import React from 'react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-interface CardProps {
+export interface CardProps {
   children: React.ReactNode;
   className?: string;
   padding?: boolean;
+  onClick?: () => void;
 }
 
-export function Card({ children, className, padding = true }: CardProps) {
+export function Card({ children, className, padding = true, onClick }: CardProps) {
   return (
     <div
+      onClick={onClick}
       className={twMerge(
-        clsx('bg-white rounded-xl border border-gray-200 shadow-sm', padding && 'p-6', className)
+        clsx(
+          'bg-white rounded-xl border border-gray-200 shadow-sm',
+          padding && 'p-6',
+          onClick && 'cursor-pointer hover:shadow-md transition-shadow',
+          className,
+        )
       )}
     >
       {children}
