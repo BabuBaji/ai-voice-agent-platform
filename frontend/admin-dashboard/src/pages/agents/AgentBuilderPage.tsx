@@ -1,14 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Save, Play, Settings, MessageSquare, Volume2, Wrench, BookOpen, Globe, Phone, ArrowLeft } from 'lucide-react';
+import { Save, Play, Settings, MessageSquare, Volume2, Wrench, BookOpen, Phone, ArrowLeft, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Input, Textarea, Select } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
 import { PromptEditor } from '@/components/agent-builder/PromptEditor';
 import { VoiceSelector } from '@/components/agent-builder/VoiceSelector';
 import { ToolConfigurator } from '@/components/agent-builder/ToolConfigurator';
 import { KnowledgeAttacher } from '@/components/agent-builder/KnowledgeAttacher';
+import { agentApi } from '@/services/agent.api';
 
 const tabs = [
   { id: 'general', label: 'General', icon: Settings },
@@ -41,12 +41,8 @@ const llmModels: Record<string, { value: string; label: string }[]> = {
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
     { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   ],
-  mistral: [
-    { value: 'mistral-large', label: 'Mistral Large' },
-  ],
-  groq: [
-    { value: 'llama-3-70b', label: 'Llama 3 70B' },
-  ],
+  mistral: [{ value: 'mistral-large', label: 'Mistral Large' }],
+  groq: [{ value: 'llama-3-70b', label: 'Llama 3 70B' }],
 };
 
 export function AgentBuilderPage() {
@@ -55,22 +51,54 @@ export function AgentBuilderPage() {
   const isNew = !id || id === 'new';
   const [activeTab, setActiveTab] = useState('general');
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(!isNew);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [name, setName] = useState(isNew ? '' : 'Sales Assistant');
-  const [description, setDescription] = useState(isNew ? '' : 'Handles inbound sales calls, qualifies leads, and schedules demos');
-  const [greeting, setGreeting] = useState(isNew ? '' : 'Hi there! Thanks for calling. How can I help you today?');
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [greeting, setGreeting] = useState('');
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-4o');
   const [temperature, setTemperature] = useState(0.7);
-  const [systemPrompt, setSystemPrompt] = useState(
-    isNew ? '' : `You are a professional sales assistant for TechCorp. Your role is to:\n\n1. Greet callers warmly and identify their needs\n2. Qualify leads by asking about their company size, budget, and timeline\n3. Explain our products and services clearly\n4. Schedule demos with interested prospects\n5. Handle objections professionally\n\nKey rules:\n- Always be polite and professional\n- Never make promises about pricing without checking\n- If you cannot answer a question, offer to connect them with a human agent\n- Collect the caller's name, email, and company at minimum`
-  );
+  const [systemPrompt, setSystemPrompt] = useState('');
   const [voiceProvider, setVoiceProvider] = useState('elevenlabs');
   const [voiceId, setVoiceId] = useState('rachel');
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [language, setLanguage] = useState('en-US');
-  const [enabledTools, setEnabledTools] = useState<string[]>(['calendar', 'crm_lookup']);
-  const [attachedKBs, setAttachedKBs] = useState<string[]>(['kb-1']);
+  const [enabledTools, setEnabledTools] = useState<string[]>([]);
+  const [attachedKBs, setAttachedKBs] = useState<string[]>([]);
+
+  // Load existing agent if editing
+  useEffect(() => {
+    if (!isNew && id) {
+      setLoading(true);
+      agentApi.get(id)
+        .then((agent) => {
+          setName(agent.name || '');
+          setDescription(agent.description || '');
+          setGreeting(agent.greetingMessage || (agent as any).greeting_message || '');
+          setLlmProvider(agent.llmProvider || (agent as any).llm_provider || 'openai');
+          setLlmModel(agent.llmModel || (agent as any).llm_model || 'gpt-4o');
+          setTemperature(agent.temperature ?? 0.7);
+          setSystemPrompt(agent.systemPrompt || (agent as any).system_prompt || '');
+          if (agent.voiceConfig || (agent as any).voice_config) {
+            const vc = agent.voiceConfig || (agent as any).voice_config || {};
+            setVoiceProvider(vc.ttsProvider || vc.provider || 'elevenlabs');
+            setVoiceId(vc.voiceId || vc.voice_id || 'rachel');
+            setVoiceSpeed(vc.speed ?? 1.0);
+            setLanguage(vc.language || 'en-US');
+          }
+          const tools = agent.toolsConfig || (agent as any).tools_config || [];
+          setEnabledTools(Array.isArray(tools) ? tools.map((t: any) => typeof t === 'string' ? t : t.name).filter(Boolean) : []);
+          const kbs = agent.knowledgeBaseIds || (agent as any).knowledge_base_ids || [];
+          setAttachedKBs(kbs);
+        })
+        .catch((err) => {
+          setMessage({ type: 'error', text: 'Failed to load agent: ' + (err?.response?.data?.error || err.message) });
+        })
+        .finally(() => setLoading(false));
+    }
+  }, [id, isNew]);
 
   const handleToolToggle = (toolId: string) => {
     setEnabledTools((prev) =>
@@ -79,10 +107,64 @@ export function AgentBuilderPage() {
   };
 
   const handleSave = async () => {
+    // Validate required fields
+    if (!name.trim()) {
+      setMessage({ type: 'error', text: 'Agent name is required' });
+      setActiveTab('general');
+      return;
+    }
+    if (!systemPrompt.trim()) {
+      setMessage({ type: 'error', text: 'System prompt is required' });
+      setActiveTab('prompt');
+      return;
+    }
+
     setSaving(true);
-    await new Promise((r) => setTimeout(r, 1000));
-    setSaving(false);
+    setMessage(null);
+
+    const payload = {
+      name: name.trim(),
+      description: description.trim() || undefined,
+      system_prompt: systemPrompt.trim(),
+      llm_provider: llmProvider,
+      llm_model: llmModel,
+      temperature,
+      greeting_message: greeting.trim() || undefined,
+      voice_config: {
+        provider: voiceProvider,
+        voice_id: voiceId,
+        speed: voiceSpeed,
+        language,
+      },
+      tools_config: enabledTools.map((t) => ({ name: t, enabled: true })),
+      knowledge_base_ids: attachedKBs,
+    };
+
+    try {
+      if (isNew) {
+        const created = await agentApi.create(payload as any);
+        setMessage({ type: 'success', text: 'Agent created successfully!' });
+        // Navigate to the edit page for the newly created agent
+        setTimeout(() => navigate(`/agents/${created.id || (created as any).id}`), 1000);
+      } else {
+        await agentApi.update(id!, payload as any);
+        setMessage({ type: 'success', text: 'Agent saved successfully!' });
+      }
+    } catch (err: any) {
+      const errorMsg = err?.response?.data?.error || err?.response?.data?.details?.[0]?.message || err.message || 'Failed to save agent';
+      setMessage({ type: 'error', text: errorMsg });
+    } finally {
+      setSaving(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-primary-600" />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -113,10 +195,22 @@ export function AgentBuilderPage() {
           )}
           <Button variant="gradient" onClick={handleSave} loading={saving} className="rounded-xl">
             <Save className="h-4 w-4" />
-            {isNew ? 'Create' : 'Save Changes'}
+            {isNew ? 'Create Agent' : 'Save Changes'}
           </Button>
         </div>
       </div>
+
+      {/* Status message */}
+      {message && (
+        <div className={`flex items-center gap-2 p-4 rounded-xl text-sm font-medium animate-slide-down ${
+          message.type === 'success'
+            ? 'bg-green-50 text-green-700 border border-green-200'
+            : 'bg-red-50 text-red-700 border border-red-200'
+        }`}>
+          {message.type === 'success' ? <CheckCircle className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
+          {message.text}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
