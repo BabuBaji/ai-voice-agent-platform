@@ -179,7 +179,9 @@ async def chat_completions(request: ChatCompletionRequest):
 
 @router.post("/chat/simple")
 async def simple_chat(request: Request):
-    """Non-streaming chat for service-to-service calls."""
+    """Non-streaming chat for service-to-service calls.
+    Falls back to mock provider if the real provider fails.
+    """
     body = await request.json()
 
     system_prompt = body.get("system_prompt", "You are a helpful assistant.")
@@ -189,21 +191,42 @@ async def simple_chat(request: Request):
     temperature = body.get("temperature", 0.7)
     max_tokens = body.get("max_tokens", 4096)
 
-    # Build messages list with system prompt
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
-    # Get LLM provider and call non-streaming
-    llm = llm_router.get_provider(provider)
+    used_provider = provider
+    used_mock = False
 
-    # Collect streaming response into single string
-    full_response = ""
-    async for chunk in llm.chat_completion(
-        messages=full_messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    ):
-        if chunk.get("type") == "content" and chunk.get("content"):
-            full_response += chunk["content"]
+    async def _collect_response(llm, mdl):
+        result = ""
+        async for chunk in llm.chat_completion(
+            messages=full_messages,
+            model=mdl,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            if chunk.get("type") == "content" and chunk.get("content"):
+                content = chunk["content"]
+                # Check for error markers from providers
+                if content.startswith("[") and "error" in content.lower():
+                    raise RuntimeError(content)
+                result += content
+        return result
 
-    return {"reply": full_response, "provider": provider, "model": model}
+    # Try the requested provider first
+    try:
+        llm = llm_router.get_provider(provider)
+        full_response = await _collect_response(llm, model)
+    except Exception as e:
+        # Fallback to mock provider
+        logger.warn("provider_failed_fallback_to_mock", provider=provider, error=str(e))
+        mock_llm = llm_router.get_provider("mock")
+        full_response = await _collect_response(mock_llm, "mock-v1")
+        used_provider = "mock"
+        used_mock = True
+
+    return {
+        "reply": full_response,
+        "provider": used_provider,
+        "model": model if not used_mock else "mock-v1",
+        "mock": used_mock,
+    }

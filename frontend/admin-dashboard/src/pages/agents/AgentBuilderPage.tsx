@@ -20,6 +20,7 @@ const tabs = [
 ];
 
 const llmProviders = [
+  { value: 'mock', label: 'Demo Mode (No API Key)' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'anthropic', label: 'Anthropic (Claude)' },
   { value: 'google', label: 'Google (Gemini)' },
@@ -43,6 +44,7 @@ const llmModels: Record<string, { value: string; label: string }[]> = {
   ],
   mistral: [{ value: 'mistral-large', label: 'Mistral Large' }],
   groq: [{ value: 'llama-3-70b', label: 'Llama 3 70B' }],
+  mock: [{ value: 'mock-v1', label: 'Mock AI (Demo)' }],
 };
 
 export function AgentBuilderPage() {
@@ -57,8 +59,8 @@ export function AgentBuilderPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [greeting, setGreeting] = useState('');
-  const [llmProvider, setLlmProvider] = useState('openai');
-  const [llmModel, setLlmModel] = useState('gpt-4o');
+  const [llmProvider, setLlmProvider] = useState('mock');
+  const [llmModel, setLlmModel] = useState('mock-v1');
   const [temperature, setTemperature] = useState(0.7);
   const [systemPrompt, setSystemPrompt] = useState('');
   const [voiceProvider, setVoiceProvider] = useState('elevenlabs');
