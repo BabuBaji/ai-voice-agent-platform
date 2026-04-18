@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "analytics-service"
+version = "0.1.0"
+description = "Analytics service - call metrics, agent performance, and lead conversion tracking"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "asyncpg>=0.29.0",
+    "aio-pika>=9.4.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "va-common",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

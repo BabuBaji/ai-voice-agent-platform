@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "va-common"
+version = "0.1.0"
+description = "Shared Python utilities for AI Voice Agent Platform"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.29.0",
+    "aio-pika>=9.4.0",
+    "redis>=5.0.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "structlog>=24.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,27 @@
+{
+  "name": "@va/node-common",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.0",
+    "ioredis": "^5.4.0",
+    "amqplib": "^0.10.4",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.0",
+    "@va/shared-types": "*"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/amqplib": "^0.10.5",
+    "@types/pg": "^8.11.0",
+    "@types/express": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "ai-voice-agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "services/api-gateway",
+    "services/agent-service",
+    "services/telephony-adapter",
+    "services/conversation-service",
+    "services/notification-service",
+    "frontend/admin-dashboard",
+    "frontend/chat-widget"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "infra:up": "docker compose -f docker/docker-compose.infra.yml up -d",
+    "infra:down": "docker compose -f docker/docker-compose.infra.yml down",
+    "full:up": "docker compose -f docker/docker-compose.yml up -d --build",
+    "full:down": "docker compose -f docker/docker-compose.yml down",
+    "db:migrate": "turbo run db:migrate"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  }
+}
