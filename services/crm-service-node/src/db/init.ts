@@ -5,12 +5,8 @@ import pino from 'pino';
 const logger = pino({ level: config.logLevel });
 
 export const pool = new Pool({
-  host: config.db.host,
-  port: config.db.port,
-  database: config.db.database,
-  user: config.db.user,
-  password: config.db.password,
-  max: config.db.max,
+  connectionString: config.databaseUrl,
+  max: 20,
 });
 
 pool.on('error', (err) => {

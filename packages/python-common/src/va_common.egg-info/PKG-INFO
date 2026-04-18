@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: va-common
+Version: 0.1.0
+Summary: Shared Python utilities for AI Voice Agent Platform
+Requires-Python: >=3.11
+Requires-Dist: asyncpg>=0.29.0
+Requires-Dist: aio-pika>=9.4.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: pydantic-settings>=2.3.0
+Requires-Dist: structlog>=24.1.0

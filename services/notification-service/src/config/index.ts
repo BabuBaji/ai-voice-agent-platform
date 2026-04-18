@@ -5,14 +5,7 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-me',
   rabbitmqUrl: process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
 
-  db: {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    database: process.env.DB_NAME || 'ai_voice_agent',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-    max: parseInt(process.env.DB_POOL_MAX || '20', 10),
-  },
+  databaseUrl: process.env.DATABASE_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/notification_db',
 
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY || '',
