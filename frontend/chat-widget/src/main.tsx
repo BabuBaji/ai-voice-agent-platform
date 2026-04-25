@@ -18,6 +18,10 @@ interface WidgetConfig {
   position?: "bottom-right" | "bottom-left";
   primaryColor?: string;
   containerId?: string;
+  /** Public chat endpoint base URL — defaults to current origin or http://localhost:8000. */
+  apiUrl?: string;
+  /** Stable per-visitor id (e.g. from your analytics) for cross-page-load conversation threading. */
+  visitorId?: string;
 }
 
 let root: ReactDOM.Root | null = null;
@@ -65,6 +69,8 @@ function init(config: WidgetConfig) {
         agentId={config.agentId}
         position={config.position}
         primaryColor={config.primaryColor}
+        apiUrl={config.apiUrl}
+        visitorId={config.visitorId}
       />
     </React.StrictMode>
   );
@@ -104,14 +110,16 @@ const api = { init, destroy };
         "bottom-right";
       const primaryColor =
         currentScript.getAttribute("data-primary-color") || "#4f46e5";
+      const apiUrl = currentScript.getAttribute("data-api-url") || undefined;
+      const visitorId = currentScript.getAttribute("data-visitor-id") || undefined;
+
+      const config: WidgetConfig = { agentId, position, primaryColor, apiUrl, visitorId };
 
       // Wait for DOM ready
       if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", () => {
-          init({ agentId, position, primaryColor });
-        });
+        document.addEventListener("DOMContentLoaded", () => init(config));
       } else {
-        init({ agentId, position, primaryColor });
+        init(config);
       }
     }
   }

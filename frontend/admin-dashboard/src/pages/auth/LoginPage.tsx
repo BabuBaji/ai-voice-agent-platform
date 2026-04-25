@@ -35,7 +35,10 @@ export function LoginPage() {
     setError('');
     try {
       await login(data.email, data.password);
-      navigate('/');
+      // After login, drop the user straight into the agent-creation wizard
+      // (where our landing + templates live). They can navigate away via the
+      // sidebar if they want the dashboard instead.
+      navigate('/agents/new');
     } catch (err: any) {
       const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || 'Invalid email or password';
       setError(message);

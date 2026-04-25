@@ -3,27 +3,29 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@va/shared-types": "*",
+    "@types/multer": "^2.1.0",
     "@va/node-common": "*",
-    "express": "^4.18.2",
+    "@va/shared-types": "*",
     "drizzle-orm": "^0.29.3",
+    "express": "^4.18.2",
+    "multer": "^2.1.1",
     "pg": "^8.11.3",
-    "zod": "^3.22.4",
     "pino": "^8.17.0",
     "pino-pretty": "^10.3.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
-    "typescript": "^5.3.3",
     "@types/express": "^4.17.21",
-    "@types/uuid": "^9.0.7",
     "@types/pg": "^8.10.9",
+    "@types/uuid": "^9.0.7",
+    "drizzle-kit": "^0.20.9",
     "tsx": "^4.7.0",
-    "drizzle-kit": "^0.20.9"
+    "typescript": "^5.3.3"
   }
 }

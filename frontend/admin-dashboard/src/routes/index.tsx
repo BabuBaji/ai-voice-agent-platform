@@ -13,11 +13,28 @@ import { DashboardPage } from '@/pages/dashboard/DashboardPage';
 // Agents
 import { AgentListPage } from '@/pages/agents/AgentListPage';
 import { AgentBuilderPage } from '@/pages/agents/AgentBuilderPage';
+import { AgentWizardPage } from '@/pages/agents/AgentWizardPage';
 import { AgentTestPage } from '@/pages/agents/AgentTestPage';
+import { AgentCallPage } from '@/pages/agents/AgentCallPage';
+import { AgentLiveCallPage } from '@/pages/agents/AgentLiveCallPage';
+import { AgentWebCallPage } from '@/pages/agents/AgentWebCallPage';
+import { SupportPage } from '@/pages/support/SupportPage';
+import { ReportDetailPage } from '@/pages/support/ReportDetailPage';
+import { AdminReportsPage } from '@/pages/support/AdminReportsPage';
+import { AdminReportDetailPage } from '@/pages/support/AdminReportDetailPage';
+import { PublicReportPage } from '@/pages/support/PublicReportPage';
+import { ContactPage } from '@/pages/contact/ContactPage';
+import { AdminContactRequestsPage } from '@/pages/contact/AdminContactRequestsPage';
+import { AdminContactDetailPage } from '@/pages/contact/AdminContactDetailPage';
 
 // Calls
 import { CallLogPage } from '@/pages/calls/CallLogPage';
 import { CallDetailPage } from '@/pages/calls/CallDetailPage';
+
+// Campaigns
+import { CampaignsPage } from '@/pages/campaigns/CampaignsPage';
+import { CampaignDetailPage } from '@/pages/campaigns/CampaignDetailPage';
+import { CampaignWizardPage } from '@/pages/campaigns/CampaignWizardPage';
 
 // CRM
 import { LeadsPage } from '@/pages/crm/LeadsPage';
@@ -28,6 +45,9 @@ import { LeadDetailPage } from '@/pages/crm/LeadDetailPage';
 // Knowledge
 import { KnowledgeBasePage } from '@/pages/knowledge/KnowledgeBasePage';
 
+// Voice cloning
+import { VoiceCloningPage } from '@/pages/voiceCloning/VoiceCloningPage';
+
 // Workflows
 import { WorkflowListPage } from '@/pages/workflows/WorkflowListPage';
 import { WorkflowBuilderPage } from '@/pages/workflows/WorkflowBuilderPage';
@@ -35,12 +55,23 @@ import { WorkflowBuilderPage } from '@/pages/workflows/WorkflowBuilderPage';
 // Analytics
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 
+// Stubs (sidebar parity, not yet implemented)
+import { ComingSoonPage } from '@/pages/stub/ComingSoonPage';
+import { WhatsAppPage } from '@/pages/chat/WhatsAppPage';
+
 // Settings
 import { GeneralSettingsPage } from '@/pages/settings/GeneralSettingsPage';
+import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { PhoneNumbersPage } from '@/pages/settings/PhoneNumbersPage';
 import { IntegrationsPage } from '@/pages/settings/IntegrationsPage';
 import { TeamPage } from '@/pages/settings/TeamPage';
 import { BillingPage } from '@/pages/settings/BillingPage';
+import { AuditLogPage } from '@/pages/settings/AuditLogPage';
+import { ApiKeysPage } from '@/pages/settings/ApiKeysPage';
+
+// Docs (public, dedicated dark layout)
+import { DocsPage } from '@/pages/docs/DocsPage';
+import { DocArticlePage } from '@/pages/docs/DocArticlePage';
 
 // Layouts
 import { DashboardLayout } from '@/routes/layouts/DashboardLayout';
@@ -53,6 +84,13 @@ export const routes: RouteObject[] = [
     path: '/landing',
     element: <LandingPage />,
   },
+  // Public docs hub (dedicated dark layout, no auth required)
+  { path: '/docs', element: <DocsPage /> },
+  { path: '/docs/article/:slug', element: <DocArticlePage /> },
+  // Public report page — no auth, rate-limited + reCAPTCHA-ready
+  { path: '/report', element: <PublicReportPage /> },
+  // Public Contact Us marketing page
+  { path: '/contact', element: <ContactPage /> },
   // Auth pages
   {
     element: <AuthLayout />,
@@ -71,25 +109,46 @@ export const routes: RouteObject[] = [
     children: [
       { path: '/', element: <DashboardPage /> },
       { path: '/agents', element: <AgentListPage /> },
-      { path: '/agents/new', element: <AgentBuilderPage /> },
+      { path: '/agents/new', element: <AgentWizardPage /> },
       { path: '/agents/:id', element: <AgentBuilderPage /> },
       { path: '/agents/:id/test', element: <AgentTestPage /> },
+      { path: '/agents/:id/call', element: <AgentCallPage /> },
+      { path: '/agents/:id/live-call', element: <AgentLiveCallPage /> },
+      { path: '/agents/:id/web-call', element: <AgentWebCallPage /> },
       { path: '/calls', element: <CallLogPage /> },
       { path: '/calls/:id', element: <CallDetailPage /> },
+      { path: '/campaigns', element: <CampaignsPage /> },
+      { path: '/campaigns/new', element: <CampaignWizardPage /> },
+      { path: '/campaigns/:id', element: <CampaignDetailPage /> },
       { path: '/crm/leads', element: <LeadsPage /> },
       { path: '/crm/leads/:id', element: <LeadDetailPage /> },
       { path: '/crm/contacts', element: <ContactsPage /> },
       { path: '/crm/pipeline', element: <PipelinePage /> },
       { path: '/knowledge', element: <KnowledgeBasePage /> },
+      { path: '/voice-cloning', element: <VoiceCloningPage /> },
       { path: '/workflows', element: <WorkflowListPage /> },
       { path: '/workflows/new', element: <WorkflowBuilderPage /> },
       { path: '/workflows/:id', element: <WorkflowBuilderPage /> },
       { path: '/analytics', element: <AnalyticsPage /> },
-      { path: '/settings', element: <GeneralSettingsPage /> },
+      { path: '/settings', element: <SettingsPage /> },
+      { path: '/settings/legacy', element: <GeneralSettingsPage /> },
       { path: '/settings/phone-numbers', element: <PhoneNumbersPage /> },
       { path: '/settings/integrations', element: <IntegrationsPage /> },
       { path: '/settings/team', element: <TeamPage /> },
       { path: '/settings/billing', element: <BillingPage /> },
+      { path: '/settings/audit-log', element: <AuditLogPage /> },
+
+      // ── Sidebar-parity stubs (matches OmniDim's nav even though we
+      //    haven't built the full feature yet — clicking shows "Coming soon"
+      //    instead of a 404 so the sidebar items are clickable).
+      { path: '/chat/whatsapp', element: <WhatsAppPage /> },
+      { path: '/settings/api', element: <ApiKeysPage /> },
+      { path: '/support', element: <SupportPage /> },
+      { path: '/support/:ticketId', element: <ReportDetailPage /> },
+      { path: '/admin/reports', element: <AdminReportsPage /> },
+      { path: '/admin/reports/:ticketId', element: <AdminReportDetailPage /> },
+      { path: '/admin/contact-requests', element: <AdminContactRequestsPage /> },
+      { path: '/admin/contact-requests/:refId', element: <AdminContactDetailPage /> },
     ],
   },
 ];

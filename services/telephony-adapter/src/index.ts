@@ -4,6 +4,7 @@ import { app } from './app';
 import { config } from './config';
 import { initDatabase } from './db/init';
 import { setupWebSocketServer } from './ws/mediaStream';
+import { setupPlivoAudioStream } from './ws/plivoAudioStream';
 import pino from 'pino';
 
 const logger = pino({
@@ -26,8 +27,27 @@ async function start(): Promise<void> {
 
     const server = http.createServer(app);
 
-    // Attach WebSocket server for media streaming
-    setupWebSocketServer(server);
+    // Attach WebSocket servers for media streaming. We use a SINGLE
+    // `upgrade` listener that routes by path — multiple `ws` servers
+    // attached directly to the same http.Server fight over upgrades
+    // and the non-matching one aborts the handshake with HTTP 400.
+    // - /media-stream: Twilio Media Streams
+    // - /plivo/audio:  Plivo AudioStream (Deepgram STT/TTS in-process)
+    const mediaWss = setupWebSocketServer(server);
+    const plivoWss = setupPlivoAudioStream(server);
+
+    server.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url || '', 'http://localhost');
+      const pathname = url.pathname;
+      if (pathname === '/media-stream') {
+        mediaWss.handleUpgrade(req, socket as any, head, (ws) => mediaWss.emit('connection', ws, req));
+      } else if (pathname === '/plivo/audio') {
+        plivoWss.handleUpgrade(req, socket as any, head, (ws) => plivoWss.emit('connection', ws, req));
+      } else {
+        logger.warn({ pathname }, 'WS upgrade for unknown path — rejecting');
+        socket.destroy();
+      }
+    });
 
     server.listen(config.port, () => {
       logger.info(`Telephony Adapter started on port ${config.port}`);

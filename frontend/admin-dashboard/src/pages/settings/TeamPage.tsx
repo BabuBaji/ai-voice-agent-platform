@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Settings, Phone, Puzzle, Users, CreditCard, Mail } from 'lucide-react';
+import { Settings, Phone, Puzzle, Users, CreditCard, Mail, KeyRound, ScrollText } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Table } from '@/components/ui/Table';
@@ -14,8 +14,10 @@ const settingsNav = [
   { label: 'General', path: '/settings', icon: Settings, end: true },
   { label: 'Phone Numbers', path: '/settings/phone-numbers', icon: Phone },
   { label: 'Integrations', path: '/settings/integrations', icon: Puzzle },
+  { label: 'API', path: '/settings/api', icon: KeyRound },
   { label: 'Team', path: '/settings/team', icon: Users },
   { label: 'Billing', path: '/settings/billing', icon: CreditCard },
+  { label: 'Audit Log', path: '/settings/audit-log', icon: ScrollText },
 ];
 
 const mockMembers: TeamMember[] = [

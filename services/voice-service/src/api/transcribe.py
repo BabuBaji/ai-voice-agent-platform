@@ -18,14 +18,19 @@ async def transcribe(
 ):
     """Batch audio transcription using Deepgram."""
     audio_bytes = await audio.read()
+    content_type = audio.content_type or "audio/webm"
 
-    logger.info("transcribe_request", size=len(audio_bytes), language=language)
+    logger.info("transcribe_request", size=len(audio_bytes), language=language, content_type=content_type)
 
-    result = await stt_provider.transcribe(audio=audio_bytes, language=language)
+    result = await stt_provider.transcribe(
+        audio=audio_bytes,
+        language=language,
+        content_type=content_type,
+    )
 
     return TranscribeResponse(
         text=result["text"],
         confidence=result["confidence"],
         language=result["language"],
-        duration_seconds=len(audio_bytes) / (16000 * 2),  # estimate for 16kHz 16-bit mono
+        duration_seconds=len(audio_bytes) / (16000 * 2),
     )

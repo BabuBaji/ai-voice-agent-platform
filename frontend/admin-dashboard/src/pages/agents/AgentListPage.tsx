@@ -107,6 +107,8 @@ export function AgentListPage() {
 
   const agentMenuItems = (agent: Agent) => [
     { label: 'Edit', icon: <Edit className="h-4 w-4" />, onClick: () => navigate(`/agents/${agent.id}`) },
+    { label: 'Voice Call', icon: <Phone className="h-4 w-4" />, onClick: () => navigate(`/agents/${agent.id}/call`) },
+    { label: 'Web Call (Live)', icon: <Phone className="h-4 w-4" />, onClick: () => navigate(`/agents/${agent.id}/web-call`) },
     { label: 'Duplicate', icon: <Copy className="h-4 w-4" />, onClick: () => handleClone(agent) },
     { label: 'Delete', icon: <Trash2 className="h-4 w-4" />, onClick: () => handleDelete(agent), danger: true, divider: true },
   ];
@@ -123,43 +125,43 @@ export function AgentListPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">AI Agents</h1>
-          <p className="text-sm text-gray-500 mt-1">Create and manage your AI voice agents</p>
+          <h1 className="text-lg font-semibold text-gray-900">AI Agents</h1>
+          <p className="text-xs text-gray-500 mt-0.5">Create and manage your AI voice agents</p>
         </div>
-        <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-xl">
-          <Plus className="h-4 w-4" />
+        <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-lg" size="sm">
+          <Plus className="h-3.5 w-3.5" />
           Create Agent
         </Button>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
           <span>Service unavailable: showing demo data. ({error})</span>
-          <button onClick={fetchAgents} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
+          <button onClick={fetchAgents} className="ml-auto text-warning-800 underline text-[11px] font-medium">Retry</button>
         </div>
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2">
         <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
           <input
             type="text"
             placeholder="Search agents..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
+            className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all"
           />
         </div>
 
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition-all"
+          className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 transition-all"
         >
           <option value="all">All Status</option>
           <option value="active">Active</option>
@@ -167,64 +169,64 @@ export function AgentListPage() {
           <option value="draft">Draft</option>
         </select>
 
-        <div className="flex border border-gray-200 rounded-xl overflow-hidden">
+        <div className="flex border border-gray-200 rounded-lg overflow-hidden">
           <button
             onClick={() => setViewMode('grid')}
-            className={`p-2.5 transition-colors ${viewMode === 'grid' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
+            className={`p-1.5 transition-colors ${viewMode === 'grid' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
           >
-            <LayoutGrid className="h-4 w-4" />
+            <LayoutGrid className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => setViewMode('list')}
-            className={`p-2.5 transition-colors ${viewMode === 'list' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
+            className={`p-1.5 transition-colors ${viewMode === 'list' ? 'bg-primary-50 text-primary-600' : 'text-gray-400 hover:bg-gray-50'}`}
           >
-            <List className="h-4 w-4" />
+            <List className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
 
       {/* Empty state */}
       {!loading && filtered.length === 0 && !error && (
-        <div className="text-center py-20 bg-white rounded-2xl border border-gray-100 shadow-card">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-50 to-accent-50 flex items-center justify-center mx-auto mb-4">
-            <Bot className="h-8 w-8 text-primary-400" />
+        <div className="text-center py-12 bg-white rounded-xl border border-gray-100">
+          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary-50 to-accent-50 flex items-center justify-center mx-auto mb-3">
+            <Bot className="h-6 w-6 text-primary-400" />
           </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">No agents found</h3>
-          <p className="text-sm text-gray-500 mb-6 max-w-sm mx-auto">Get started by creating your first AI voice agent. It only takes a few minutes.</p>
-          <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-xl">
-            <Plus className="h-4 w-4" />
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">No agents found</h3>
+          <p className="text-xs text-gray-500 mb-4 max-w-sm mx-auto">Get started by creating your first AI voice agent.</p>
+          <Button variant="gradient" onClick={() => navigate('/agents/new')} className="rounded-lg" size="sm">
+            <Plus className="h-3.5 w-3.5" />
             Create Your First Agent
           </Button>
         </div>
       )}
 
-      {/* Grid view */}
+      {/* Grid view — tightened card layout */}
       {filtered.length > 0 && viewMode === 'grid' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {filtered.map((agent) => (
             <div
               key={agent.id}
-              className="bg-white rounded-xl border border-gray-100 p-5 hover:shadow-card-hover hover:-translate-y-0.5 transition-all duration-300 cursor-pointer group shadow-card"
+              className="bg-white rounded-lg border border-gray-100 p-3 hover:shadow-sm hover:border-gray-200 transition-all cursor-pointer group"
               onClick={() => navigate(`/agents/${agent.id}`)}
             >
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center">
-                    <Bot className="h-5 w-5" />
+              <div className="flex items-start justify-between mb-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center flex-shrink-0">
+                    <Bot className="h-4 w-4" />
                   </div>
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{agent.name}</h3>
-                    <div className="flex items-center gap-2 mt-0.5">
+                  <div className="min-w-0">
+                    <h3 className="font-semibold text-sm text-gray-900 truncate">{agent.name}</h3>
+                    <div className="flex items-center gap-1.5 mt-0.5">
                       <StatusBadge status={agent.status} />
-                      <Badge variant="outline" className="text-[10px]">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge>
+                      <Badge variant="outline" className="text-[9px]">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge>
                     </div>
                   </div>
                 </div>
                 <div onClick={(e) => e.stopPropagation()}>
                   <Dropdown
                     trigger={
-                      <button className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-all">
-                        <MoreVertical className="h-4 w-4" />
+                      <button className="p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-all">
+                        <MoreVertical className="h-3.5 w-3.5" />
                       </button>
                     }
                     items={agentMenuItems(agent)}
@@ -232,70 +234,70 @@ export function AgentListPage() {
                 </div>
               </div>
 
-              <p className="text-sm text-gray-500 mb-4 line-clamp-2">{agent.description}</p>
+              <p className="text-xs text-gray-500 mb-2.5 line-clamp-2 leading-relaxed">{agent.description}</p>
 
-              <div className="grid grid-cols-3 gap-3 pt-3 border-t border-gray-100">
+              <div className="grid grid-cols-3 gap-2 pt-2 border-t border-gray-100">
                 <div className="text-center">
-                  <div className="flex items-center justify-center gap-1 text-gray-400 mb-0.5">
-                    <Phone className="h-3 w-3" />
+                  <div className="flex items-center justify-center text-gray-400">
+                    <Phone className="h-2.5 w-2.5" />
                   </div>
-                  <p className="text-sm font-semibold text-gray-900">{formatNumber(agent.totalCalls)}</p>
-                  <p className="text-[10px] text-gray-400">Calls</p>
+                  <p className="text-xs font-semibold text-gray-900 tabular-nums">{formatNumber((agent as any).totalCalls || (agent as any).total_calls || 0)}</p>
+                  <p className="text-[9px] text-gray-400 uppercase tracking-wide">Calls</p>
                 </div>
                 <div className="text-center">
-                  <div className="flex items-center justify-center gap-1 text-gray-400 mb-0.5">
-                    <Clock className="h-3 w-3" />
+                  <div className="flex items-center justify-center text-gray-400">
+                    <Clock className="h-2.5 w-2.5" />
                   </div>
-                  <p className="text-sm font-semibold text-gray-900">{Math.floor(agent.avgDuration / 60)}m</p>
-                  <p className="text-[10px] text-gray-400">Avg Dur.</p>
+                  <p className="text-xs font-semibold text-gray-900 tabular-nums">{Math.floor(((agent as any).avgDuration || (agent as any).avg_duration || 0) / 60)}m</p>
+                  <p className="text-[9px] text-gray-400 uppercase tracking-wide">Avg</p>
                 </div>
                 <div className="text-center">
-                  <div className="flex items-center justify-center gap-1 text-gray-400 mb-0.5">
-                    <TrendingUp className="h-3 w-3" />
+                  <div className="flex items-center justify-center text-gray-400">
+                    <TrendingUp className="h-2.5 w-2.5" />
                   </div>
-                  <p className="text-sm font-semibold text-gray-900">{agent.successRate}%</p>
-                  <p className="text-[10px] text-gray-400">Success</p>
+                  <p className="text-xs font-semibold text-gray-900 tabular-nums">{(agent as any).successRate || (agent as any).success_rate || 0}%</p>
+                  <p className="text-[9px] text-gray-400 uppercase tracking-wide">Success</p>
                 </div>
               </div>
             </div>
           ))}
         </div>
       ) : filtered.length > 0 ? (
-        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden shadow-card">
+        <div className="bg-white rounded-lg border border-gray-100 overflow-hidden">
           <table className="w-full">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50/50">
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Agent</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Provider</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Calls</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Avg Duration</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Success Rate</th>
-                <th className="px-4 py-3"></th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Agent</th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Provider</th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Calls</th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Avg Dur</th>
+                <th className="px-3 py-2 text-left text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Success</th>
+                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
               {filtered.map((agent) => (
                 <tr key={agent.id} className="hover:bg-gray-50/50 cursor-pointer transition-colors" onClick={() => navigate(`/agents/${agent.id}`)}>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center">
-                        <Bot className="h-4 w-4" />
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-md bg-gradient-to-br from-primary-50 to-accent-50 text-primary-600 flex items-center justify-center">
+                        <Bot className="h-3.5 w-3.5" />
                       </div>
                       <div>
-                        <p className="text-sm font-medium text-gray-900">{agent.name}</p>
-                        <p className="text-xs text-gray-500 line-clamp-1">{agent.description}</p>
+                        <p className="text-xs font-medium text-gray-900">{agent.name}</p>
+                        <p className="text-[11px] text-gray-500 line-clamp-1">{agent.description}</p>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3"><StatusBadge status={agent.status} /></td>
-                  <td className="px-4 py-3"><Badge variant="outline">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge></td>
-                  <td className="px-4 py-3 text-sm text-gray-700 font-medium">{formatNumber(agent.totalCalls)}</td>
-                  <td className="px-4 py-3 text-sm text-gray-700">{Math.floor(agent.avgDuration / 60)}m {agent.avgDuration % 60}s</td>
-                  <td className="px-4 py-3 text-sm text-gray-700 font-medium">{agent.successRate}%</td>
-                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                  <td className="px-3 py-2"><StatusBadge status={agent.status} /></td>
+                  <td className="px-3 py-2"><Badge variant="outline" className="text-[10px]">{providerLabels[agent.voiceProvider] || agent.voiceProvider}</Badge></td>
+                  <td className="px-3 py-2 text-xs text-gray-700 font-medium tabular-nums">{formatNumber(agent.totalCalls)}</td>
+                  <td className="px-3 py-2 text-xs text-gray-700 tabular-nums">{Math.floor(agent.avgDuration / 60)}m {agent.avgDuration % 60}s</td>
+                  <td className="px-3 py-2 text-xs text-gray-700 font-medium tabular-nums">{agent.successRate}%</td>
+                  <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                     <Dropdown
-                      trigger={<button className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"><MoreVertical className="h-4 w-4" /></button>}
+                      trigger={<button className="p-1 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-100"><MoreVertical className="h-3.5 w-3.5" /></button>}
                       items={agentMenuItems(agent)}
                     />
                   </td>

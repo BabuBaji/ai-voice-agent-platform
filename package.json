@@ -2,6 +2,7 @@
   "name": "ai-voice-agent-platform",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@11.11.0",
   "workspaces": [
     "packages/*",
     "services/identity-service-node",
@@ -16,7 +17,7 @@
     "frontend/chat-widget"
   ],
   "scripts": {
-    "dev": "turbo run dev",
+    "dev": "turbo run dev --concurrency=20",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "test": "turbo run test",

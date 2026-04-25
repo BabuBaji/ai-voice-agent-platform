@@ -34,6 +34,12 @@ logs/
 # Docker volumes
 docker/data/
 
+# Runtime data (recordings, uploads, processed files)
+data/
+
+# Claude Code session/agent state
+.claude/
+
 # Coverage
 coverage/
 htmlcov/

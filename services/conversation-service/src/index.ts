@@ -3,7 +3,11 @@ import { Pool } from 'pg';
 import { app } from './app';
 import { config } from './config';
 import { initDatabase } from './db/init';
+import { initWebCallTables } from './db/webCallInit';
+import { initSupportTables } from './db/supportInit';
+import { initContactTables } from './db/contactInit';
 import { setupWebSocketServer } from './ws/realtime';
+import { startRetentionSweeper } from './services/privacy';
 import pino from 'pino';
 
 const logger = pino({
@@ -23,6 +27,9 @@ async function start(): Promise<void> {
 
     // Initialize tables
     await initDatabase(pool);
+    await initWebCallTables(pool);
+    await initSupportTables(pool);
+    await initContactTables(pool);
 
     const server = http.createServer(app);
 
@@ -33,6 +40,12 @@ async function start(): Promise<void> {
       logger.info(`Conversation Service started on port ${config.port}`);
       logger.info(`Environment: ${config.nodeEnv}`);
     });
+
+    // GDPR retention sweeper — runs every 6h, deletes conversations older
+    // than each tenant's data_retention_days setting.
+    if (process.env.RETENTION_SWEEPER !== 'off') {
+      startRetentionSweeper();
+    }
 
     const shutdown = async () => {
       logger.info('Shutting down...');

@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { pool } from '../index';
 import { broadcastToConversation } from '../ws/realtime';
+import { maybeRedactForTenant } from '../services/privacy';
 
 export const messageRouter = Router();
 
@@ -73,6 +74,9 @@ messageRouter.post('/conversations/:conversationId/messages', async (req: Reques
 
     const parsed = createMessageSchema.parse(req.body);
 
+    // PII redaction (no-op unless tenant has settings.pii_obfuscation = true)
+    const safeContent = await maybeRedactForTenant(tenantId, parsed.content);
+
     const result = await pool.query(
       `INSERT INTO messages (conversation_id, role, content, audio_url, tool_calls, tool_result, tokens_used, latency_ms)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -80,7 +84,7 @@ messageRouter.post('/conversations/:conversationId/messages', async (req: Reques
       [
         conversationId,
         parsed.role,
-        parsed.content,
+        safeContent,
         parsed.audio_url || null,
         parsed.tool_calls ? JSON.stringify(parsed.tool_calls) : null,
         parsed.tool_result ? JSON.stringify(parsed.tool_result) : null,

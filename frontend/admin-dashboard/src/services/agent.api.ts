@@ -36,8 +36,12 @@ export const agentApi = {
     return response.data.data ?? response.data;
   },
 
-  test: async (id: string, message: string): Promise<{ reply: string }> => {
-    const response = await api.post(`/agents/${id}/test`, { message });
+  test: async (
+    id: string,
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
+  ): Promise<{ reply: string }> => {
+    const response = await api.post(`/agents/${id}/test`, { message, history });
     return response.data;
   },
 };

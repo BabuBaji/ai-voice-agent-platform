@@ -15,6 +15,7 @@ export async function initDatabase(pool: Pool): Promise<void> {
         name VARCHAR(255) NOT NULL,
         description TEXT,
         status VARCHAR(20) DEFAULT 'DRAFT',
+        direction VARCHAR(10) DEFAULT 'INBOUND',
         system_prompt TEXT NOT NULL,
         llm_provider VARCHAR(50) DEFAULT 'openai',
         llm_model VARCHAR(100) DEFAULT 'gpt-4o',
@@ -23,12 +24,28 @@ export async function initDatabase(pool: Pool): Promise<void> {
         tools_config JSONB DEFAULT '[]',
         knowledge_base_ids UUID[] DEFAULT '{}',
         greeting_message TEXT,
+        welcome_dynamic BOOLEAN DEFAULT TRUE,
+        welcome_interruptible BOOLEAN DEFAULT FALSE,
         voice_config JSONB DEFAULT '{}',
+        stt_config JSONB DEFAULT '{}',
+        post_call_config JSONB DEFAULT '{}',
+        integrations_config JSONB DEFAULT '{}',
+        call_config JSONB DEFAULT '{}',
+        cost_per_min DECIMAL(6,3) DEFAULT 0.115,
         metadata JSONB DEFAULT '{}',
         created_by UUID,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS direction VARCHAR(10) DEFAULT 'INBOUND';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS welcome_dynamic BOOLEAN DEFAULT TRUE;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS welcome_interruptible BOOLEAN DEFAULT FALSE;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS stt_config JSONB DEFAULT '{}';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS post_call_config JSONB DEFAULT '{}';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS integrations_config JSONB DEFAULT '{}';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_config JSONB DEFAULT '{}';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS cost_per_min DECIMAL(6,3) DEFAULT 0.115;
 
       CREATE TABLE IF NOT EXISTS prompt_templates (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -52,6 +69,26 @@ export async function initDatabase(pool: Pool): Promise<void> {
         is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS cloned_voices (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        gender VARCHAR(20),
+        language VARCHAR(20),
+        description TEXT,
+        provider VARCHAR(30) NOT NULL DEFAULT 'elevenlabs',
+        provider_voice_id VARCHAR(255),
+        sample_audio BYTEA,
+        sample_mime VARCHAR(50),
+        status VARCHAR(20) NOT NULL DEFAULT 'ready',
+        error_message TEXT,
+        created_by UUID,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cloned_voices_tenant ON cloned_voices(tenant_id);
     `);
     logger.info('Agent service database tables initialized');
   } finally {

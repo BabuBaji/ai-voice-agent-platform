@@ -31,6 +31,13 @@ export async function initDatabase(pool: Pool): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_conv_tenant ON conversations(tenant_id);
 
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS language VARCHAR(10);
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS analysis JSONB;
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS interest_level INTEGER;
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS topics JSONB;
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS follow_ups JSONB;
+      ALTER TABLE conversations ADD COLUMN IF NOT EXISTS key_points JSONB;
+
       CREATE TABLE IF NOT EXISTS messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

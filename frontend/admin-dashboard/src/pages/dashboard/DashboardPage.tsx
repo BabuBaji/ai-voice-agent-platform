@@ -14,7 +14,8 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import api from '@/services/api';
-import { callApi } from '@/services/call.api';
+import { conversationApi } from '@/services/conversation.api';
+import { agentApi } from '@/services/agent.api';
 
 const defaultChartData = [
   { date: 'Mon', calls: 0 },
@@ -66,10 +67,29 @@ interface RecentCall {
   id: string;
   caller: string;
   agentName: string;
+  channel: string;
   duration: number;
-  outcome: 'completed' | 'transferred' | 'voicemail' | 'dropped' | 'no-answer';
-  sentiment: 'positive' | 'neutral' | 'negative';
+  outcome: string;
+  sentiment: string;
   createdAt: string;
+}
+
+function sentimentToKey(s?: string | null): string {
+  const v = (s || '').toLowerCase();
+  if (v === 'positive') return 'positive';
+  if (v === 'negative') return 'negative';
+  if (v === 'mixed') return 'neutral';
+  if (v === 'neutral') return 'neutral';
+  return '';
+}
+
+function outcomeToStatus(o?: string | null, status?: string | null): string {
+  const v = (o || '').toLowerCase();
+  if (v) return v.replace(/\s+/g, '-');
+  const s = (status || '').toLowerCase();
+  if (s === 'ended') return 'completed';
+  if (s === 'active') return 'processing';
+  return s;
 }
 
 function getGreeting() {
@@ -88,6 +108,15 @@ const quickActions = [
 const callColumns = [
   { key: 'caller', label: 'Caller', sortable: true },
   { key: 'agentName', label: 'Agent', sortable: true },
+  {
+    key: 'channel',
+    label: 'Channel',
+    render: (item: RecentCall) => (
+      <span className="text-xs font-medium px-2 py-0.5 rounded-md bg-gray-100 text-gray-700">
+        {item.channel}
+      </span>
+    ),
+  },
   {
     key: 'duration',
     label: 'Duration',
@@ -134,39 +163,105 @@ export function DashboardPage() {
 
     const results = await Promise.allSettled([
       api.get('/analytics/dashboard').then((r) => r.data),
-      callApi.list({ page: 1, limit: 5 }),
+      conversationApi.list({ page: 1, limit: 100 }), // pull more so we can compute local stats
+      agentApi.list(),
     ]);
 
-    const [analyticsResult, callsResult] = results;
+    const [analyticsResult, callsResult, agentsResult] = results;
+    const agentMap = new Map<string, string>();
+    if (agentsResult.status === 'fulfilled') {
+      (agentsResult.value as any[]).forEach((a: any) => agentMap.set(a.id, a.name));
+    }
 
-    if (analyticsResult.status === 'fulfilled') {
-      const data = analyticsResult.value.data ?? analyticsResult.value;
-      setStats({
-        totalCalls: data.totalCalls ?? 0,
-        totalCallsChange: data.totalCallsChange ?? '',
-        activeAgents: data.activeAgents ?? 0,
-        activeAgentsNote: data.activeAgentsNote ?? '',
-        leadsGenerated: data.leadsGenerated ?? 0,
-        leadsChange: data.leadsChange ?? '',
-        conversionRate: data.conversionRate ?? 0,
-        conversionChange: data.conversionChange ?? '',
-        avgDuration: data.avgDuration ?? '0:00',
-        avgDurationPct: data.avgDurationPct ?? 0,
-        resolutionRate: data.resolutionRate ?? 0,
-        transferRate: data.transferRate ?? 0,
-        positiveSentiment: data.positiveSentiment ?? 0,
-        revenueGenerated: data.revenueGenerated ?? 0,
-        costPerCall: data.costPerCall ?? 0,
-      });
-      if (data.chartData && Array.isArray(data.chartData)) {
-        setChartData(data.chartData);
+    // Compute local stats from conversations (overrides analytics service if empty)
+    let localStats: Partial<DashboardStats> = {};
+    let localChart: typeof defaultChartData | null = null;
+    if (callsResult.status === 'fulfilled') {
+      const all = (callsResult.value.data || []) as any[];
+      const total = callsResult.value.total ?? all.length;
+      const completed = all.filter((c) => c.status === 'ENDED');
+      const totalDuration = completed.reduce((sum, c) => sum + (c.duration_seconds || 0), 0);
+      const avgSec = completed.length ? Math.round(totalDuration / completed.length) : 0;
+      const positive = completed.filter((c) => (c.sentiment || '').toUpperCase() === 'POSITIVE').length;
+      const activeAgents = new Set(all.map((c) => c.agent_id)).size;
+
+      localStats = {
+        totalCalls: total,
+        activeAgents,
+        avgDuration: `${Math.floor(avgSec / 60)}:${(avgSec % 60).toString().padStart(2, '0')}`,
+        avgDurationPct: Math.min(100, Math.round((avgSec / 300) * 100)),
+        resolutionRate: completed.length && total ? Math.round((completed.length / total) * 100) : 0,
+        positiveSentiment: completed.length ? Math.round((positive / completed.length) * 100) : 0,
+      };
+
+      // Build last-7-days chart from started_at timestamps
+      const byDay = new Map<string, number>();
+      const dayLabel = (d: Date) => ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+      const now = new Date();
+      const week: { date: string; calls: number }[] = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now); d.setDate(d.getDate() - i);
+        const key = d.toDateString();
+        byDay.set(key, 0);
+        week.push({ date: dayLabel(d), calls: 0 });
       }
-    } else {
+      all.forEach((c) => {
+        const d = new Date(c.started_at || c.created_at);
+        if (isNaN(d.getTime())) return;
+        const key = d.toDateString();
+        if (byDay.has(key)) byDay.set(key, (byDay.get(key) || 0) + 1);
+      });
+      let idx = 0;
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(now); d.setDate(d.getDate() - i);
+        week[idx].calls = byDay.get(d.toDateString()) || 0;
+        idx++;
+      }
+      localChart = week as typeof defaultChartData;
+    }
+
+    // Start from analytics-service response (may be empty), then overlay locally computed stats
+    const fromAnalytics = analyticsResult.status === 'fulfilled'
+      ? (analyticsResult.value.data ?? analyticsResult.value)
+      : {};
+    setStats({
+      totalCalls: localStats.totalCalls ?? fromAnalytics.totalCalls ?? 0,
+      totalCallsChange: fromAnalytics.totalCallsChange ?? '',
+      activeAgents: localStats.activeAgents ?? fromAnalytics.activeAgents ?? 0,
+      activeAgentsNote: fromAnalytics.activeAgentsNote ?? '',
+      leadsGenerated: fromAnalytics.leadsGenerated ?? 0,
+      leadsChange: fromAnalytics.leadsChange ?? '',
+      conversionRate: fromAnalytics.conversionRate ?? 0,
+      conversionChange: fromAnalytics.conversionChange ?? '',
+      avgDuration: localStats.avgDuration ?? fromAnalytics.avgDuration ?? '0:00',
+      avgDurationPct: localStats.avgDurationPct ?? fromAnalytics.avgDurationPct ?? 0,
+      resolutionRate: localStats.resolutionRate ?? fromAnalytics.resolutionRate ?? 0,
+      transferRate: fromAnalytics.transferRate ?? 0,
+      positiveSentiment: localStats.positiveSentiment ?? fromAnalytics.positiveSentiment ?? 0,
+      revenueGenerated: fromAnalytics.revenueGenerated ?? 0,
+      costPerCall: fromAnalytics.costPerCall ?? 0,
+    });
+    if (fromAnalytics.chartData && Array.isArray(fromAnalytics.chartData)) {
+      setChartData(fromAnalytics.chartData);
+    } else if (localChart) {
+      setChartData(localChart);
+    }
+    if (analyticsResult.status === 'rejected' && !localChart) {
       setError('Analytics service unavailable - showing default values.');
     }
 
     if (callsResult.status === 'fulfilled') {
-      setRecentCalls(callsResult.value.data as RecentCall[]);
+      const rows = (callsResult.value.data || []).slice(0, 5).map((c: any) => ({
+        id: c.id,
+        caller: c.caller_number || (c.channel === 'WEB' ? 'Web Caller' : 'Unknown'),
+        agentName: agentMap.get(c.agent_id) || 'Agent',
+        channel: c.channel || 'PHONE',
+        duration: c.duration_seconds ?? 0,
+        outcome: outcomeToStatus(c.outcome, c.status),
+        sentiment: sentimentToKey(c.sentiment),
+        createdAt: c.started_at || c.created_at || '',
+      })) as RecentCall[];
+      setRecentCalls(rows);
     }
 
     setLoading(false);

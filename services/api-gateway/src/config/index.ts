@@ -16,6 +16,7 @@ export const config = {
     analytics: process.env.ANALYTICS_SERVICE_URL || 'http://localhost:8002',
     notification: process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3004',
     aiRuntime: process.env.AI_RUNTIME_SERVICE_URL || 'http://localhost:8000',
+    voice: process.env.VOICE_SERVICE_URL || 'http://localhost:8001',
   },
 
   rateLimit: {

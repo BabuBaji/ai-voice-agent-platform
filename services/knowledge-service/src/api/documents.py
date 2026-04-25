@@ -1,12 +1,14 @@
 import asyncio
+import mimetypes
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Response
 
 from common import get_db_pool, get_logger
 from ..models import DocumentResponse, DocumentListResponse, DocumentStatus
 from ..processing.pipeline import ProcessingPipeline
+from ..storage.s3_client import S3Client
 from ..config import settings
 
 router = APIRouter()
@@ -78,6 +80,7 @@ async def upload_document(
         knowledge_base_id=knowledge_base_id,
         status=DocumentStatus.pending,
         chunk_count=0,
+        file_size=len(content),
         created_at=now,
         updated_at=now,
     )
@@ -91,7 +94,7 @@ async def list_documents(knowledge_base_id: str = ""):
     if knowledge_base_id:
         rows = await pool.fetch(
             """
-            SELECT id, filename, knowledge_base_id, status, chunk_count, created_at, updated_at
+            SELECT id, filename, knowledge_base_id, status, chunk_count, file_size, created_at, updated_at
             FROM documents
             WHERE knowledge_base_id = $1
             ORDER BY created_at DESC
@@ -101,7 +104,7 @@ async def list_documents(knowledge_base_id: str = ""):
     else:
         rows = await pool.fetch(
             """
-            SELECT id, filename, knowledge_base_id, status, chunk_count, created_at, updated_at
+            SELECT id, filename, knowledge_base_id, status, chunk_count, file_size, created_at, updated_at
             FROM documents
             ORDER BY created_at DESC
             """
@@ -114,6 +117,7 @@ async def list_documents(knowledge_base_id: str = ""):
             knowledge_base_id=row["knowledge_base_id"],
             status=DocumentStatus(row["status"]),
             chunk_count=row["chunk_count"],
+            file_size=row["file_size"] or 0,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -129,7 +133,7 @@ async def get_document(document_id: str):
     pool = await get_db_pool(settings.database_url)
     row = await pool.fetchrow(
         """
-        SELECT id, filename, knowledge_base_id, status, chunk_count, created_at, updated_at
+        SELECT id, filename, knowledge_base_id, status, chunk_count, file_size, created_at, updated_at
         FROM documents
         WHERE id = $1
         """,
@@ -147,6 +151,42 @@ async def get_document(document_id: str):
         chunk_count=row["chunk_count"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+@router.get("/{document_id}/raw")
+async def get_document_raw(document_id: str):
+    """Stream the raw uploaded file back to the browser. Used by the
+    knowledge-base UI when the user clicks a document to view it inline
+    (PDF in iframe, plain text inline, image as <img>, others as download)."""
+    pool = await get_db_pool(settings.database_url)
+    row = await pool.fetchrow(
+        "SELECT id, filename, knowledge_base_id FROM documents WHERE id = $1",
+        document_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    s3_key = f"documents/{row['knowledge_base_id']}/{document_id}/{row['filename']}"
+    try:
+        s3 = S3Client()
+        body = await s3.download(s3_key)
+    except Exception as e:
+        logger.warning("document_raw_fetch_failed", document_id=document_id, error=str(e))
+        raise HTTPException(status_code=404, detail="File not found in storage (may have been deleted or is still processing)")
+
+    content_type, _ = mimetypes.guess_type(row["filename"])
+    if not content_type:
+        content_type = "application/octet-stream"
+
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={
+            # `inline` so PDFs/images render in the browser; the user can still right-click → save
+            "Content-Disposition": f'inline; filename="{row["filename"]}"',
+            "Cache-Control": "private, max-age=300",
+        },
     )
 
 

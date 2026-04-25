@@ -5,6 +5,8 @@ import InputBar from "./InputBar";
 
 interface ChatWindowProps {
   agentId: string;
+  apiUrl?: string;
+  visitorId?: string;
   position: "bottom-right" | "bottom-left";
   primaryColor: string;
   onClose: () => void;
@@ -18,12 +20,16 @@ const statusLabel: Record<ConnectionState, string> = {
 
 const ChatWindow: React.FC<ChatWindowProps> = ({
   agentId,
+  apiUrl,
+  visitorId,
   position,
   primaryColor,
   onClose,
 }) => {
   const { messages, sendMessage, connectionState, isTyping } = useChat({
     agentId,
+    apiUrl,
+    visitorId,
   });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);

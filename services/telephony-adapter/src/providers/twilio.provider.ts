@@ -36,10 +36,13 @@ export class TwilioProvider implements TelephonyProvider {
       const call = await client.calls.create({
         from: options.from,
         to: options.to,
-        url: `${config.publicBaseUrl}/webhooks/twilio/voice`,
+        url: `${config.publicBaseUrl}/webhooks/twilio/voice?agentId=${options.agentId}&tenantId=${options.tenantId}`,
         statusCallback: statusCallbackUrl,
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         statusCallbackMethod: 'POST',
+        record: true,
+        recordingStatusCallback: `${config.publicBaseUrl}/webhooks/twilio/recording`,
+        recordingStatusCallbackEvent: ['completed'],
       });
 
       logger.info({ callSid: call.sid, to: options.to }, 'Twilio call initiated');

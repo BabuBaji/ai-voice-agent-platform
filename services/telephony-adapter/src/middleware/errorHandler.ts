@@ -7,8 +7,10 @@ const logger = pino({
 
 export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction): void {
   logger.error({ err: err.message, stack: err.stack }, 'Unhandled error');
+  // Always surface the underlying error message so operators can see provider errors
+  // (e.g. Twilio "unverified number") rather than a generic string.
   res.status(500).json({
     error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred',
+    message: err.message || 'An unexpected error occurred',
   });
 }

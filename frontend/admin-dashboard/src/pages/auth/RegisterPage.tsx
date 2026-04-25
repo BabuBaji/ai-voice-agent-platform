@@ -44,7 +44,9 @@ export function RegisterPage() {
     setError('');
     try {
       await registerUser(data.companyName, data.name, data.email, data.password);
-      navigate('/');
+      // After signup, drop the new user into the agent-creation wizard so
+      // they can build their first agent immediately.
+      navigate('/agents/new');
     } catch (err: any) {
       const message = err?.response?.data?.error || err?.response?.data?.message || err?.message || 'Registration failed. Please try again.';
       setError(message);

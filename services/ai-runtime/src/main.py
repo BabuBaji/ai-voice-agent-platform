@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from common import get_db_pool, close_db_pool, get_logger, AppError
@@ -29,6 +30,18 @@ app = FastAPI(
     description="LLM orchestration, tool calling, and RAG for the AI Voice Agent Platform",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# Open CORS — the embeddable widget is meant to be loaded on customers' own
+# domains, so it must be able to POST /chat/widget cross-origin without a
+# pre-shared header. (All other ai-runtime endpoints sit behind api-gateway
+# and are not directly callable cross-origin in production.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=False,
 )
 
 

@@ -26,6 +26,10 @@ async function start(): Promise<void> {
     const server = app.listen(config.port, () => {
       logger.info(`Agent Service started on port ${config.port}`);
       logger.info(`Environment: ${config.nodeEnv}`);
+      logger.info(
+        { elevenlabs: process.env.ELEVENLABS_API_KEY ? `loaded (${process.env.ELEVENLABS_API_KEY.slice(0, 10)}...)` : 'MISSING' },
+        'ElevenLabs key status',
+      );
     });
 
     const shutdown = async () => {

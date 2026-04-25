@@ -17,6 +17,7 @@ class DocumentResponse(BaseModel):
     knowledge_base_id: str
     status: DocumentStatus
     chunk_count: int = 0
+    file_size: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -47,7 +48,10 @@ class SearchResponse(BaseModel):
 class KnowledgeBaseCreate(BaseModel):
     name: str
     description: str = ""
-    organization_id: str
+    # Optional in the request body — the API also accepts `x-tenant-id` header
+    # (set by the gateway from the user's JWT). Falls back to "default" so that
+    # internal/test calls don't have to set it.
+    organization_id: str = ""
 
 
 class KnowledgeBaseResponse(BaseModel):

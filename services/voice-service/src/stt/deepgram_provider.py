@@ -21,13 +21,16 @@ class DeepgramProvider(STTProvider):
     def __init__(self):
         self.api_key = settings.deepgram_api_key
 
-    async def transcribe(self, audio: bytes, language: str = "en") -> dict[str, Any]:
+    async def transcribe(self, audio: bytes, language: str = "en", content_type: str = "audio/webm") -> dict[str, Any]:
         """Batch transcription using Deepgram REST API."""
-        logger.info("transcribe_batch", audio_size=len(audio), language=language)
+        logger.info("transcribe_batch", audio_size=len(audio), language=language, content_type=content_type)
+
+        if not audio:
+            return {"text": "", "confidence": 0.0, "language": language, "words": []}
 
         headers = {
             "Authorization": f"Token {self.api_key}",
-            "Content-Type": "audio/raw;encoding=linear16;sample_rate=16000;channels=1",
+            "Content-Type": content_type,
         }
         params = {
             "model": "nova-2",
@@ -43,7 +46,9 @@ class DeepgramProvider(STTProvider):
                 headers=headers,
                 params=params,
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                logger.error("deepgram_error", status=resp.status_code, body=resp.text[:300])
+                resp.raise_for_status()
             data = resp.json()
 
         result = data.get("results", {}).get("channels", [{}])[0].get("alternatives", [{}])[0]

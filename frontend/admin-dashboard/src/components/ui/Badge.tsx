@@ -84,11 +84,15 @@ const statusToBadgeVariant: Record<string, 'default' | 'primary' | 'success' | '
   disconnected: 'default',
 };
 
-export function StatusBadge({ status }: { status: string }) {
-  const variant = statusToBadgeVariant[status] || 'default';
+export function StatusBadge({ status }: { status: string | null | undefined }) {
+  const s = (status ?? '').toString().toLowerCase();
+  if (!s) {
+    return <Badge variant="default" dot>—</Badge>;
+  }
+  const variant = statusToBadgeVariant[s] || 'default';
   return (
     <Badge variant={variant} dot>
-      {status.charAt(0).toUpperCase() + status.slice(1).replace('-', ' ').replace('_', ' ')}
+      {s.charAt(0).toUpperCase() + s.slice(1).replace(/[-_]/g, ' ')}
     </Badge>
   );
 }

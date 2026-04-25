@@ -20,7 +20,11 @@ interface MediaStreamSession {
 const sessions = new Map<WebSocket, MediaStreamSession>();
 
 export function setupWebSocketServer(server: http.Server): WebSocketServer {
-  const wss = new WebSocketServer({ server, path: '/media-stream' });
+  // noServer: true so we can route upgrades explicitly from a single
+  // upgrade handler in index.ts. Multiple `WebSocketServer({server,path})`
+  // instances on the same http.Server will fight over every upgrade and
+  // whichever path doesn't match aborts the handshake with HTTP 400.
+  const wss = new WebSocketServer({ noServer: true });
 
   wss.on('connection', (ws: WebSocket, req) => {
     const url = new URL(req.url || '', 'http://localhost');

@@ -1,5 +1,13 @@
-export function formatDate(dateString: string): string {
+function parseDate(dateString: string | null | undefined): Date | null {
+  if (!dateString) return null;
   const date = new Date(dateString);
+  if (isNaN(date.getTime())) return null;
+  return date;
+}
+
+export function formatDate(dateString: string | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '—';
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
@@ -9,8 +17,9 @@ export function formatDate(dateString: string): string {
   }).format(date);
 }
 
-export function formatDateShort(dateString: string): string {
-  const date = new Date(dateString);
+export function formatDateShort(dateString: string | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '—';
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
@@ -44,7 +53,18 @@ export function formatCurrency(amount: number): string {
   }).format(amount);
 }
 
-export function formatNumber(num: number): string {
+export function formatINR(amount: number, opts: { decimals?: number } = {}): string {
+  const decimals = opts.decimals ?? (Math.abs(amount) < 100 ? 2 : 0);
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(amount || 0);
+}
+
+export function formatNumber(num: number | undefined | null): string {
+  if (num == null) return '0';
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
   if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
   return num.toString();
@@ -60,9 +80,10 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function timeAgo(dateString: string): string {
+export function timeAgo(dateString: string | null | undefined): string {
+  const date = parseDate(dateString);
+  if (!date) return '—';
   const now = new Date();
-  const date = new Date(dateString);
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
 
   if (seconds < 60) return 'just now';

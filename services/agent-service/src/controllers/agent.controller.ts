@@ -5,6 +5,7 @@ import { pool } from '../index';
 const createAgentSchema = z.object({
   name: z.string().min(1).max(255),
   description: z.string().optional(),
+  direction: z.enum(['INBOUND', 'OUTBOUND']).default('INBOUND'),
   system_prompt: z.string().min(1),
   llm_provider: z.string().max(50).default('openai'),
   llm_model: z.string().max(100).default('gpt-4o'),
@@ -13,7 +14,14 @@ const createAgentSchema = z.object({
   tools_config: z.any().default([]),
   knowledge_base_ids: z.array(z.string().uuid()).default([]),
   greeting_message: z.string().optional(),
+  welcome_dynamic: z.boolean().default(true),
+  welcome_interruptible: z.boolean().default(false),
   voice_config: z.any().default({}),
+  stt_config: z.any().default({}),
+  post_call_config: z.any().default({}),
+  integrations_config: z.any().default({}),
+  call_config: z.any().default({}),
+  cost_per_min: z.number().min(0).max(10).default(0.115),
   metadata: z.any().default({}),
   created_by: z.string().uuid().optional(),
 });
@@ -21,6 +29,7 @@ const createAgentSchema = z.object({
 const updateAgentSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   description: z.string().optional(),
+  direction: z.enum(['INBOUND', 'OUTBOUND']).optional(),
   system_prompt: z.string().min(1).optional(),
   llm_provider: z.string().max(50).optional(),
   llm_model: z.string().max(100).optional(),
@@ -29,7 +38,14 @@ const updateAgentSchema = z.object({
   tools_config: z.any().optional(),
   knowledge_base_ids: z.array(z.string().uuid()).optional(),
   greeting_message: z.string().optional(),
+  welcome_dynamic: z.boolean().optional(),
+  welcome_interruptible: z.boolean().optional(),
   voice_config: z.any().optional(),
+  stt_config: z.any().optional(),
+  post_call_config: z.any().optional(),
+  integrations_config: z.any().optional(),
+  call_config: z.any().optional(),
+  cost_per_min: z.number().min(0).max(10).optional(),
   metadata: z.any().optional(),
 });
 
@@ -109,6 +125,36 @@ export async function getAgent(req: Request, res: Response, next: NextFunction):
   }
 }
 
+/**
+ * Public agent lookup — no tenant header required.
+ * Returns the minimum fields needed by the embeddable chat widget. Only
+ * exposes ACTIVE agents so unfinished DRAFT agents stay private.
+ *
+ * Caller must already know the agent UUID (unguessable). The response
+ * intentionally omits private fields like integrations_config and
+ * post_call_config.
+ */
+export async function getAgentPublic(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT id, tenant_id, name, status, system_prompt,
+              llm_provider, llm_model, temperature, greeting_message,
+              voice_config, call_config, integrations_config, knowledge_base_ids
+       FROM agents
+       WHERE id = $1 AND status = 'ACTIVE'`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Not Found', message: 'Agent not found or not active' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function createAgent(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.headers['x-tenant-id'] as string;
@@ -116,15 +162,18 @@ export async function createAgent(req: Request, res: Response, next: NextFunctio
 
     const result = await pool.query(
       `INSERT INTO agents (
-        tenant_id, name, description, system_prompt, llm_provider, llm_model,
+        tenant_id, name, description, direction, system_prompt, llm_provider, llm_model,
         temperature, max_tokens, tools_config, knowledge_base_ids,
-        greeting_message, voice_config, metadata, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        greeting_message, welcome_dynamic, welcome_interruptible,
+        voice_config, stt_config, post_call_config, integrations_config, call_config,
+        cost_per_min, metadata, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       RETURNING *`,
       [
         tenantId,
         parsed.name,
         parsed.description || null,
+        parsed.direction,
         parsed.system_prompt,
         parsed.llm_provider,
         parsed.llm_model,
@@ -133,7 +182,14 @@ export async function createAgent(req: Request, res: Response, next: NextFunctio
         JSON.stringify(parsed.tools_config),
         parsed.knowledge_base_ids,
         parsed.greeting_message || null,
+        parsed.welcome_dynamic,
+        parsed.welcome_interruptible,
         JSON.stringify(parsed.voice_config),
+        JSON.stringify(parsed.stt_config),
+        JSON.stringify(parsed.post_call_config),
+        JSON.stringify(parsed.integrations_config),
+        JSON.stringify(parsed.call_config),
+        parsed.cost_per_min,
         JSON.stringify(parsed.metadata),
         parsed.created_by || null,
       ]
@@ -163,6 +219,7 @@ export async function updateAgent(req: Request, res: Response, next: NextFunctio
     const fieldMap: Record<string, any> = {
       name: parsed.name,
       description: parsed.description,
+      direction: parsed.direction,
       system_prompt: parsed.system_prompt,
       llm_provider: parsed.llm_provider,
       llm_model: parsed.llm_model,
@@ -171,7 +228,14 @@ export async function updateAgent(req: Request, res: Response, next: NextFunctio
       tools_config: parsed.tools_config !== undefined ? JSON.stringify(parsed.tools_config) : undefined,
       knowledge_base_ids: parsed.knowledge_base_ids,
       greeting_message: parsed.greeting_message,
+      welcome_dynamic: parsed.welcome_dynamic,
+      welcome_interruptible: parsed.welcome_interruptible,
       voice_config: parsed.voice_config !== undefined ? JSON.stringify(parsed.voice_config) : undefined,
+      stt_config: parsed.stt_config !== undefined ? JSON.stringify(parsed.stt_config) : undefined,
+      post_call_config: parsed.post_call_config !== undefined ? JSON.stringify(parsed.post_call_config) : undefined,
+      integrations_config: parsed.integrations_config !== undefined ? JSON.stringify(parsed.integrations_config) : undefined,
+      call_config: parsed.call_config !== undefined ? JSON.stringify(parsed.call_config) : undefined,
+      cost_per_min: parsed.cost_per_min,
       metadata: parsed.metadata !== undefined ? JSON.stringify(parsed.metadata) : undefined,
     };
 
@@ -288,15 +352,18 @@ export async function cloneAgent(req: Request, res: Response, next: NextFunction
 
     const result = await pool.query(
       `INSERT INTO agents (
-        tenant_id, name, description, system_prompt, llm_provider, llm_model,
+        tenant_id, name, description, direction, system_prompt, llm_provider, llm_model,
         temperature, max_tokens, tools_config, knowledge_base_ids,
-        greeting_message, voice_config, metadata, created_by, status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'DRAFT')
+        greeting_message, welcome_dynamic, welcome_interruptible,
+        voice_config, stt_config, post_call_config, integrations_config, call_config,
+        cost_per_min, metadata, created_by, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'DRAFT')
       RETURNING *`,
       [
         tenantId,
         agent.name + ' (Copy)',
         agent.description,
+        agent.direction || 'INBOUND',
         agent.system_prompt,
         agent.llm_provider,
         agent.llm_model,
@@ -305,7 +372,14 @@ export async function cloneAgent(req: Request, res: Response, next: NextFunction
         JSON.stringify(agent.tools_config),
         agent.knowledge_base_ids,
         agent.greeting_message,
+        agent.welcome_dynamic ?? true,
+        agent.welcome_interruptible ?? false,
         JSON.stringify(agent.voice_config),
+        JSON.stringify(agent.stt_config || {}),
+        JSON.stringify(agent.post_call_config || {}),
+        JSON.stringify(agent.integrations_config || {}),
+        JSON.stringify(agent.call_config || {}),
+        agent.cost_per_min ?? 0.115,
         JSON.stringify(agent.metadata),
         agent.created_by,
       ]

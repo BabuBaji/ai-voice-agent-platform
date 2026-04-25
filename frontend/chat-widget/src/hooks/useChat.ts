@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface Message {
   id: string;
@@ -7,177 +7,138 @@ export interface Message {
   timestamp: number;
 }
 
+/**
+ * Connection state semantics for the embeddable widget.
+ * `connected` = the public chat endpoint reachable on last try.
+ * `connecting` = a request is currently in flight.
+ * `disconnected` = the last request failed.
+ */
 export type ConnectionState = "connecting" | "connected" | "disconnected";
 
 interface UseChatOptions {
   agentId: string;
-  wsUrl?: string;
+  /** Public chat endpoint base URL — points to ai-runtime, e.g. `https://yourdomain.com:8000`. */
+  apiUrl?: string;
+  /** Optional visitor identifier to thread sessions across page loads. */
+  visitorId?: string;
 }
 
-const DEFAULT_WS_URL = "ws://localhost:8000/ws/chat";
-const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000]; // exponential backoff
+const DEFAULT_API_URL =
+  // Same-origin if served from the customer site, otherwise localhost dev default.
+  typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file:")
+    ? window.location.origin
+    : "http://localhost:8000";
 
-export function useChat({ agentId, wsUrl }: UseChatOptions) {
+const STORAGE_KEY = "va_widget_conv";
+
+function genId() {
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function loadConversationId(agentId: string): string | null {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_KEY}:${agentId}`);
+    return raw && raw.length > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveConversationId(agentId: string, convId: string): void {
+  try {
+    localStorage.setItem(`${STORAGE_KEY}:${agentId}`, convId);
+  } catch {
+    /* third-party storage may be blocked — fine, conversation just won't persist across reloads */
+  }
+}
+
+export function useChat({ agentId, apiUrl, visitorId }: UseChatOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [connectionState, setConnectionState] =
-    useState<ConnectionState>("disconnected");
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connected");
   const [isTyping, setIsTyping] = useState(false);
+  const conversationIdRef = useRef<string | null>(null);
+  const baseUrl = (apiUrl || DEFAULT_API_URL).replace(/\/$/, "");
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectAttempt = useRef(0);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>();
-  const mountedRef = useRef(true);
-
-  const generateId = () =>
-    `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const url = `${wsUrl || DEFAULT_WS_URL}/${agentId}`;
-    setConnectionState("connecting");
-
-    try {
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        if (!mountedRef.current) return;
-        setConnectionState("connected");
-        reconnectAttempt.current = 0;
-      };
-
-      ws.onmessage = (event) => {
-        if (!mountedRef.current) return;
-        try {
-          const data = JSON.parse(event.data);
-
-          if (data.type === "typing") {
-            setIsTyping(true);
-            return;
-          }
-
-          if (data.type === "message" || data.type === "response") {
-            setIsTyping(false);
-            const msg: Message = {
-              id: data.id || generateId(),
-              role: "assistant",
-              content: data.content || data.message || "",
-              timestamp: data.timestamp || Date.now(),
-            };
-            setMessages((prev) => [...prev, msg]);
-          }
-
-          if (data.type === "error") {
-            setIsTyping(false);
-            const msg: Message = {
-              id: generateId(),
-              role: "assistant",
-              content: `Error: ${data.message || "Something went wrong."}`,
-              timestamp: Date.now(),
-            };
-            setMessages((prev) => [...prev, msg]);
-          }
-        } catch {
-          // Handle plain text responses
-          setIsTyping(false);
-          const msg: Message = {
-            id: generateId(),
-            role: "assistant",
-            content: event.data,
-            timestamp: Date.now(),
-          };
-          setMessages((prev) => [...prev, msg]);
-        }
-      };
-
-      ws.onclose = () => {
-        if (!mountedRef.current) return;
-        setConnectionState("disconnected");
-        setIsTyping(false);
-        scheduleReconnect();
-      };
-
-      ws.onerror = () => {
-        if (!mountedRef.current) return;
-        ws.close();
-      };
-    } catch {
-      setConnectionState("disconnected");
-      scheduleReconnect();
-    }
-  }, [agentId, wsUrl]);
-
-  const scheduleReconnect = useCallback(() => {
-    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-    const delay =
-      RECONNECT_DELAYS[
-        Math.min(reconnectAttempt.current, RECONNECT_DELAYS.length - 1)
-      ];
-    reconnectAttempt.current += 1;
-    reconnectTimer.current = setTimeout(() => {
-      if (mountedRef.current) connect();
-    }, delay);
-  }, [connect]);
+  // Hydrate any persisted conversation id so multi-message chats survive reloads.
+  useEffect(() => {
+    conversationIdRef.current = loadConversationId(agentId);
+  }, [agentId]);
 
   const sendMessage = useCallback(
-    (content: string) => {
+    async (content: string) => {
       const trimmed = content.trim();
       if (!trimmed) return;
 
-      const msg: Message = {
-        id: generateId(),
+      const userMsg: Message = {
+        id: genId(),
         role: "user",
         content: trimmed,
         timestamp: Date.now(),
       };
-
-      setMessages((prev) => [...prev, msg]);
+      setMessages((prev) => [...prev, userMsg]);
       setIsTyping(true);
+      setConnectionState("connecting");
 
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: "message",
-            content: trimmed,
-            agentId,
-          })
-        );
-      } else {
-        // Queue failed - show error
-        setIsTyping(false);
+      try {
+        const resp = await fetch(`${baseUrl}/chat/widget`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: agentId,
+            message: trimmed,
+            conversation_id: conversationIdRef.current || undefined,
+            visitor_id: visitorId || undefined,
+          }),
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => "");
+          throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200) || resp.statusText}`);
+        }
+
+        const data: { conversation_id: string; reply: string; used_mock: boolean } = await resp.json();
+        if (data.conversation_id && conversationIdRef.current !== data.conversation_id) {
+          conversationIdRef.current = data.conversation_id;
+          saveConversationId(agentId, data.conversation_id);
+        }
+
         setMessages((prev) => [
           ...prev,
           {
-            id: generateId(),
+            id: genId(),
             role: "assistant",
-            content: "Unable to send message. Connection lost. Reconnecting...",
+            content: data.reply || "(no reply)",
             timestamp: Date.now(),
           },
         ]);
-        connect();
+        setConnectionState("connected");
+      } catch (err: any) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: genId(),
+            role: "assistant",
+            content: `Sorry, I couldn't reach the server right now. (${err?.message || "network error"})`,
+            timestamp: Date.now(),
+          },
+        ]);
+        setConnectionState("disconnected");
+      } finally {
+        setIsTyping(false);
       }
     },
-    [agentId, connect]
+    [agentId, baseUrl, visitorId],
   );
 
   const clearMessages = useCallback(() => {
     setMessages([]);
-  }, []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    connect();
-
-    return () => {
-      mountedRef.current = false;
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on unmount
-        wsRef.current.close();
-      }
-    };
-  }, [connect]);
+    conversationIdRef.current = null;
+    try {
+      localStorage.removeItem(`${STORAGE_KEY}:${agentId}`);
+    } catch {
+      /* noop */
+    }
+  }, [agentId]);
 
   return {
     messages,

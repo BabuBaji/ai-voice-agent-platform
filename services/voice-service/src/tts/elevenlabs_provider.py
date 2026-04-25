@@ -19,17 +19,27 @@ class ElevenLabsProvider(TTSProvider):
         self.default_model = settings.tts_model
 
     async def synthesize(
-        self, text: str, voice_id: str = "", model: str = ""
+        self,
+        text: str,
+        voice_id: str = "",
+        model: str = "",
+        output_format: str = "mp3_44100_128",
     ) -> AsyncGenerator[bytes, None]:
         """Stream synthesized audio from ElevenLabs streaming API.
 
-        Uses the text-to-speech streaming endpoint which returns audio chunks
-        as they are generated, allowing low-latency playback.
+        `output_format` can be "mp3_44100_128" (default, for web) or "ulaw_8000"
+        (for Twilio Media Streams — returns raw 8kHz mulaw audio).
         """
         voice_id = voice_id or settings.default_tts_voice_id
         model = model or self.default_model
 
-        logger.info("synthesize_start", text_length=len(text), voice_id=voice_id, model=model)
+        logger.info(
+            "synthesize_start",
+            text_length=len(text),
+            voice_id=voice_id,
+            model=model,
+            output_format=output_format,
+        )
 
         url = f"{ELEVENLABS_API_URL}/text-to-speech/{voice_id}/stream"
 
@@ -44,14 +54,16 @@ class ElevenLabsProvider(TTSProvider):
             },
         }
 
+        accept = "audio/basic" if output_format.startswith("ulaw") else "audio/mpeg"
+
         headers = {
             "xi-api-key": self.api_key,
             "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
+            "Accept": accept,
         }
 
         params = {
-            "output_format": "mp3_44100_128",
+            "output_format": output_format,
             "optimize_streaming_latency": "3",
         }
 

@@ -2,6 +2,7 @@ import { Pool } from 'pg';
 import { config } from './config';
 import { createApp } from './app';
 import { initDatabase } from './db/init';
+import { startRenewalCron } from './services/billing/renewalCron';
 import pino from 'pino';
 
 const logger = pino({
@@ -33,6 +34,8 @@ async function main() {
   app.listen(config.port, () => {
     logger.info(`Identity service listening on port ${config.port}`);
   });
+
+  startRenewalCron(pool);
 
   // Graceful shutdown
   const shutdown = async () => {

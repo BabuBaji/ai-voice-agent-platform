@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { pool } from '../index';
+import { analyzeConversation } from '../services/analyzer';
 
 export const conversationRouter = Router();
 
@@ -15,11 +16,12 @@ function getTenantId(req: Request, res: Response): string | null {
 
 const createConversationSchema = z.object({
   agent_id: z.string().uuid(),
-  channel: z.enum(['PHONE', 'CHAT', 'SMS', 'WHATSAPP']).default('PHONE'),
+  channel: z.enum(['PHONE', 'CHAT', 'SMS', 'WHATSAPP', 'WEB']).default('PHONE'),
   caller_number: z.string().max(20).optional(),
   called_number: z.string().max(20).optional(),
   lead_id: z.string().uuid().optional(),
   call_sid: z.string().max(255).optional(),
+  language: z.string().max(10).optional(),
   metadata: z.any().default({}),
 });
 
@@ -27,10 +29,11 @@ const updateConversationSchema = z.object({
   status: z.enum(['ACTIVE', 'ENDED', 'FAILED', 'TRANSFERRED']).optional(),
   ended_at: z.string().datetime().optional(),
   duration_seconds: z.number().int().optional(),
-  recording_url: z.string().url().optional(),
+  recording_url: z.string().optional(),
   summary: z.string().optional(),
   sentiment: z.enum(['POSITIVE', 'NEGATIVE', 'NEUTRAL', 'MIXED']).optional(),
   outcome: z.string().max(50).optional(),
+  language: z.string().max(10).optional(),
   metadata: z.any().optional(),
 });
 
@@ -101,8 +104,8 @@ conversationRouter.post('/', async (req: Request, res: Response, next: NextFunct
     const parsed = createConversationSchema.parse(req.body);
 
     const result = await pool.query(
-      `INSERT INTO conversations (tenant_id, agent_id, channel, caller_number, called_number, lead_id, call_sid, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO conversations (tenant_id, agent_id, channel, caller_number, called_number, lead_id, call_sid, language, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         tenantId,
@@ -112,6 +115,7 @@ conversationRouter.post('/', async (req: Request, res: Response, next: NextFunct
         parsed.called_number || null,
         parsed.lead_id || null,
         parsed.call_sid || null,
+        parsed.language || null,
         JSON.stringify(parsed.metadata),
       ]
     );
@@ -173,6 +177,7 @@ conversationRouter.put('/:id', async (req: Request, res: Response, next: NextFun
       summary: parsed.summary,
       sentiment: parsed.sentiment,
       outcome: parsed.outcome,
+      language: parsed.language,
       metadata: parsed.metadata !== undefined ? JSON.stringify(parsed.metadata) : undefined,
     };
 
@@ -205,6 +210,75 @@ conversationRouter.put('/:id', async (req: Request, res: Response, next: NextFun
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation Error', details: err.errors });
+      return;
+    }
+    next(err);
+  }
+});
+
+// GET /:id/export?format=json|csv — full conversation download (GDPR Article 15)
+conversationRouter.get('/:id/export', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+
+    const { id } = req.params;
+    const format = ((req.query.format as string) || 'json').toLowerCase();
+
+    const convResult = await pool.query(
+      `SELECT * FROM conversations WHERE id = $1 AND tenant_id = $2`,
+      [id, tenantId]
+    );
+    if (convResult.rows.length === 0) {
+      res.status(404).json({ error: 'Not Found' });
+      return;
+    }
+    const conv = convResult.rows[0];
+
+    const msgResult = await pool.query(
+      `SELECT id, role, content, audio_url, latency_ms, tokens_used, created_at
+       FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+      [id]
+    );
+    const messages = msgResult.rows;
+
+    if (format === 'csv') {
+      const esc = (v: any) => {
+        if (v === null || v === undefined) return '';
+        const s = String(v).replace(/"/g, '""');
+        return /[",\n]/.test(s) ? `"${s}"` : s;
+      };
+      const header = 'role,content,latency_ms,tokens_used,created_at';
+      const rows = messages.map((m: any) =>
+        [m.role, esc(m.content), esc(m.latency_ms), esc(m.tokens_used), esc(m.created_at)].join(',')
+      );
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="conversation-${id}.csv"`);
+      res.send([header, ...rows].join('\n'));
+      return;
+    }
+
+    // JSON (default) — full record so the user can audit everything we hold
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="conversation-${id}.json"`);
+    res.send(JSON.stringify({ conversation: conv, messages }, null, 2));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /:id/analyze — run AI analysis on stored messages
+conversationRouter.post('/:id/analyze', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+
+    const { id } = req.params;
+    const result = await analyzeConversation(id, tenantId);
+    res.json(result);
+  } catch (err: any) {
+    if (err?.message === 'Conversation not found') {
+      res.status(404).json({ error: 'Not Found', message: err.message });
       return;
     }
     next(err);

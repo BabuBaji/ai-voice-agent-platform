@@ -15,6 +15,7 @@ export const NAV_ITEMS = [
     ],
   },
   { label: 'Knowledge', path: '/knowledge', icon: 'BookOpen' },
+  { label: 'Voice Cloning', path: '/voice-cloning', icon: 'Mic' },
   { label: 'Workflows', path: '/workflows', icon: 'Workflow' },
   { label: 'Analytics', path: '/analytics', icon: 'BarChart3' },
   { label: 'Settings', path: '/settings', icon: 'Settings' },
@@ -49,10 +50,33 @@ export const STATUS_COLORS: Record<string, string> = {
 
 export const VOICE_PROVIDERS = [
   { value: 'elevenlabs', label: 'ElevenLabs' },
+  { value: 'sarvam', label: 'Sarvam' },
+  { value: 'cartesia', label: 'Cartesia' },
   { value: 'azure', label: 'Azure TTS' },
   { value: 'google', label: 'Google Cloud TTS' },
   { value: 'aws', label: 'Amazon Polly' },
 ];
+
+export const STT_PROVIDERS = [
+  { value: 'deepgram', label: 'Deepgram' },
+  { value: 'azure', label: 'Azure' },
+  { value: 'whisper', label: 'OpenAI Whisper' },
+  { value: 'google', label: 'Google Cloud STT' },
+];
+
+export const STT_MODELS: Record<string, { value: string; label: string }[]> = {
+  deepgram: [
+    { value: 'nova-2', label: 'Nova 2' },
+    { value: 'nova-2-phonecall', label: 'Nova 2 Phonecall' },
+    { value: 'enhanced', label: 'Enhanced' },
+  ],
+  azure: [{ value: 'default', label: 'Default' }],
+  whisper: [
+    { value: 'whisper-1', label: 'Whisper-1' },
+    { value: 'whisper-large-v3', label: 'Whisper Large v3' },
+  ],
+  google: [{ value: 'latest_long', label: 'Latest Long' }],
+};
 
 export const VOICES: Record<string, { value: string; label: string }[]> = {
   elevenlabs: [
@@ -82,8 +106,66 @@ export const LANGUAGES = [
   { value: 'fr-FR', label: 'French' },
   { value: 'de-DE', label: 'German' },
   { value: 'hi-IN', label: 'Hindi' },
+  { value: 'te-IN', label: 'Telugu' },
+  { value: 'ta-IN', label: 'Tamil' },
+  { value: 'kn-IN', label: 'Kannada' },
+  { value: 'ml-IN', label: 'Malayalam' },
+  { value: 'mr-IN', label: 'Marathi' },
+  { value: 'bn-IN', label: 'Bengali' },
   { value: 'ja-JP', label: 'Japanese' },
   { value: 'pt-BR', label: 'Portuguese (Brazil)' },
+];
+
+export const WIZARD_VOICE_PROVIDERS = [
+  { id: 'recommended', label: 'Recommended' },
+  { id: 'cloned', label: 'Cloned Voices' },
+  { id: 'elevenlabs', label: 'Eleven Labs' },
+  { id: 'cartesia', label: 'Cartesia' },
+  { id: 'google', label: 'Google' },
+  { id: 'sarvam', label: 'Sarvam' },
+];
+
+export type WizardVoice = {
+  id: string;
+  name: string;
+  provider: 'elevenlabs' | 'cartesia' | 'google' | 'sarvam' | 'cloned';
+  gender: 'Feminine' | 'Masculine';
+  languages: string[];
+};
+
+export const WIZARD_VOICES: WizardVoice[] = [
+  { id: 'ramya', name: 'Ramya', provider: 'cartesia', gender: 'Feminine', languages: ['te-IN', 'hi-IN'] },
+  { id: 'pavan', name: 'Pavan', provider: 'cartesia', gender: 'Masculine', languages: ['te-IN', 'hi-IN'] },
+  { id: 'meera', name: 'Meera', provider: 'sarvam', gender: 'Feminine', languages: ['hi-IN', 'ta-IN', 'te-IN', 'kn-IN', 'ml-IN', 'mr-IN', 'bn-IN'] },
+  { id: 'arjun', name: 'Arjun', provider: 'sarvam', gender: 'Masculine', languages: ['hi-IN', 'ta-IN', 'te-IN', 'kn-IN'] },
+  { id: 'rachel', name: 'Rachel', provider: 'elevenlabs', gender: 'Feminine', languages: ['en-US', 'en-GB'] },
+  { id: 'adam', name: 'Adam', provider: 'elevenlabs', gender: 'Masculine', languages: ['en-US', 'en-GB'] },
+  { id: 'bella', name: 'Bella', provider: 'elevenlabs', gender: 'Feminine', languages: ['en-US', 'en-GB', 'es-ES', 'fr-FR', 'de-DE'] },
+  { id: 'josh', name: 'Josh', provider: 'elevenlabs', gender: 'Masculine', languages: ['en-US', 'en-GB'] },
+  { id: 'en-US-Neural2-C', name: 'Neural2-C', provider: 'google', gender: 'Feminine', languages: ['en-US'] },
+  { id: 'en-US-Neural2-D', name: 'Neural2-D', provider: 'google', gender: 'Masculine', languages: ['en-US'] },
+  { id: 'hi-IN-Neural2-A', name: 'Neural2-A (Hindi)', provider: 'google', gender: 'Feminine', languages: ['hi-IN'] },
+];
+
+export const COUNTRY_CODES = [
+  { code: '+91', flag: '🇮🇳', label: 'India' },
+  { code: '+1', flag: '🇺🇸', label: 'United States' },
+  { code: '+44', flag: '🇬🇧', label: 'United Kingdom' },
+  { code: '+61', flag: '🇦🇺', label: 'Australia' },
+  { code: '+65', flag: '🇸🇬', label: 'Singapore' },
+  { code: '+971', flag: '🇦🇪', label: 'UAE' },
+  { code: '+49', flag: '🇩🇪', label: 'Germany' },
+  { code: '+33', flag: '🇫🇷', label: 'France' },
+  { code: '+81', flag: '🇯🇵', label: 'Japan' },
+  { code: '+55', flag: '🇧🇷', label: 'Brazil' },
+];
+
+export const AGENT_TONES = [
+  { value: 'professional', label: 'Professional & Friendly' },
+  { value: 'warm', label: 'Warm & Empathetic' },
+  { value: 'casual', label: 'Casual & Conversational' },
+  { value: 'formal', label: 'Formal & Courteous' },
+  { value: 'energetic', label: 'Energetic & Upbeat' },
 ];
 
 export const AVAILABLE_TOOLS = [

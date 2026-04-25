@@ -11,11 +11,11 @@ export function DashboardLayout() {
       <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
       <div
         className={`transition-all duration-300 ${
-          sidebarCollapsed ? 'ml-[72px]' : 'ml-[260px]'
+          sidebarCollapsed ? 'ml-[68px]' : 'ml-[220px]'
         }`}
       >
         <Header />
-        <main className="p-6 animate-fade-in">
+        <main className="px-4 py-4 animate-fade-in">
           <Outlet />
         </main>
       </div>

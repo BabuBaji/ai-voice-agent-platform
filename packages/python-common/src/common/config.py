@@ -1,4 +1,19 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+# Walk up from this file to find the monorepo root .env (packages/python-common/src/common/config.py → .env is 4 levels up).
+# Falls back to a local .env next to the service if the root one isn't found.
+def _find_env_file() -> str:
+    here = Path(__file__).resolve()
+    for parent in [here.parent, *here.parents]:
+        candidate = parent / ".env"
+        if candidate.exists():
+            return str(candidate)
+    return ".env"
+
+
+_ENV_FILE = _find_env_file()
 
 
 class Settings(BaseSettings):
@@ -26,5 +41,5 @@ class Settings(BaseSettings):
     s3_bucket: str = "knowledge-docs"
 
     class Config:
-        env_file = ".env"
+        env_file = _ENV_FILE
         extra = "ignore"

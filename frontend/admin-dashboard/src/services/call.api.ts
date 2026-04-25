@@ -33,8 +33,19 @@ export const callApi = {
     return response.data.data ?? response.data;
   },
 
-  initiate: async (data: { agentId: string; phoneNumber: string }): Promise<Call> => {
-    const response = await api.post('/calls/initiate', data);
+  initiate: async (data: {
+    agentId: string;
+    phoneNumber: string;
+    from?: string;
+    provider?: 'twilio' | 'exotel' | 'plivo';
+  }): Promise<Call> => {
+    const payload = {
+      agent_id: data.agentId,
+      to: data.phoneNumber,
+      from: data.from, // optional — backend falls back to the agent's configured phone number
+      provider: data.provider || 'plivo',
+    };
+    const response = await api.post('/calls/initiate', payload);
     return response.data.data ?? response.data;
   },
 

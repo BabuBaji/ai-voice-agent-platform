@@ -177,6 +177,148 @@ async def chat_completions(request: ChatCompletionRequest):
     return EventSourceResponse(_stream_response(request))
 
 
+def _heuristic_analysis(transcript: str) -> dict:
+    """Fallback analysis using keyword heuristics when LLM unavailable."""
+    text = transcript.lower()
+    positive = ["great", "good", "thanks", "thank you", "awesome", "perfect", "love",
+                "excellent", "happy", "wonderful", "yes", "sure", "absolutely", "interested"]
+    negative = ["bad", "terrible", "hate", "awful", "never", "worst", "problem",
+                "complaint", "frustrated", "angry", "disappointed", "not interested"]
+    pos = sum(1 for w in positive if w in text)
+    neg = sum(1 for w in negative if w in text)
+    sentiment = "POSITIVE" if pos > neg + 1 else "NEGATIVE" if neg > pos + 1 else "MIXED" if pos and neg else "NEUTRAL"
+
+    user_lines = [line[6:] for line in transcript.split("\n") if line.lower().startswith("user:")]
+    interest = min(100, max(0, 30 + len(user_lines) * 8 + (15 if sentiment == "POSITIVE" else -20 if sentiment == "NEGATIVE" else 0)))
+
+    topic_map = {
+        "pricing": "Pricing", "demo": "Demo", "features": "Features", "support": "Support",
+        "billing": "Billing", "schedule": "Scheduling", "appointment": "Appointment",
+        "product": "Product", "healthcare": "Healthcare", "real estate": "Real Estate",
+    }
+    topics = [v for k, v in topic_map.items() if k in text] or ["General Inquiry"]
+
+    follow_ups = []
+    if "schedule" in text or "appointment" in text:
+        follow_ups.append("Confirm scheduled appointment via email/SMS")
+    if "pricing" in text or "price" in text:
+        follow_ups.append("Send detailed pricing information")
+    if "demo" in text:
+        follow_ups.append("Prepare and send demo invite")
+    if sentiment == "POSITIVE" and not follow_ups:
+        follow_ups.append("Follow up within 24 hours while interest is warm")
+    if not follow_ups:
+        follow_ups.append("No immediate follow-up required")
+
+    key_points = [line[:120] + ("…" if len(line) > 120 else "") for line in user_lines[:4]]
+
+    outcome = ("Qualified Lead" if sentiment == "POSITIVE" and interest >= 60
+               else "Not Interested" if sentiment == "NEGATIVE"
+               else "Needs Follow-up" if interest >= 40
+               else "Information Inquiry")
+
+    summary = (f"User discussed {', '.join(topics)}. Overall sentiment was {sentiment.lower()} "
+               f"with {interest}% interest.")
+
+    return {
+        "summary": summary,
+        "sentiment": sentiment,
+        "interest_level": interest,
+        "topics": topics,
+        "follow_ups": follow_ups,
+        "key_points": key_points,
+        "outcome": outcome,
+    }
+
+
+@router.post("/chat/analyze")
+async def analyze_transcript(request: Request):
+    """Analyze a call transcript. Returns JSON with summary/sentiment/interest/etc.
+
+    Body: { transcript: str, language?: str, agent_id?: str, system_prompt?: str,
+            provider?: str, model?: str }
+    """
+    body = await request.json()
+    transcript = body.get("transcript", "").strip()
+    language = body.get("language", "en-US")
+    provider = body.get("provider", settings.default_llm_provider)
+    model = body.get("model", settings.default_model)
+
+    if not transcript:
+        return _heuristic_analysis("")
+
+    system_prompt = body.get("system_prompt") or (
+        "You analyze phone call transcripts between a user and an AI voice agent. "
+        f"Return a strict JSON object with keys: summary, sentiment, interest_level, "
+        f"topics, follow_ups, key_points, outcome. "
+        f"summary: 2-3 sentence summary in {language}. "
+        "sentiment: POSITIVE | NEGATIVE | NEUTRAL | MIXED. "
+        "interest_level: integer 0-100. "
+        "topics: array of 1-6 short strings. "
+        "follow_ups: array of 1-5 concrete action items. "
+        "key_points: array of 1-5 notable user statements. "
+        "outcome: short label. "
+        "Return ONLY the JSON object, no prose."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Transcript:\n{transcript}"},
+    ]
+
+    async def _collect(llm, mdl):
+        result = ""
+        async for chunk in llm.chat_completion(
+            messages=messages,
+            model=mdl,
+            temperature=0.2,
+            max_tokens=2048,
+        ):
+            if chunk.get("type") == "content" and chunk.get("content"):
+                content = chunk["content"]
+                if content.startswith("[") and "error" in content.lower():
+                    raise RuntimeError(content)
+                result += content
+        return result
+
+    raw: str | None = None
+    try:
+        llm = llm_router.get_provider(provider)
+        raw = await _collect(llm, model)
+    except Exception as e:
+        logger.warn("analyze_provider_failed", provider=provider, error=str(e))
+
+    if raw:
+        try:
+            # Strip ```json fences if present
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                if cleaned.lower().startswith("json"):
+                    cleaned = cleaned[4:]
+                cleaned = cleaned.strip()
+            # Find first { and last } for safety
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start >= 0 and end > start:
+                cleaned = cleaned[start : end + 1]
+            parsed = json.loads(cleaned)
+            # Normalize
+            return {
+                "summary": str(parsed.get("summary", ""))[:2000],
+                "sentiment": str(parsed.get("sentiment", "NEUTRAL")).upper(),
+                "interest_level": max(0, min(100, int(parsed.get("interest_level", 50)))),
+                "topics": [str(x) for x in (parsed.get("topics") or [])][:10],
+                "follow_ups": [str(x) for x in (parsed.get("follow_ups") or [])][:10],
+                "key_points": [str(x) for x in (parsed.get("key_points") or [])][:10],
+                "outcome": str(parsed.get("outcome", "Information Inquiry"))[:100],
+            }
+        except Exception as e:
+            logger.warn("analyze_parse_failed", error=str(e))
+
+    return _heuristic_analysis(transcript)
+
+
 @router.post("/chat/simple")
 async def simple_chat(request: Request):
     """Non-streaming chat for service-to-service calls.

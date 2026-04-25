@@ -10,6 +10,8 @@ export interface CallOptions {
   tenantId: string;
   webhookUrl?: string;
   metadata?: Record<string, unknown>;
+  /** Tell the carrier to detect answering machines / voicemail on outbound calls. */
+  voicemailDetection?: boolean;
 }
 
 export interface CallResult {
@@ -33,6 +35,9 @@ export interface ProvisionedNumber {
   providerNumberId: string;
   number: string;
   capabilities: string[];
+  monthlyRate?: number;
+  region?: string;
+  country?: string;
 }
 
 export interface TelephonyProvider {

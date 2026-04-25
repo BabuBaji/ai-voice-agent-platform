@@ -1,6 +1,9 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import bcrypt from 'bcryptjs';
 import * as authService from '../services/auth.service';
+import { config } from '../config';
+import { authMiddleware } from '../middleware/auth.middleware';
 
 const registerSchema = z.object({
   tenantName: z.string().min(1).max(100),
@@ -21,6 +24,11 @@ const refreshSchema = z.object({
 
 const logoutSchema = z.object({
   refreshToken: z.string().min(1),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8).max(128),
 });
 
 export function authRouter(): Router {
@@ -99,6 +107,42 @@ export function authRouter(): Router {
         }
         if (err.status === 401) {
           res.status(401).json({ error: err.message });
+          return;
+        }
+        next(err);
+      }
+    },
+  );
+
+  // POST /auth/change-password — authed user changes their own password.
+  router.post(
+    '/change-password',
+    authMiddleware,
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const data = changePasswordSchema.parse(req.body);
+        const pool = (req as any).pool;
+        const userId = (req as any).userId;
+
+        const userRes = await pool.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+        if (userRes.rows.length === 0) {
+          res.status(404).json({ error: 'User not found' });
+          return;
+        }
+        const ok = await bcrypt.compare(data.currentPassword, userRes.rows[0].password_hash);
+        if (!ok) {
+          res.status(401).json({ error: 'Current password is incorrect' });
+          return;
+        }
+        const newHash = await bcrypt.hash(data.newPassword, config.bcryptRounds);
+        await pool.query(
+          'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2',
+          [newHash, userId],
+        );
+        res.json({ message: 'Password updated' });
+      } catch (err: any) {
+        if (err?.name === 'ZodError') {
+          res.status(400).json({ error: 'Validation failed', details: err.errors });
           return;
         }
         next(err);

@@ -1,10 +1,14 @@
 export const config = {
   port: parseInt(process.env.PORT || '3003', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
-  databaseUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/va_conversations',
+  databaseUrl: process.env.DATABASE_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/conversation_db',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-  rabbitmqUrl: process.env.RABBITMQ_URL || 'amqp://localhost:5672',
+  rabbitmqUrl: process.env.RABBITMQ_URL || 'amqp://voiceagent:voiceagent_dev@localhost:5672',
   jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-me',
   wsPort: parseInt(process.env.WS_PORT || '3013', 10),
   sessionTtlSeconds: parseInt(process.env.SESSION_TTL_SECONDS || '3600', 10),
+  aiRuntimeUrl: process.env.AI_RUNTIME_URL || 'http://localhost:8000',
+  recordingsDir: process.env.RECORDINGS_DIR || 'data/recordings',
+  identityServiceUrl: process.env.IDENTITY_SERVICE_URL || 'http://localhost:8080',
+  billingInternalToken: process.env.BILLING_INTERNAL_TOKEN || 'dev-billing-internal-token',
 };

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 
 from common import get_db_pool, get_logger
 from ..models import (
@@ -15,8 +16,17 @@ logger = get_logger("knowledge-bases-api")
 
 
 @router.post("", response_model=KnowledgeBaseResponse)
-async def create_knowledge_base(body: KnowledgeBaseCreate):
-    """Create a new knowledge base."""
+async def create_knowledge_base(
+    body: KnowledgeBaseCreate,
+    x_tenant_id: Optional[str] = Header(None),
+):
+    """Create a new knowledge base. `organization_id` may be supplied in the
+    body OR via the `x-tenant-id` header (set by the gateway from the user's
+    JWT). At least one must be present so the row is owned by a tenant."""
+    org_id = body.organization_id or x_tenant_id or ""
+    if not org_id:
+        raise HTTPException(status_code=400, detail="organization_id (or x-tenant-id header) is required")
+
     pool = await get_db_pool(settings.database_url)
     now = datetime.now(timezone.utc)
 
@@ -28,7 +38,7 @@ async def create_knowledge_base(body: KnowledgeBaseCreate):
         """,
         body.name,
         body.description,
-        body.organization_id,
+        org_id,
         now,
         now,
     )
@@ -47,9 +57,15 @@ async def create_knowledge_base(body: KnowledgeBaseCreate):
 
 
 @router.get("", response_model=KnowledgeBaseListResponse)
-async def list_knowledge_bases(organization_id: str = ""):
-    """List all knowledge bases, optionally filtered by organization."""
+async def list_knowledge_bases(
+    organization_id: str = "",
+    x_tenant_id: Optional[str] = Header(None),
+):
+    """List all knowledge bases. If `organization_id` (query) or
+    `x-tenant-id` (header) is provided, scopes to that tenant. The header
+    wins when both are blank-on-query."""
     pool = await get_db_pool(settings.database_url)
+    organization_id = organization_id or (x_tenant_id or "")
 
     if organization_id:
         rows = await pool.fetch(

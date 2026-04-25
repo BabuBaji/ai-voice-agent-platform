@@ -10,7 +10,9 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const location = useLocation();
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: location }} replace />;
+    // Send unauthenticated visitors to the public landing page (which has
+    // sign-in / sign-up CTAs) rather than the bare login form.
+    return <Navigate to="/landing" state={{ from: location }} replace />;
   }
 
   return <>{children}</>;

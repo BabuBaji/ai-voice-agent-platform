@@ -1,169 +1,268 @@
-import { Card, CardHeader } from '@/components/ui/Card';
-import { TrendingUp, TrendingDown } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  Phone, Clock, Activity, Users, Calendar, AlertCircle, Loader2,
+} from 'lucide-react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts';
+import { Card } from '@/components/ui/Card';
+import {
+  analyticsApi,
+  type AnalyticsSummary,
+  type TimeseriesPoint,
+  type AnalyticsFilter,
+} from '@/services/analytics.api';
+import { agentApi } from '@/services/agent.api';
 
-const callsOverTime = [
-  { date: 'Apr 1', calls: 85 },
-  { date: 'Apr 3', calls: 120 },
-  { date: 'Apr 5', calls: 105 },
-  { date: 'Apr 7', calls: 140 },
-  { date: 'Apr 9', calls: 165 },
-  { date: 'Apr 11', calls: 130 },
-  { date: 'Apr 13', calls: 155 },
-  { date: 'Apr 15', calls: 180 },
-  { date: 'Apr 17', calls: 195 },
-  { date: 'Apr 18', calls: 210 },
+type ChannelTab = 'phone' | 'web';
+type ChartTab = 'volume' | 'duration';
+
+const DAY_PRESETS: Array<{ label: string; days: number }> = [
+  { label: 'Last 7 days', days: 7 },
+  { label: 'Last 30 days', days: 30 },
+  { label: 'Last 90 days', days: 90 },
 ];
 
-const callOutcomes = [
-  { name: 'Completed', value: 68, color: '#10b981' },
-  { name: 'Transferred', value: 15, color: '#6366f1' },
-  { name: 'Voicemail', value: 10, color: '#f59e0b' },
-  { name: 'Dropped', value: 5, color: '#ef4444' },
-  { name: 'No Answer', value: 2, color: '#94a3b8' },
-];
+function fmtShortDate(iso: string): string {
+  try { return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric' }); }
+  catch { return iso; }
+}
 
-const agentPerformance = [
-  { name: 'Sales Bot', calls: 420, success: 87, satisfaction: 92 },
-  { name: 'Support Agent', calls: 380, success: 92, satisfaction: 88 },
-  { name: 'Booking Agent', calls: 290, success: 95, satisfaction: 96 },
-  { name: 'Lead Qualifier', calls: 190, success: 78, satisfaction: 82 },
-];
-
-const leadSources = [
-  { source: 'Inbound Calls', leads: 145 },
-  { source: 'Website', leads: 98 },
-  { source: 'Referrals', leads: 56 },
-  { source: 'Outbound', leads: 42 },
-  { source: 'Campaigns', leads: 35 },
-];
-
-const summaryStats = [
-  { label: 'Total Calls (Month)', value: '4,285', change: '+18%', positive: true },
-  { label: 'Avg. Duration', value: '3:42', change: '-0:12', positive: true },
-  { label: 'Resolution Rate', value: '87.3%', change: '+2.1%', positive: true },
-  { label: 'Cost per Call', value: '$0.42', change: '-$0.03', positive: true },
-];
-
-const tooltipStyle = {
-  borderRadius: '12px',
-  border: '1px solid #e2e8f0',
-  boxShadow: '0 10px 25px rgba(0,0,0,0.08)',
-  padding: '8px 12px',
-};
+function fmtMin(sec: number): string {
+  return (sec / 60).toFixed(2);
+}
 
 export function AnalyticsPage() {
+  // Filters
+  const [days, setDays] = useState(7);
+  const [agentId, setAgentId] = useState<string>('');
+  const [channelTab, setChannelTab] = useState<ChannelTab>('phone');
+  const [chartTab, setChartTab] = useState<ChartTab>('volume');
+
+  // Data
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+  const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([]);
+  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+
+  // Load agents once — used for the Assistant selector + total count KPI
+  useEffect(() => {
+    agentApi.list().then((a: any) => {
+      const arr = Array.isArray(a) ? a : a?.data || [];
+      setAgents(arr.map((x: any) => ({ id: x.id, name: x.name })));
+    }).catch(() => {});
+  }, []);
+
+  // Load metrics when filters change
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(null);
+    const filter: AnalyticsFilter = {
+      days,
+      agent_id: agentId || undefined,
+      channel: channelTab === 'phone' ? 'PHONE' : 'WEB',
+    };
+    Promise.allSettled([
+      analyticsApi.summary(filter),
+      analyticsApi.timeseries(filter),
+    ]).then((rs) => {
+      if (cancelled) return;
+      if (rs[0].status === 'fulfilled') setSummary(rs[0].value);
+      if (rs[1].status === 'fulfilled') setTimeseries(rs[1].value);
+      const rejected = rs.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+      if (rejected) setError(rejected.reason?.response?.data?.message || rejected.reason?.message || 'Analytics API error');
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [days, agentId, channelTab]);
+
+  // Human-readable date range for the "📅 Apr 15, 2026 - Apr 22, 2026" pill
+  const dateRangeLabel = useMemo(() => {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(end.getDate() - days + 1);
+    const fmt = (d: Date) => d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    return `${fmt(start)} — ${fmt(end)}`;
+  }, [days]);
+
+  // Totals for KPI cards
+  const totalCalls = summary?.total_calls ?? 0;
+  const totalDurationMin = summary?.total_duration_minutes ?? 0;
+  const avgDurationSec = summary?.avg_duration_seconds ?? 0;
+  const totalAssistants = agents.length;
+
+  const chartData = timeseries.map((p) => ({
+    date: fmtShortDate(p.date),
+    calls: p.calls,
+    duration: +(p.avg_duration / 60).toFixed(2),
+  }));
+
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="max-w-[1400px] mx-auto space-y-6">
+      {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Analytics</h1>
-        <p className="text-sm text-gray-500 mt-1">Insights and performance metrics</p>
+        <p className="text-sm text-gray-500 mt-1">View and analyze your call and chat performance metrics</p>
       </div>
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {summaryStats.map((stat) => (
-          <div key={stat.label} className="bg-white rounded-xl border border-gray-100 p-5 shadow-card hover:shadow-stat transition-all duration-300">
-            <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">{stat.label}</p>
-            <p className="text-2xl font-bold text-gray-900 mt-1 tracking-tight">{stat.value}</p>
-            <div className="flex items-center gap-1 mt-2">
-              {stat.positive ? (
-                <TrendingUp className="h-3.5 w-3.5 text-success-500" />
-              ) : (
-                <TrendingDown className="h-3.5 w-3.5 text-danger-500" />
-              )}
-              <p className={`text-xs font-medium ${stat.positive ? 'text-success-600' : 'text-danger-600'}`}>{stat.change}</p>
-            </div>
+      {/* ─── Top filter row ─── */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          {DAY_PRESETS.map((p) => (
+            <button
+              key={p.days}
+              onClick={() => setDays(p.days)}
+              className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
+                days === p.days
+                  ? 'bg-primary-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+          <div className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 border border-gray-200">
+            <Calendar className="h-3.5 w-3.5" /> {dateRangeLabel}
           </div>
-        ))}
+        </div>
+        <div className="ml-auto flex items-center gap-3">
+          <label className="text-xs font-medium text-gray-600">Select Assistant</label>
+          <select
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            className="min-w-[200px] text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100"
+          >
+            <option value="">All Assistants</option>
+            {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader title="Calls Over Time" subtitle="Daily call volume this month" />
-          <div className="h-72">
+      {/* ─── Channel tabs (Phone vs Chatbot) ─── */}
+      <div className="inline-flex items-center gap-1 p-1 bg-gray-100 rounded-xl">
+        <button
+          onClick={() => setChannelTab('phone')}
+          className={`text-sm font-medium px-4 py-1.5 rounded-lg transition-colors ${
+            channelTab === 'phone' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Phone Call Analytics
+        </button>
+        <button
+          onClick={() => setChannelTab('web')}
+          className={`text-sm font-medium px-4 py-1.5 rounded-lg transition-colors ${
+            channelTab === 'web' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Website Chatbot Analytics
+        </button>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
+          <AlertCircle className="h-4 w-4" /> {error}
+        </div>
+      )}
+
+      {/* ─── KPI cards ─── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiCard
+          label="Total Calls Count"
+          value={loading ? '…' : totalCalls.toLocaleString()}
+          icon={<Phone className="h-5 w-5 text-primary-500" />}
+        />
+        <KpiCard
+          label="Total call duration"
+          value={loading ? '…' : `${totalDurationMin.toFixed(2)} min`}
+          icon={<Clock className="h-5 w-5 text-primary-500" />}
+        />
+        <KpiCard
+          label="Avg. Duration"
+          value={loading ? '…' : `${fmtMin(avgDurationSec)} min`}
+          icon={<Activity className="h-5 w-5 text-primary-500" />}
+        />
+        <KpiCard
+          label="Total Assistants"
+          value={String(totalAssistants)}
+          icon={<Users className="h-5 w-5 text-primary-500" />}
+        />
+      </div>
+
+      {/* ─── Chart tabs ─── */}
+      <div className="inline-flex items-center gap-1 p-1 bg-gray-100 rounded-xl">
+        <button
+          onClick={() => setChartTab('volume')}
+          className={`text-sm font-medium px-4 py-1.5 rounded-lg transition-colors ${
+            chartTab === 'volume' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Call Volume
+        </button>
+        <button
+          onClick={() => setChartTab('duration')}
+          className={`text-sm font-medium px-4 py-1.5 rounded-lg transition-colors ${
+            chartTab === 'duration' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Call Duration
+        </button>
+      </div>
+
+      {/* ─── Chart card ─── */}
+      <Card>
+        <div className="mb-4">
+          <h3 className="text-base font-semibold text-gray-900">
+            {chartTab === 'volume' ? 'Call Volume Over Time' : 'Call Duration Over Time'}
+          </h3>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {chartTab === 'volume'
+              ? 'Number of calls per day in the selected period'
+              : 'Average call duration per day in the selected period (minutes)'}
+          </p>
+        </div>
+        <div className="h-[420px]">
+          {loading && chartData.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-sm text-gray-400">
+              <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading…
+            </div>
+          ) : chartData.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-sm text-gray-400">
+              No calls in this period.
+            </div>
+          ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={callsOverTime}>
-                <defs>
-                  <linearGradient id="lineGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.1}/>
-                    <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <Tooltip contentStyle={tooltipStyle} />
-                <Line type="monotone" dataKey="calls" stroke="#4f46e5" strokeWidth={2.5} dot={{ r: 3, fill: '#4f46e5', stroke: '#fff', strokeWidth: 2 }} fill="url(#lineGradient)" />
+              <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#6b7280' }} stroke="#9ca3af" />
+                <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} stroke="#9ca3af" />
+                <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid #e5e7eb', fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line
+                  type="monotone"
+                  dataKey={chartTab === 'volume' ? 'calls' : 'duration'}
+                  name={chartTab === 'volume' ? 'calls' : 'minutes'}
+                  stroke="#0d9488"
+                  strokeWidth={2.5}
+                  dot={{ r: 4, fill: '#0d9488', stroke: '#fff', strokeWidth: 2 }}
+                  activeDot={{ r: 6 }}
+                />
               </LineChart>
             </ResponsiveContainer>
-          </div>
-        </Card>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
 
-        <Card>
-          <CardHeader title="Call Outcomes" subtitle="Distribution by outcome type" />
-          <div className="h-72 flex items-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={callOutcomes}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={100}
-                  paddingAngle={3}
-                  dataKey="value"
-                >
-                  {callOutcomes.map((entry, index) => (
-                    <Cell key={index} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={tooltipStyle} />
-                <Legend
-                  verticalAlign="bottom"
-                  height={36}
-                  formatter={(value) => <span className="text-xs text-gray-600">{value}</span>}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-
-        <Card>
-          <CardHeader title="Agent Performance" subtitle="Success rate by agent" />
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={agentPerformance} barGap={4}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <Tooltip contentStyle={tooltipStyle} />
-                <Legend formatter={(value) => <span className="text-xs text-gray-600">{value}</span>} />
-                <Bar dataKey="success" name="Success %" fill="#4f46e5" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="satisfaction" name="Satisfaction %" fill="#10b981" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-
-        <Card>
-          <CardHeader title="Lead Sources" subtitle="Where leads are coming from" />
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={leadSources} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis type="number" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-                <YAxis dataKey="source" type="category" tick={{ fontSize: 11 }} stroke="#94a3b8" width={100} />
-                <Tooltip contentStyle={tooltipStyle} />
-                <Bar dataKey="leads" fill="#7c3aed" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
+function KpiCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl border border-primary-200 bg-white p-5 shadow-card hover:shadow-stat transition-shadow">
+      <div className="flex items-start justify-between mb-2">
+        <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">{label}</p>
+        <div className="w-9 h-9 rounded-xl bg-primary-50 flex items-center justify-center">{icon}</div>
       </div>
+      <p className="text-3xl font-bold text-gray-900 tracking-tight">{value}</p>
     </div>
   );
 }

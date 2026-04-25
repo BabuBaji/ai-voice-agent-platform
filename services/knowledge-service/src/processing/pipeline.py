@@ -68,17 +68,51 @@ class ProcessingPipeline:
                 await self._update_document_status(document_id, "completed", chunk_count=0)
                 return {"document_id": document_id, "chunk_count": 0, "status": "completed"}
 
-            # 4. Embed
+            # 4. Embed (best-effort — if the embeddings provider is down or out
+            # of quota we still want the file to be viewable / downloadable in
+            # the UI. We mark the doc `completed` with an error_message noting
+            # that semantic search will be unavailable until embeddings are
+            # backfilled.)
             chunk_texts = [c["content"] for c in chunks]
-            embeddings = await self.embedder.embed(chunk_texts)
+            try:
+                embeddings = await self.embedder.embed(chunk_texts)
+            except Exception as embed_err:
+                logger.warning(
+                    "embedding_failed_keeping_file",
+                    document_id=document_id,
+                    error=str(embed_err),
+                )
+                await self._update_document_status(
+                    document_id,
+                    "completed",
+                    chunk_count=len(chunks),
+                    error=f"Embeddings unavailable: {str(embed_err)[:200]}. File is stored and viewable; semantic search disabled.",
+                )
+                return {
+                    "document_id": document_id,
+                    "chunk_count": len(chunks),
+                    "status": "completed",
+                    "embedding_skipped": True,
+                    "error": str(embed_err),
+                }
 
             # 5. Store in vector store
-            await self.vector_store.insert_chunks(
-                document_id=document_id,
-                knowledge_base_id=knowledge_base_id,
-                chunks=chunks,
-                embeddings=embeddings,
-            )
+            try:
+                await self.vector_store.insert_chunks(
+                    document_id=document_id,
+                    knowledge_base_id=knowledge_base_id,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                )
+            except Exception as store_err:
+                logger.warning("vector_store_failed", document_id=document_id, error=str(store_err))
+                await self._update_document_status(
+                    document_id,
+                    "completed",
+                    chunk_count=len(chunks),
+                    error=f"Vector store unavailable: {str(store_err)[:200]}. File is stored; semantic search disabled.",
+                )
+                return {"document_id": document_id, "chunk_count": len(chunks), "status": "completed"}
 
             # 6. Update status
             await self._update_document_status(document_id, "completed", chunk_count=len(chunks))
@@ -87,6 +121,8 @@ class ProcessingPipeline:
             return {"document_id": document_id, "chunk_count": len(chunks), "status": "completed"}
 
         except Exception as e:
+            # Hard failure (parsing crashed or S3 upload failed). The file may
+            # not be retrievable so we honestly mark it failed.
             logger.error("processing_failed", document_id=document_id, error=str(e))
             await self._update_document_status(document_id, "failed", error=str(e))
             return {"document_id": document_id, "chunk_count": 0, "status": "failed", "error": str(e)}

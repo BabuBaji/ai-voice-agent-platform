@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { pool } from '../index';
 import { twilioProvider } from '../providers/twilio.provider';
 import { exotelProvider } from '../providers/exotel.provider';
+import { plivoProvider } from '../providers/plivo.provider';
 
 export const callRouter = Router();
 
@@ -16,10 +17,10 @@ function getTenantId(req: Request, res: Response): string | null {
 }
 
 const initiateCallSchema = z.object({
-  from: z.string().min(1),
+  from: z.string().min(1).optional(),
   to: z.string().min(1),
   agent_id: z.string().uuid(),
-  provider: z.enum(['twilio', 'exotel']).default('twilio'),
+  provider: z.enum(['twilio', 'exotel', 'plivo']).default('twilio'),
   metadata: z.any().default({}),
 });
 
@@ -31,14 +32,65 @@ callRouter.post('/initiate', async (req: Request, res: Response, next: NextFunct
 
     const parsed = initiateCallSchema.parse(req.body);
 
-    const provider = parsed.provider === 'exotel' ? exotelProvider : twilioProvider;
+    // Resolve `from` number. Order of preference:
+    //  1) Explicit `from` in the request
+    //  2) First active phone_number for this agent
+    //  3) TWILIO_PHONE_NUMBER env var (global fallback)
+    let fromNumber = parsed.from;
+    if (!fromNumber) {
+      const phoneRow = await pool.query(
+        `SELECT phone_number FROM phone_numbers
+         WHERE tenant_id = $1 AND agent_id = $2 AND is_active = TRUE
+         ORDER BY created_at ASC LIMIT 1`,
+        [tenantId, parsed.agent_id]
+      );
+      if (phoneRow.rows.length > 0) {
+        fromNumber = phoneRow.rows[0].phone_number;
+      }
+    }
+    if (!fromNumber) {
+      if (parsed.provider === 'plivo' && process.env.PLIVO_PHONE_NUMBER) {
+        fromNumber = process.env.PLIVO_PHONE_NUMBER;
+      } else if (process.env.TWILIO_PHONE_NUMBER) {
+        fromNumber = process.env.TWILIO_PHONE_NUMBER;
+      }
+    }
+    if (!fromNumber) {
+      res.status(400).json({
+        error: 'No From Number',
+        message: 'No phone number is configured for this agent. Link a number in Settings → Phone Numbers, or pass `from` explicitly.',
+      });
+      return;
+    }
+
+    const provider =
+      parsed.provider === 'exotel' ? exotelProvider
+      : parsed.provider === 'plivo' ? plivoProvider
+      : twilioProvider;
+
+    // Look up the agent's call_config so we can pass per-call options like
+    // voicemail/AMD detection through to the carrier.
+    let voicemailDetection = false;
+    try {
+      const agentSvcUrl = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
+      const agentResp = await fetch(`${agentSvcUrl}/agents/${parsed.agent_id}`, {
+        headers: { 'x-tenant-id': tenantId },
+      });
+      if (agentResp.ok) {
+        const agent: any = await agentResp.json();
+        voicemailDetection = !!agent?.call_config?.voicemail_detection?.enabled;
+      }
+    } catch {
+      /* non-fatal — fall back to defaults */
+    }
 
     // Initiate call via provider
     const callResult = await provider.initiateCall({
-      from: parsed.from,
+      from: fromNumber,
       to: parsed.to,
       agentId: parsed.agent_id,
       tenantId,
+      voicemailDetection,
     });
 
     // Create call record in DB
@@ -50,7 +102,7 @@ callRouter.post('/initiate', async (req: Request, res: Response, next: NextFunct
         tenantId,
         parsed.agent_id,
         callResult.status === 'queued' ? 'RINGING' : callResult.status.toUpperCase(),
-        parsed.from,
+        fromNumber,
         parsed.to,
         parsed.provider,
         callResult.providerCallId,
@@ -183,7 +235,10 @@ callRouter.post('/:id/end', async (req: Request, res: Response, next: NextFuncti
 
     // End call via provider
     if (call.provider_call_sid) {
-      const provider = call.provider === 'exotel' ? exotelProvider : twilioProvider;
+      const provider =
+        call.provider === 'exotel' ? exotelProvider
+        : call.provider === 'plivo' ? plivoProvider
+        : twilioProvider;
       try {
         await provider.endCall(call.provider_call_sid);
       } catch (err) {
@@ -237,7 +292,10 @@ callRouter.post('/:id/transfer', async (req: Request, res: Response, next: NextF
 
     // Transfer via provider
     if (call.provider_call_sid) {
-      const provider = call.provider === 'exotel' ? exotelProvider : twilioProvider;
+      const provider =
+        call.provider === 'exotel' ? exotelProvider
+        : call.provider === 'plivo' ? plivoProvider
+        : twilioProvider;
       await provider.transferCall({
         callId: call.provider_call_sid,
         transferTo: transfer_to,
