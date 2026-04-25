@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -234,6 +234,31 @@ export function AgentWizardPage() {
   // Use-case tab + template-card state. No category is active by default —
   // the templates row only appears after the user picks one.
   const [activeUseCase, setActiveUseCase] = useState<UseCaseId | null>(null);
+
+  // Restore prefill from the public LandingPage (`/landing`) — when a new
+  // visitor types a prompt + picks a use case there and clicks "Create Agent",
+  // we route them through signup, then drop them on this wizard with their
+  // selections already filled in and Step 1 marked complete.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('va-landing-prefill');
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (data?.systemPrompt) setSystemPrompt(data.systemPrompt);
+      if (data?.name) setName(data.name);
+      if (data?.description) setDescription(data.description);
+      if (data?.activeUseCase) setActiveUseCase(data.activeUseCase);
+      if (typeof data?.guidedFlow === 'boolean') setGuidedFlow(data.guidedFlow);
+      // Skip the System Prompt step since the user already wrote one on the
+      // landing page — advance straight to Language selection.
+      if (data?.systemPrompt) setStep(2);
+      sessionStorage.removeItem('va-landing-prefill');
+    } catch {
+      sessionStorage.removeItem('va-landing-prefill');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const filteredTemplates = useMemo(
     () => (activeUseCase ? AGENT_TEMPLATES.filter((t) => t.use_case === activeUseCase) : []),
     [activeUseCase]
