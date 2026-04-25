@@ -90,7 +90,21 @@ export function CallLogPage() {
       agentArr.forEach((a: any) => agentMap.set(a.id, a.name));
       setAgents(agentArr.map((a: any) => ({ id: a.id, name: a.name })));
 
-      const rows: CallRow[] = (result.data || []).map((c: any) => ({
+      // Hide stale orphan rows: a conversation is "stale" if it's still on
+      // status='ACTIVE' but was started more than 5 minutes ago. Those almost
+      // always come from a web-call WS that disconnected without a clean
+      // shutdown and never wrote a transcript. The backend sweeper flips
+      // them to FAILED on its next tick (every 30 min) — this filter is the
+      // immediate UI cover so they don't appear meanwhile.
+      const STALE_MS = 5 * 60 * 1000;
+      const now = Date.now();
+      const filteredRaw = (result.data || []).filter((c: any) => {
+        if ((c.status || '').toUpperCase() !== 'ACTIVE') return true;
+        const started = new Date(c.started_at || c.created_at || 0).getTime();
+        return started > 0 && now - started < STALE_MS;
+      });
+
+      const rows: CallRow[] = filteredRaw.map((c: any) => ({
         id: c.id,
         callerNumber: c.caller_number || '—',
         calledNumber: c.called_number || '—',

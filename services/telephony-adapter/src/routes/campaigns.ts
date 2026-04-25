@@ -320,7 +320,8 @@ async function processCampaign(campaignId: string): Promise<void> {
 
   const provider = getProvider(campaign.provider || 'plivo');
 
-  // Look up voicemail detection setting on the agent (per-call carrier flag)
+  // Look up voicemail detection setting on the agent (per-call carrier flag).
+  // Also check the deploy gate — refuse to start a campaign on a DRAFT agent.
   let voicemailDetection = false;
   try {
     const agentSvcUrl = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
@@ -329,6 +330,14 @@ async function processCampaign(campaignId: string): Promise<void> {
     });
     if (ar.ok) {
       const ag: any = await ar.json();
+      const status = String(ag?.status || '').toUpperCase();
+      if (process.env.BYPASS_PUBLISH_GATE !== 'true' && (status === 'DRAFT' || status === 'ARCHIVED')) {
+        await pool.query(
+          `UPDATE campaigns SET status = 'FAILED', metadata = COALESCE(metadata,'{}') || $1 WHERE id = $2`,
+          [JSON.stringify({ failure_reason: 'agent_not_deployed', agent_status: status }), campaign.id]
+        );
+        return; // Caller treats this as no-op; campaigns API surfaces the FAILED status.
+      }
       voicemailDetection = !!ag?.call_config?.voicemail_detection?.enabled;
     }
   } catch { /* non-fatal */ }

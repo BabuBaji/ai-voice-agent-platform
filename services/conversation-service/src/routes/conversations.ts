@@ -285,6 +285,61 @@ conversationRouter.post('/:id/analyze', async (req: Request, res: Response, next
   }
 });
 
+// PATCH /:id/end — mark a conversation finished. Used by telephony adapter +
+// ai-runtime web-call when their stream closes, so rows don't get stuck on
+// status='ACTIVE' forever. Service-to-service call: tenant_id is in header.
+const endConversationSchema = z.object({
+  reason: z.enum(['ENDED', 'FAILED', 'TRANSFERRED']).default('ENDED'),
+  duration_seconds: z.number().int().nonnegative().optional(),
+  caller_number: z.string().max(20).optional(),
+  called_number: z.string().max(20).optional(),
+});
+
+conversationRouter.patch('/:id/end', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+
+    const { id } = req.params;
+    const data = endConversationSchema.parse(req.body || {});
+
+    const sets: string[] = ['status = $1', 'ended_at = COALESCE(ended_at, now())'];
+    const values: unknown[] = [data.reason];
+    let idx = 2;
+    if (data.duration_seconds !== undefined) {
+      sets.push(`duration_seconds = COALESCE(duration_seconds, $${idx++})`);
+      values.push(data.duration_seconds);
+    }
+    if (data.caller_number) {
+      sets.push(`caller_number = COALESCE(NULLIF(caller_number, ''), $${idx++})`);
+      values.push(data.caller_number);
+    }
+    if (data.called_number) {
+      sets.push(`called_number = COALESCE(NULLIF(called_number, ''), $${idx++})`);
+      values.push(data.called_number);
+    }
+    values.push(id, tenantId);
+
+    const result = await pool.query(
+      `UPDATE conversations SET ${sets.join(', ')}
+       WHERE id = $${idx++} AND tenant_id = $${idx}
+       RETURNING id, status, ended_at, duration_seconds`,
+      values,
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Not Found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    if (err?.name === 'ZodError') {
+      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      return;
+    }
+    next(err);
+  }
+});
+
 conversationRouter.delete('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const tenantId = getTenantId(req, res);

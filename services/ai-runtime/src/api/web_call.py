@@ -576,6 +576,24 @@ async def _end_call(ws: WebSocket, state: dict, reason: str) -> None:
         "transcript_status": transcript_status,
     })
 
+    # Also finalize the linked `conversations` row so it doesn't sit on
+    # status='ACTIVE' forever — that's what made an empty WEB row leak into
+    # the call log when a user closed the tab without a clean shutdown.
+    conv_id = state.get("conversation_id")
+    if conv_id:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.patch(
+                    f"{CONVERSATION_SERVICE_URL}/api/v1/conversations/{conv_id}/end",
+                    json={
+                        "reason": "ENDED" if transcript_status == "DONE" else "FAILED",
+                        "duration_seconds": duration,
+                    },
+                    headers={"x-tenant-id": state["tenant_id"] or ""},
+                )
+        except Exception as e:
+            logger.warn("conversation_end_patch_failed", err=str(e), conversation_id=conv_id)
+
     try:
         await ws.send_json({"type": "call_ended", "reason": reason, "duration_seconds": duration})
     except Exception:

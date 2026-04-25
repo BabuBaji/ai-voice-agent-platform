@@ -8,6 +8,7 @@ import { initSupportTables } from './db/supportInit';
 import { initContactTables } from './db/contactInit';
 import { setupWebSocketServer } from './ws/realtime';
 import { startRetentionSweeper } from './services/privacy';
+import { startStaleSweeper } from './services/staleSweeper';
 import pino from 'pino';
 
 const logger = pino({
@@ -46,6 +47,11 @@ async function start(): Promise<void> {
     if (process.env.RETENTION_SWEEPER !== 'off') {
       startRetentionSweeper();
     }
+
+    // Stale conversation sweeper — flips ACTIVE rows older than the threshold
+    // (default 60 min, no recent messages) to FAILED so they stop polluting
+    // the call log.
+    startStaleSweeper();
 
     const shutdown = async () => {
       logger.info('Shutting down...');

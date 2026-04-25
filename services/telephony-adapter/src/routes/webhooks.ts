@@ -309,6 +309,14 @@ async function firePostCallActions(
   }
 }
 
+// Status gate: DRAFT and ARCHIVED agents shouldn't take real calls. Set
+// `BYPASS_PUBLISH_GATE=true` to disable for QA / migration windows.
+function isAgentLive(agent: any): boolean {
+  if (process.env.BYPASS_PUBLISH_GATE === 'true') return true;
+  const s = String(agent?.status || '').toUpperCase();
+  return s !== 'DRAFT' && s !== 'ARCHIVED';
+}
+
 async function loadAgent(agentId: string, tenantId: string): Promise<any | null> {
   try {
     // AGENT_SERVICE_URL is expected to already include the `/api/v1` prefix
@@ -577,6 +585,15 @@ webhookRouter.post('/twilio/voice', async (req: Request, res: Response, next: Ne
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>I could not load the assistant configuration. Goodbye.</Say>
+  <Hangup/>
+</Response>`);
+      return;
+    }
+    if (!isAgentLive(agent)) {
+      logger.warn({ agentId, tenantId, status: agent.status }, 'Twilio inbound rejected — agent not deployed');
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>This assistant is not yet deployed. Please try again later.</Say>
   <Hangup/>
 </Response>`);
       return;
@@ -1066,6 +1083,12 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
     if (!agent) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response><Speak>I could not load the assistant configuration. Goodbye.</Speak><Hangup/></Response>`);
+      return;
+    }
+    if (!isAgentLive(agent)) {
+      logger.warn({ agentId, tenantId, status: agent.status }, 'Inbound call rejected — agent not deployed');
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Speak>This assistant is not yet deployed. Please try again later.</Speak><Hangup/></Response>`);
       return;
     }
 

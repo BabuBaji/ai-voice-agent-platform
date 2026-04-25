@@ -69,7 +69,8 @@ callRouter.post('/initiate', async (req: Request, res: Response, next: NextFunct
       : twilioProvider;
 
     // Look up the agent's call_config so we can pass per-call options like
-    // voicemail/AMD detection through to the carrier.
+    // voicemail/AMD detection through to the carrier. Also check the deploy
+    // gate — DRAFT/ARCHIVED agents shouldn't initiate outbound calls.
     let voicemailDetection = false;
     try {
       const agentSvcUrl = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
@@ -78,6 +79,15 @@ callRouter.post('/initiate', async (req: Request, res: Response, next: NextFunct
       });
       if (agentResp.ok) {
         const agent: any = await agentResp.json();
+        const status = String(agent?.status || '').toUpperCase();
+        if (process.env.BYPASS_PUBLISH_GATE !== 'true' && (status === 'DRAFT' || status === 'ARCHIVED')) {
+          res.status(400).json({
+            error: 'Agent not deployed',
+            message: 'Click Deploy on the agent to enable outbound calls.',
+            agent_status: status,
+          });
+          return;
+        }
         voicemailDetection = !!agent?.call_config?.voicemail_detection?.enabled;
       }
     } catch {

@@ -930,13 +930,16 @@ async function finalizeRecording(session: StreamSession): Promise<void> {
 
     // Mirror onto the conversations row. Recording URL on the top-level
     // column, voice quality into the analysis JSONB so the AI-analytics
-    // panel on Call Detail can pick it up.
+    // panel on Call Detail can pick it up. Also flip status → ENDED and
+    // stamp ended_at so the row never gets stuck on ACTIVE.
     if (session.conversationId) {
       try {
         await pool.query(
           `UPDATE conversations
            SET recording_url = $1,
-               analysis = COALESCE(analysis, '{}'::jsonb) || $2::jsonb
+               analysis = COALESCE(analysis, '{}'::jsonb) || $2::jsonb,
+               status = CASE WHEN status = 'ACTIVE' THEN 'ENDED' ELSE status END,
+               ended_at = COALESCE(ended_at, now())
            WHERE id = $3 AND tenant_id = $4`,
           [url, JSON.stringify({ voice_quality: voiceQuality }), session.conversationId, session.tenantId]
         );
