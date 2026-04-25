@@ -297,15 +297,15 @@ export function VoiceCloningPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* LEFT: Recorder / uploader */}
-        <div className="bg-[#0f172a] rounded-2xl border border-white/10 p-6 text-white space-y-5">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 text-gray-900 space-y-5">
           <h2 className="text-lg font-semibold">Voice Sample</h2>
 
           {!sampleUrl && !isRecording && (
-            <div className="border-2 border-dashed border-white/15 rounded-xl p-8 text-center">
+            <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center">
               <div className="mx-auto w-14 h-14 rounded-full bg-teal-500/10 flex items-center justify-center mb-3">
                 <Mic className="h-7 w-7 text-teal-400" />
               </div>
-              <p className="text-white/80 text-sm mb-4">Record a voice sample or upload an audio file</p>
+              <p className="text-gray-700 text-sm mb-4">Record a voice sample or upload an audio file</p>
               <div className="flex items-center justify-center gap-3">
                 <button
                   onClick={startRecording}
@@ -313,12 +313,12 @@ export function VoiceCloningPage() {
                 >
                   <Mic className="h-4 w-4" /> Start Recording
                 </button>
-                <label className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-white/10 border border-white/15 hover:bg-white/15 text-white text-sm font-medium cursor-pointer">
+                <label className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-gray-100 border border-gray-300 hover:bg-gray-200 text-gray-900 text-sm font-medium cursor-pointer">
                   <Upload className="h-4 w-4" /> Upload File
                   <input type="file" accept="audio/*,.mp3,.wav,.m4a,.webm,.ogg" className="hidden" onChange={handleUpload} />
                 </label>
               </div>
-              <p className="text-[11px] text-white/40 mt-4">
+              <p className="text-[11px] text-gray-500 mt-4">
                 For best results: 30 seconds+ of clean speech, no background noise, mono 44.1kHz.
               </p>
             </div>
@@ -360,28 +360,28 @@ export function VoiceCloningPage() {
               >
                 <Square className="h-4 w-4" /> Stop Recording
               </button>
-              <p className="text-[11px] text-white/40">Auto-stops at 3:00</p>
+              <p className="text-[11px] text-gray-500">Auto-stops at 3:00</p>
             </div>
           )}
 
           {/* Playback of recorded/uploaded sample */}
           {sampleUrl && !isRecording && (
-            <div className="border border-white/10 rounded-xl p-5 bg-white/5 space-y-4">
+            <div className="border border-gray-200 rounded-xl p-5 bg-gray-50 space-y-4">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-full bg-teal-500/20 flex items-center justify-center flex-shrink-0">
                   <FileAudio className="h-6 w-6 text-teal-400" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-white truncate">
+                  <div className="text-sm font-medium text-gray-900 truncate">
                     Sample ready · {sampleDuration > 0 ? fmtTime(sampleDuration) : 'unknown length'}
                   </div>
-                  <div className="text-[11px] text-white/50">
+                  <div className="text-[11px] text-gray-500">
                     {(sampleBlob && Math.round(sampleBlob.size / 1024))} KB · {sampleBlob?.type || 'audio'}
                   </div>
                 </div>
                 <button
                   onClick={clearSample}
-                  className="p-2 rounded-lg text-white/50 hover:text-white hover:bg-white/10"
+                  className="p-2 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100"
                   title="Discard"
                 >
                   <X className="h-4 w-4" />
@@ -423,7 +423,7 @@ export function VoiceCloningPage() {
                 />
               </div>
 
-              <div className="flex items-center gap-2 text-[11px] text-white/50">
+              <div className="flex items-center gap-2 text-[11px] text-gray-500">
                 <Volume2 className="h-3 w-3" /> Listen back — if quality is poor, re-record or upload a cleaner file.
               </div>
             </div>
@@ -431,49 +431,49 @@ export function VoiceCloningPage() {
         </div>
 
         {/* RIGHT: Form */}
-        <div className="bg-[#0f172a] rounded-2xl border border-white/10 p-6 text-white space-y-5">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 text-gray-900 space-y-5">
           <h2 className="text-lg font-semibold">Voice Details</h2>
 
           <div>
-            <label className="text-sm font-semibold text-white/90">Voice Name <span className="text-red-400">*</span></label>
+            <label className="text-sm font-semibold text-gray-700">Voice Name <span className="text-red-400">*</span></label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g., My Professional Voice"
-              className="mt-2 block w-full rounded-lg bg-black/40 border border-white/15 px-3.5 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
+              className="mt-2 block w-full rounded-lg bg-white border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
             />
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-white/90">Gender <span className="text-red-400">*</span></label>
+            <label className="text-sm font-semibold text-gray-700">Gender <span className="text-red-400">*</span></label>
             <select
               value={gender}
               onChange={(e) => setGender(e.target.value)}
-              className="mt-2 block w-full rounded-lg bg-black/40 border border-white/15 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
+              className="mt-2 block w-full rounded-lg bg-white border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
             >
               {GENDERS.map((g) => <option key={g.value} value={g.value}>{g.label}</option>)}
             </select>
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-white/90">Language <span className="text-red-400">*</span></label>
+            <label className="text-sm font-semibold text-gray-700">Language <span className="text-red-400">*</span></label>
             <select
               value={language}
               onChange={(e) => setLanguage(e.target.value)}
-              className="mt-2 block w-full rounded-lg bg-black/40 border border-white/15 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
+              className="mt-2 block w-full rounded-lg bg-white border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
             >
               {LANGUAGES.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
             </select>
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-white/90">Description <span className="text-white/40 text-xs font-normal">(optional)</span></label>
+            <label className="text-sm font-semibold text-gray-700">Description <span className="text-gray-500 text-xs font-normal">(optional)</span></label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Describe this voice or its intended use..."
               rows={3}
-              className="mt-2 block w-full rounded-lg bg-black/40 border border-white/15 px-3.5 py-2.5 text-sm text-white placeholder:text-white/30 resize-none focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
+              className="mt-2 block w-full rounded-lg bg-white border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 resize-none focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/50"
             />
           </div>
 

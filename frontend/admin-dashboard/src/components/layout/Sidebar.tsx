@@ -103,7 +103,7 @@ const navSections: NavSection[] = [
     title: 'Resources',
     items: [
       { label: 'Docs', path: '/docs', icon: 'FileText' },
-      { label: 'Contact Us', path: '/contact', icon: 'Mail' },
+      { label: 'Contact Us', path: '/help/contact', icon: 'Mail' },
       { label: 'Report Issue', path: '/support', icon: 'Bug' },
     ],
   },
@@ -117,7 +117,7 @@ interface SidebarProps {
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
+  const { logout } = useAuth();
   const [expandedGroups, setExpandedGroups] = useState<string[]>(['CRM']);
 
   const handleLogout = () => {
@@ -247,19 +247,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         ))}
       </nav>
 
-      {/* User profile + sign out + collapse */}
+      {/* Sign out + collapse */}
       <div className="p-2 border-t border-white/10 space-y-1">
-        {!collapsed && user && (
-          <div className="flex items-center gap-2.5 px-2 py-2 rounded-md">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-cyan-600 text-gray-950 flex items-center justify-center text-sm font-semibold flex-shrink-0">
-              {(user.name || 'A')[0].toUpperCase()}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-white leading-tight truncate">{user.name || 'Admin User'}</p>
-              <p className="text-[10px] text-slate-400 capitalize">{user.role || 'admin'}</p>
-            </div>
-          </div>
-        )}
         <button
           onClick={handleLogout}
           title="Sign out"

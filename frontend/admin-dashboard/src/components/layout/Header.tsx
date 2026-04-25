@@ -9,6 +9,7 @@ const PAGE_TITLES: { match: string; title: string; subtitle?: string }[] = [
   { match: '/settings', title: 'Settings', subtitle: 'Manage your account, team, and platform configuration' },
   { match: '/calls', title: 'Call Logs', subtitle: 'View and analyze your call history' },
   { match: '/knowledge', title: 'File Management', subtitle: 'Upload and manage documents your agents can search' },
+  { match: '/help/contact', title: 'Contact Us', subtitle: 'Send us a message — we usually reply within one business day' },
 ];
 
 export function Header() {

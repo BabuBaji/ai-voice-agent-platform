@@ -10,6 +10,7 @@ import {
   INQUIRY_OPTIONS, COMPANY_SIZE_OPTIONS, CONTACT_METHOD_OPTIONS,
   type ContactSubmitRequest, type InquiryType, type CompanySize, type ContactMethod,
 } from '@/services/contact.api';
+import { useAuthStore } from '@/stores/auth.store';
 
 /**
  * Public Contact Us landing page. Lives OUTSIDE the dashboard layout — no
@@ -19,47 +20,53 @@ import {
 export function ContactPage() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [submitted, setSubmitted] = useState<{ reference_id: string; message: string } | null>(null);
+  // When this page is rendered inside the DashboardLayout (/help/contact),
+  // the user is signed in and the dashboard sidebar already provides
+  // navigation — hide the duplicate public marketing nav + footer.
+  const isAuth = useAuthStore((s) => s.isAuthenticated);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50">
-      <TopNav mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
+      {!isAuth && <TopNav mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />}
 
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <div aria-hidden className="absolute -top-48 left-1/2 -translate-x-1/2 w-[900px] h-[900px] rounded-full bg-gradient-to-br from-indigo-200/60 via-purple-200/40 to-transparent blur-3xl" />
-        <div aria-hidden className="absolute -bottom-24 right-10 w-[500px] h-[500px] rounded-full bg-gradient-to-br from-sky-200/50 to-transparent blur-3xl" />
+      {/* Hero — only on the public page; the dashboard view goes straight to the form */}
+      {!isAuth && (
+        <section className="relative overflow-hidden">
+          <div aria-hidden className="absolute -top-48 left-1/2 -translate-x-1/2 w-[900px] h-[900px] rounded-full bg-gradient-to-br from-indigo-200/60 via-purple-200/40 to-transparent blur-3xl" />
+          <div aria-hidden className="absolute -bottom-24 right-10 w-[500px] h-[500px] rounded-full bg-gradient-to-br from-sky-200/50 to-transparent blur-3xl" />
 
-        <div className="relative max-w-6xl mx-auto px-6 pt-16 pb-10 text-center">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white border border-indigo-100 text-xs font-medium text-indigo-700 shadow-sm">
-            <Sparkles className="h-3 w-3" /> We usually reply within one business day
+          <div className="relative max-w-6xl mx-auto px-6 pt-16 pb-10 text-center">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white border border-indigo-100 text-xs font-medium text-indigo-700 shadow-sm">
+              <Sparkles className="h-3 w-3" /> We usually reply within one business day
+            </div>
+            <h1 className="mt-5 text-4xl md:text-6xl font-bold tracking-tight text-slate-900">
+              Let's Build Your{' '}
+              <span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-sky-600 bg-clip-text text-transparent">
+                AI Voice Agent
+              </span>{' '}
+              Together
+            </h1>
+            <p className="mt-5 max-w-2xl mx-auto text-lg text-slate-600 leading-relaxed">
+              Have questions about AI calling, bulk campaigns, web calls, CRM integration, or multilingual voice agents?
+              Contact our team and we'll help you get started.
+            </p>
+            <div className="mt-7 flex items-center justify-center gap-3 flex-wrap">
+              <a
+                href="#contact-form"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-semibold shadow-md hover:shadow-lg hover:translate-y-[-1px] transition"
+              >
+                <Send className="h-4 w-4" /> Book a Demo
+              </a>
+              <Link
+                to="/support"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-semibold hover:bg-slate-50 transition"
+              >
+                <Headphones className="h-4 w-4" /> Contact Support
+              </Link>
+            </div>
           </div>
-          <h1 className="mt-5 text-4xl md:text-6xl font-bold tracking-tight text-slate-900">
-            Let's Build Your{' '}
-            <span className="bg-gradient-to-r from-indigo-600 via-purple-600 to-sky-600 bg-clip-text text-transparent">
-              AI Voice Agent
-            </span>{' '}
-            Together
-          </h1>
-          <p className="mt-5 max-w-2xl mx-auto text-lg text-slate-600 leading-relaxed">
-            Have questions about AI calling, bulk campaigns, web calls, CRM integration, or multilingual voice agents?
-            Contact our team and we'll help you get started.
-          </p>
-          <div className="mt-7 flex items-center justify-center gap-3 flex-wrap">
-            <a
-              href="#contact-form"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-semibold shadow-md hover:shadow-lg hover:translate-y-[-1px] transition"
-            >
-              <Send className="h-4 w-4" /> Book a Demo
-            </a>
-            <Link
-              to="/support"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 text-sm font-semibold hover:bg-slate-50 transition"
-            >
-              <Headphones className="h-4 w-4" /> Contact Support
-            </Link>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Contact form + info card */}
       <section id="contact-form" className="relative max-w-6xl mx-auto px-6 py-10">
@@ -110,33 +117,37 @@ export function ContactPage() {
         </div>
       </section>
 
-      {/* FAQ */}
-      <section className="max-w-4xl mx-auto px-6 py-10">
-        <div className="text-center mb-6">
-          <h2 className="text-3xl font-bold text-slate-900">Frequently asked questions</h2>
-          <p className="mt-2 text-slate-600">Quick answers for the things we get asked most.</p>
-        </div>
-        <FAQList />
-      </section>
+      {/* FAQ — only on the public marketing page */}
+      {!isAuth && (
+        <section className="max-w-4xl mx-auto px-6 py-10">
+          <div className="text-center mb-6">
+            <h2 className="text-3xl font-bold text-slate-900">Frequently asked questions</h2>
+            <p className="mt-2 text-slate-600">Quick answers for the things we get asked most.</p>
+          </div>
+          <FAQList />
+        </section>
+      )}
 
-      {/* Bottom CTA */}
-      <section className="max-w-6xl mx-auto px-6 py-14">
-        <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-purple-600 to-sky-600 p-10 text-center text-white shadow-xl">
-          <div aria-hidden className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-white/10 blur-3xl" />
-          <h2 className="relative text-3xl md:text-4xl font-bold">Ready to see it live?</h2>
-          <p className="relative mt-3 max-w-xl mx-auto text-indigo-50">
-            Book a free 20-minute demo with our team — we'll walk through your use case and spin up a working agent by the end of the call.
-          </p>
-          <a
-            href="#contact-form"
-            className="relative mt-6 inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-white text-indigo-700 font-semibold shadow-md hover:shadow-lg hover:translate-y-[-1px] transition"
-          >
-            <Send className="h-4 w-4" /> Book a Demo
-          </a>
-        </div>
-      </section>
+      {/* Bottom CTA — only on the public marketing page */}
+      {!isAuth && (
+        <section className="max-w-6xl mx-auto px-6 py-14">
+          <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-purple-600 to-sky-600 p-10 text-center text-white shadow-xl">
+            <div aria-hidden className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-white/10 blur-3xl" />
+            <h2 className="relative text-3xl md:text-4xl font-bold">Ready to see it live?</h2>
+            <p className="relative mt-3 max-w-xl mx-auto text-indigo-50">
+              Book a free 20-minute demo with our team — we'll walk through your use case and spin up a working agent by the end of the call.
+            </p>
+            <a
+              href="#contact-form"
+              className="relative mt-6 inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-white text-indigo-700 font-semibold shadow-md hover:shadow-lg hover:translate-y-[-1px] transition"
+            >
+              <Send className="h-4 w-4" /> Book a Demo
+            </a>
+          </div>
+        </section>
+      )}
 
-      <Footer />
+      {!isAuth && <Footer />}
     </div>
   );
 }

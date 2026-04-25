@@ -149,6 +149,10 @@ export const routes: RouteObject[] = [
       { path: '/admin/reports/:ticketId', element: <AdminReportDetailPage /> },
       { path: '/admin/contact-requests', element: <AdminContactRequestsPage /> },
       { path: '/admin/contact-requests/:refId', element: <AdminContactDetailPage /> },
+      // Internal "Contact Us" entry — same form as the public /contact page,
+      // but inside the DashboardLayout so the sidebar stays visible when
+      // logged-in users open it from the sidebar.
+      { path: '/help/contact', element: <ContactPage /> },
     ],
   },
 ];
