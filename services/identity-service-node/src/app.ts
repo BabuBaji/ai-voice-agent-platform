@@ -12,6 +12,8 @@ import { auditRouter } from './routes/audit.routes';
 import { apiKeyRouter } from './routes/apiKey.routes';
 import { docRouter } from './routes/doc.routes';
 import { billingRouter } from './routes/billing.routes';
+import { superAdminRouter } from './routes/superAdmin.routes';
+import { broadcastsRouter } from './routes/broadcasts.routes';
 import { auditMiddleware } from './middleware/audit.middleware';
 import pino from 'pino';
 
@@ -50,6 +52,8 @@ export function createApp(pool: Pool) {
   app.use('/api-keys', apiKeyRouter());
   app.use('/docs', docRouter());
   app.use('/billing', billingRouter());
+  app.use('/super-admin', superAdminRouter());
+  app.use('/broadcasts', broadcastsRouter());
 
   // Global error handler
   app.use(

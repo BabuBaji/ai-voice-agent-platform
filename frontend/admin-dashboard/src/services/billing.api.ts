@@ -3,7 +3,8 @@ import api from './api';
 export interface PlanFeatures {
   agents: number | 'unlimited';
   included_minutes: number;
-  channels: number;
+  channels?: number;            // legacy field name — backend now sends concurrent_calls
+  concurrent_calls?: number;
   knowledge_base_mb: number;
   rate_per_min: number;
   extra_per_min: number;
@@ -11,19 +12,37 @@ export interface PlanFeatures {
   highlights: string[];
 }
 
+export type FeatureFlags = Partial<Record<string, boolean>>;
+
 export interface Plan {
   id: string;
   name: string;
+  tagline?: string;
   price: number;
   currency: 'INR';
   billing_cycle: 'monthly';
   description?: string;
   features: PlanFeatures;
+  feature_flags?: FeatureFlags;
   popular?: boolean;
   original_price?: number;
   discount_pct?: number;
   custom?: boolean;
   hidden_from_grid?: boolean;
+}
+
+export interface ResolvedFeatures {
+  plan_id: string;
+  plan_name: string;
+  flags: FeatureFlags;
+  limits: {
+    agents: number | 'unlimited';
+    included_minutes: number;
+    concurrent_calls: number;
+    knowledge_base_mb: number;
+    rate_per_min: number;
+    extra_per_min: number;
+  };
 }
 
 export interface Subscription {
@@ -162,8 +181,22 @@ export const billingApi = {
     const res = await api.post('/billing/upgrade', { plan_id });
     return res.data;
   },
+  checkout: async (payload: {
+    plan_id: string;
+    card: { number: string; exp_month: number; exp_year: number; cvc: string; name: string };
+    country?: string;
+    email?: string;
+    save_card?: boolean;
+  }) => {
+    const res = await api.post('/billing/checkout', payload);
+    return res.data as { subscription: Subscription; charge: { provider: string; ref: string; amount: number }; wallet_balance_after: number };
+  },
   cancelPlan: async (): Promise<Subscription> => {
     const res = await api.post('/billing/cancel');
+    return res.data;
+  },
+  getFeatures: async (): Promise<ResolvedFeatures> => {
+    const res = await api.get('/billing/features');
     return res.data;
   },
 

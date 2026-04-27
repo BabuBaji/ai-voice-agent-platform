@@ -9,6 +9,10 @@ export interface AccessTokenPayload {
   tenantId: string;
   email: string;
   roles: string[];
+  // Set on tokens minted for platform-level (super-admin) users. Tenant-scoped
+  // tokens omit it (or set false) so existing per-tenant code paths are
+  // unaffected.
+  isPlatformAdmin?: boolean;
 }
 
 export function generateAccessToken(
@@ -16,12 +20,14 @@ export function generateAccessToken(
   tenantId: string,
   email: string,
   roles: string[],
+  isPlatformAdmin = false,
 ): string {
   const payload: AccessTokenPayload = {
     sub: userId,
     tenantId,
     email,
     roles,
+    ...(isPlatformAdmin ? { isPlatformAdmin: true } : {}),
   };
   return jwt.sign(payload, config.jwt.secret, {
     expiresIn: config.jwt.accessExpiration as any,

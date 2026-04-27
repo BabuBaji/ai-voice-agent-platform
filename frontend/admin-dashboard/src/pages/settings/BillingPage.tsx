@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import {
   Phone, Check,
   Activity, DollarSign, Database, FileText, Plus, AlertCircle, AlertTriangle, Receipt,
@@ -76,6 +76,7 @@ function DarkBtn({
 
 export function BillingPage() {
   const toast = useToast();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -196,6 +197,17 @@ export function BillingPage() {
                   onTopUp={() => setShowAddFunds(true)}
                 />
 
+                {/* Pricing-page CTA — full hero/comparison/calculator lives at /settings/pricing */}
+                <div className="bg-gradient-to-r from-primary-50 to-accent-50 border border-primary-200 rounded-xl px-5 py-3.5 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">See all plans, compare features, estimate cost</p>
+                    <p className="text-xs text-slate-600 mt-0.5">Hero pricing page with usage calculator and FAQ</p>
+                  </div>
+                  <NavLink to="/settings/pricing" className="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-primary-600 to-accent-600 text-white text-sm font-semibold rounded-xl hover:shadow-md whitespace-nowrap">
+                    View pricing →
+                  </NavLink>
+                </div>
+
                 {/* 3 stat cards */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <StatTile
@@ -243,7 +255,20 @@ export function BillingPage() {
                         key={p.id}
                         plan={p}
                         current={p.id === subscription.plan_id}
-                        onSelect={() => setPendingPlan(p)}
+                        onSelect={() => {
+                          // Enterprise → contact sales (existing flow)
+                          if (p.custom) {
+                            navigate('/help/contact?topic=enterprise');
+                            return;
+                          }
+                          // Free → no payment needed, keep the in-place wallet-debit modal
+                          if (p.price === 0) {
+                            setPendingPlan(p);
+                            return;
+                          }
+                          // Paid plan → fullscreen Stripe-style checkout collects card details
+                          navigate(`/settings/checkout?plan=${p.id}`);
+                        }}
                       />
                     ))}
                   </div>

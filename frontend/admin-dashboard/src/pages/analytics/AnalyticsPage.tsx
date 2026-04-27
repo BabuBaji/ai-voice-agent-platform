@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Phone, Clock, Activity, Users, Calendar, AlertCircle, Loader2,
   BarChart3, LineChart as LineIcon, AreaChart as AreaIcon, PieChart as PieIcon,
@@ -152,9 +152,7 @@ export function AnalyticsPage() {
               {p.label}
             </button>
           ))}
-          <div className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 border border-gray-200">
-            <Calendar className="h-3.5 w-3.5" /> {dateRangeLabel}
-          </div>
+          <CustomDatePicker days={days} setDays={setDays} dateRangeLabel={dateRangeLabel} />
         </div>
         <div className="ml-auto flex items-center gap-3">
           <label className="text-xs font-medium text-gray-600">Select Assistant</label>
@@ -475,6 +473,114 @@ export function AnalyticsPage() {
           </div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Custom date-range picker — sets `days` based on the chosen start date
+// (end is always "today"). Lightweight popover; no extra dependency.
+// ----------------------------------------------------------------------------
+
+function CustomDatePicker({
+  days, setDays, dateRangeLabel,
+}: { days: number; setDays: (n: number) => void; dateRangeLabel: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Default the picker fields to whatever range is currently active.
+  const today = new Date();
+  const startDefault = new Date(today);
+  startDefault.setDate(today.getDate() - days + 1);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  const [start, setStart] = useState<string>(fmt(startDefault));
+  const [end, setEnd] = useState<string>(fmt(today));
+
+  // Keep the inputs in sync when the preset changes elsewhere.
+  useEffect(() => {
+    const t = new Date();
+    const s = new Date(t);
+    s.setDate(t.getDate() - days + 1);
+    setStart(fmt(s));
+    setEnd(fmt(t));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  function apply() {
+    if (!start || !end) return;
+    const s = new Date(start);
+    const e = new Date(end);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || s > e) return;
+    // The API uses `days` count from today. We compute the number of days
+    // covered by the chosen range and pass that through.
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+    s.setHours(0, 0, 0, 0);
+    const diffDays = Math.max(1, Math.ceil((todayMidnight.getTime() - s.getTime()) / 86400000) + 1);
+    setDays(diffDays);
+    setOpen(false);
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200 transition-colors"
+      >
+        <Calendar className="h-3.5 w-3.5" /> {dateRangeLabel}
+      </button>
+      {open && (
+        <div className="absolute left-0 mt-2 w-72 z-30 rounded-xl border border-gray-200 bg-white shadow-xl p-4 space-y-3">
+          <div>
+            <label className="block text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-1">Start date</label>
+            <input
+              type="date"
+              value={start}
+              max={end || fmt(today)}
+              onChange={(e) => setStart(e.target.value)}
+              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary-100"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-medium text-gray-500 uppercase tracking-wide mb-1">End date</label>
+            <input
+              type="date"
+              value={end}
+              min={start}
+              max={fmt(today)}
+              onChange={(e) => setEnd(e.target.value)}
+              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary-100"
+            />
+            <p className="text-[10px] text-gray-400 mt-1">End is always relative to today (the API uses Last N days).</p>
+          </div>
+          <div className="flex justify-end gap-2 pt-1 border-t border-gray-100">
+            <button
+              onClick={() => setOpen(false)}
+              className="text-xs px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={apply}
+              disabled={!start || !end || start > end}
+              className="text-xs px-3 py-1.5 rounded-lg bg-primary-600 text-white font-medium hover:bg-primary-700 disabled:opacity-50"
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

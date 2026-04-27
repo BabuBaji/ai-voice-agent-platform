@@ -81,37 +81,20 @@ export function CallDetailPage() {
         const cached = (conv.metadata as any)?.whisper_transcript as WhisperTranscript | undefined;
         if (cached && !cancelled) setWhisper(cached);
 
-        // Two flavours of recording:
-        //  - Phone-call WAV: recording_url is an absolute https URL (our ngrok
-        //    tunnel → telephony-adapter /recordings/:id.wav). We must blob-fetch
-        //    it rather than drop the URL straight into <audio src> — ngrok's
-        //    free tier returns a browser-warning HTML page to anything with a
-        //    normal browser user-agent unless the `ngrok-skip-browser-warning`
-        //    request header is present, and <audio src> can't set headers.
-        //  - Web-widget recording: uploaded via POST to conversation-service;
-        //    fetched via the authenticated /conversations/:id/recording blob.
+        // Both phone-call WAVs and web-widget uploads are served through
+        // conversation-service /conversations/:id/recording. The endpoint serves
+        // local web-call uploads, sibling telephony-adapter WAVs (looked up by
+        // callSid parsed from recording_url), and only as a last resort proxies
+        // the remote URL — so playback works whether or not the ngrok tunnel
+        // is currently up.
         if (conv.recording_url) {
-          if (/^https?:\/\//i.test(conv.recording_url)) {
-            try {
-              const resp = await fetch(conv.recording_url, {
-                headers: { 'ngrok-skip-browser-warning': '1' },
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                if (!cancelled) setAudioBlobUrl(URL.createObjectURL(blob));
-              }
-            } catch {
-              // fall through — player shows "No recording available"
+          try {
+            const audioRes = await api.get(`/conversations/${id}/recording`, { responseType: 'blob' });
+            if (!cancelled) {
+              setAudioBlobUrl(URL.createObjectURL(audioRes.data));
             }
-          } else {
-            try {
-              const audioRes = await api.get(`/conversations/${id}/recording`, { responseType: 'blob' });
-              if (!cancelled) {
-                setAudioBlobUrl(URL.createObjectURL(audioRes.data));
-              }
-            } catch {
-              // recording fetch failed; player will show "No recording available"
-            }
+          } catch {
+            // recording fetch failed; player will show "No recording available"
           }
         }
       } catch (e: any) {

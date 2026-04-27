@@ -5,6 +5,16 @@ export interface User {
   role: 'admin' | 'manager' | 'agent';
   avatar?: string;
   tenantId: string;
+  // True for platform-level (super-admin) users. Drives the /super-admin/*
+  // route gate and the post-login redirect target.
+  isPlatformAdmin?: boolean;
+  // Set while a super-admin is impersonating a tenant. Holds enough state to
+  // restore the platform session via the "Return to admin" button.
+  impersonating?: {
+    originalAccessToken: string;
+    originalRefreshToken: string;
+    originalUser: Omit<User, 'impersonating'>;
+  };
 }
 
 export interface AuthTokens {

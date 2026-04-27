@@ -6,6 +6,7 @@ import {
 import { Modal } from '@/components/ui/Modal';
 import { useToast } from '@/components/ui/Toast';
 import { apiKeyApi, type ApiKey, type CreatedApiKey } from '@/services/apiKey.api';
+import { UpgradeBanner } from '@/components/billing/UpgradeBanner';
 
 function fmtRelative(iso: string | null): string {
   if (!iso) return '—';
@@ -93,6 +94,8 @@ export function ApiKeysPage() {
   return (
     <div className="-m-6 lg:-m-8 min-h-[calc(100vh-4rem)] bg-white dark:bg-gradient-to-br dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 transition-colors">
       <div className="max-w-4xl mx-auto p-6 lg:p-10 space-y-6">
+        <UpgradeBanner flag="api_access" label="API access"
+          sub="Generate keys to call the platform API from your own apps — included in Pro and Enterprise." />
         {/* API Keys card */}
         <div className="rounded-2xl bg-white dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700/80 overflow-hidden transition-colors">
           <div className="flex items-start justify-between gap-4 p-6 border-b border-gray-100 dark:border-gray-800">

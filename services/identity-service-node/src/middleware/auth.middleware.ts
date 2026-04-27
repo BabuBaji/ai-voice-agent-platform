@@ -6,6 +6,7 @@ export interface AuthenticatedRequest extends Request {
   tenantId: string;
   email: string;
   roles: string[];
+  isPlatformAdmin: boolean;
   pool: any;
 }
 
@@ -28,6 +29,7 @@ export function authMiddleware(
     (req as any).tenantId = payload.tenantId;
     (req as any).email = payload.email;
     (req as any).roles = payload.roles;
+    (req as any).isPlatformAdmin = !!payload.isPlatformAdmin;
     next();
   } catch {
     res.status(401).json({ error: 'Invalid or expired token' });
@@ -47,4 +49,21 @@ export function requireRoles(...requiredRoles: string[]) {
     }
     next();
   };
+}
+
+/**
+ * Gate for the super-admin module. Trusts the JWT flag (set at login time
+ * after re-reading users.is_platform_admin), not just the role name — so
+ * revoking the column is enough to lock the user out at next login.
+ */
+export function requireSuperAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  if (!(req as any).isPlatformAdmin) {
+    res.status(403).json({ error: 'Super admin access required' });
+    return;
+  }
+  next();
 }

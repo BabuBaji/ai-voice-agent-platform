@@ -83,6 +83,14 @@ proxyRouter.all('/api/v1/api-keys', authMiddleware, forwardRequest(config.servic
 proxyRouter.all('/api/v1/billing/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
 proxyRouter.all('/api/v1/billing', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
 
+// --- Super-admin routes (auth required + isPlatformAdmin enforced downstream) ---
+proxyRouter.all('/api/v1/super-admin/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/super-admin', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+
+// --- Tenant-facing platform broadcasts (any authed user reads active banners) ---
+proxyRouter.all('/api/v1/broadcasts/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/broadcasts', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+
 // --- Agent service ---
 proxyRouter.all('/api/v1/agents/*', authMiddleware, forwardRequest(config.services.agent, keepPath));
 proxyRouter.all('/api/v1/agents', authMiddleware, forwardRequest(config.services.agent, keepPath));

@@ -33,6 +33,7 @@ export interface UserDTO {
   status: string;
   emailVerified: boolean;
   roles: string[];
+  isPlatformAdmin: boolean;
 }
 
 function toUserDTO(row: any, roles: string[]): UserDTO {
@@ -46,6 +47,7 @@ function toUserDTO(row: any, roles: string[]): UserDTO {
     status: row.status,
     emailVerified: row.email_verified,
     roles,
+    isPlatformAdmin: !!row.is_platform_admin,
   };
 }
 
@@ -216,6 +218,7 @@ export async function login(
     user.tenant_id,
     user.email,
     roles,
+    !!user.is_platform_admin,
   );
   const refreshToken = await generateRefreshToken(pool, user.id);
 
@@ -236,7 +239,7 @@ export async function refresh(
   const hash = hashToken(rawRefreshToken);
 
   const result = await pool.query(
-    `SELECT rt.*, u.email, u.tenant_id
+    `SELECT rt.*, u.email, u.tenant_id, u.is_platform_admin
      FROM refresh_tokens rt
      JOIN users u ON u.id = rt.user_id
      WHERE rt.token_hash = $1 AND rt.revoked = false AND rt.expires_at > now()`,
@@ -272,6 +275,7 @@ export async function refresh(
     row.tenant_id,
     row.email,
     roles,
+    !!row.is_platform_admin,
   );
   const newRefreshToken = await generateRefreshToken(pool, row.user_id);
 

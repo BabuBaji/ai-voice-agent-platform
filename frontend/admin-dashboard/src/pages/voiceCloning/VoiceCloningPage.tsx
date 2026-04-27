@@ -6,6 +6,7 @@ import {
 import { voiceCloneApi, type ClonedVoice } from '@/services/voiceClone.api';
 import { agentApi } from '@/services/agent.api';
 import type { Agent } from '@/types';
+import { FeatureGate } from '@/components/billing/FeatureGate';
 
 type Msg = { type: 'success' | 'error'; text: string };
 
@@ -278,10 +279,11 @@ export function VoiceCloningPage() {
         </h1>
         <p className="text-sm text-gray-500 mt-1">
           Record or upload a 30-second clean voice sample. We'll clone it via ElevenLabs and make it available in the
-          voice selector for any agent. Free tier allows 3 cloned voices.
+          voice selector for any agent.
         </p>
       </div>
 
+      <FeatureGate flag="voice_cloning" feature_label="Voice cloning">
       {msg && (
         <div
           className={`flex items-center gap-2 p-3 rounded-xl text-sm font-medium ${
@@ -508,6 +510,7 @@ export function VoiceCloningPage() {
           </div>
         )}
       </div>
+      </FeatureGate>
     </div>
   );
 }

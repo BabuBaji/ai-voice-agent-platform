@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { authMiddleware, requireRoles } from '../middleware/auth.middleware';
-import { PLANS, getPlan } from '../services/billing/plans';
+import { PLANS, getPlan, resolveFeatures } from '../services/billing/plans';
 import { ensureSubscription, changePlan, cancelSubscription } from '../services/billing/subscription.service';
 import {
   ensureWallet,
@@ -24,6 +24,18 @@ import {
 import { createInvoice, listInvoices, getInvoice } from '../services/billing/invoice.service';
 import { getPaymentProvider } from '../services/billing/paymentProvider';
 import { tickRenewalCron } from '../services/billing/renewalCron';
+
+// Quick card-brand sniff from the BIN range. Good enough to display the
+// right logo on invoices — real validation lives at the gateway.
+function detectCardBrand(number: string): string {
+  const n = number.replace(/\D/g, '');
+  if (/^4/.test(n)) return 'visa';
+  if (/^(5[1-5]|2[2-7])/.test(n)) return 'mastercard';
+  if (/^3[47]/.test(n)) return 'amex';
+  if (/^6(?:011|5)/.test(n)) return 'discover';
+  if (/^(60|65|81|82)/.test(n)) return 'rupay';
+  return 'card';
+}
 
 const upgradeSchema = z.object({ plan_id: z.string().min(1) });
 const addFundsSchema = z.object({
@@ -105,6 +117,129 @@ export function billingRouter(): Router {
       res.json(sub);
     } catch (err) { next(err); }
   });
+
+  // Resolved feature flags for the current tenant. Frontend uses this to
+  // gate UI affordances; backend services can hit it (or import resolveFeatures
+  // directly) to enforce server-side. Always returns a complete object so the
+  // caller doesn't have to handle "missing key = ?".
+  router.get('/features', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pool = (req as any).pool;
+      const tenantId = (req as any).tenantId;
+      const sub = await ensureSubscription(pool, tenantId);
+      const flags = resolveFeatures(sub.plan_id);
+      const plan = getPlan(sub.plan_id);
+      res.json({
+        plan_id: sub.plan_id,
+        plan_name: sub.plan_name,
+        flags,
+        limits: {
+          agents: plan?.features.agents ?? 1,
+          included_minutes: plan?.features.included_minutes ?? 0,
+          concurrent_calls: plan?.features.concurrent_calls ?? 1,
+          knowledge_base_mb: plan?.features.knowledge_base_mb ?? 0,
+          rate_per_min: plan?.features.rate_per_min ?? 0,
+          extra_per_min: plan?.features.extra_per_min ?? 0,
+        },
+      });
+    } catch (err) { next(err); }
+  });
+
+  // Stripe-style checkout: take card details, charge the card, top up the
+  // wallet, debit for the plan, and switch the subscription — all in one
+  // round-trip so the UI just collects card + clicks Subscribe.
+  const checkoutSchema = z.object({
+    plan_id: z.string().min(1),
+    card: z.object({
+      number: z.string().min(12).max(19),
+      exp_month: z.number().int().min(1).max(12),
+      exp_year: z.number().int().min(new Date().getFullYear()).max(new Date().getFullYear() + 30),
+      cvc: z.string().regex(/^\d{3,4}$/),
+      name: z.string().min(1).max(100),
+    }),
+    country: z.string().length(2).default('IN'),
+    email: z.string().email().optional(),
+    save_card: z.boolean().default(true),
+  });
+  router.post('/checkout', requireRoles('OWNER', 'ADMIN'),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const data = checkoutSchema.parse(req.body);
+        const pool = (req as any).pool;
+        const tenantId = (req as any).tenantId;
+        const plan = getPlan(data.plan_id);
+        if (!plan) { res.status(400).json({ error: 'Unknown plan' }); return; }
+        if (plan.custom) { res.status(400).json({ error: 'Enterprise requires a sales quote' }); return; }
+        if (plan.price <= 0) { res.status(400).json({ error: 'Free plan does not require checkout' }); return; }
+
+        // 1. Charge the card via payment provider (mock in dev — always succeeds)
+        const provider = getPaymentProvider();
+        const charge = await provider.charge({
+          amount: plan.price,
+          currency: 'INR',
+          description: `Subscribe to ${plan.name}`,
+          tenant_id: tenantId,
+        });
+        if (!charge.success) {
+          res.status(402).json({ error: 'Payment failed', provider: charge.provider, reason: charge.failure_reason });
+          return;
+        }
+
+        // 2. Save the card as a payment method (last4 only, never the PAN)
+        if (data.save_card) {
+          await addPaymentMethod(pool, {
+            tenant_id: tenantId,
+            type: 'card',
+            brand: detectCardBrand(data.card.number),
+            last4: data.card.number.slice(-4),
+            holder_name: data.card.name,
+            exp_month: data.card.exp_month,
+            exp_year: data.card.exp_year,
+            set_default: true,
+          }).catch(() => {/* best-effort */});
+        }
+
+        // 3. Credit the wallet with the charge so debit-side bookkeeping stays consistent
+        const credit = await creditWallet(pool, tenantId, plan.price, {
+          reason: `${plan.name} subscription — card ending ${data.card.number.slice(-4)}`,
+          reference_type: 'checkout',
+          reference_id: charge.provider_ref,
+          metadata: { provider: charge.provider, plan_id: plan.id, card_brand: detectCardBrand(data.card.number) },
+        });
+
+        // 4. Debit for the plan
+        const debit = await debitWallet(pool, tenantId, plan.price, {
+          reason: `Subscribe to ${plan.name}`,
+          reference_type: 'subscription_change',
+          reference_id: charge.provider_ref,
+        });
+        if (!debit.success) {
+          res.status(500).json({ error: 'Debit failed after payment — please contact support', provider_ref: charge.provider_ref });
+          return;
+        }
+
+        // 5. Issue invoice + switch subscription
+        await createInvoice(pool, {
+          tenant_id: tenantId,
+          reason: `Subscribe to ${plan.name}`,
+          status: 'paid',
+          line_items: [{ description: `${plan.name} Plan (first month)`, amount: plan.price }],
+        });
+        const updated = await changePlan(pool, tenantId, plan.id);
+
+        res.json({
+          subscription: updated,
+          charge: { provider: charge.provider, ref: charge.provider_ref, amount: plan.price },
+          wallet_balance_after: debit.balance_after,
+        });
+      } catch (err: any) {
+        if (err?.name === 'ZodError') {
+          res.status(400).json({ error: 'Validation failed', details: err.errors });
+          return;
+        }
+        next(err);
+      }
+    });
 
   router.post('/upgrade', requireRoles('OWNER', 'ADMIN'),
     async (req: Request, res: Response, next: NextFunction) => {

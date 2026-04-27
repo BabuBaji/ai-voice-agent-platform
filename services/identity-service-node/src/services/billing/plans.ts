@@ -1,10 +1,30 @@
+// 5-tier OmniDim-style catalog: Free → Starter → Growth → Pro → Enterprise.
+// Every plan defines:
+//   - hard limits (agents, minutes, channels, KB) — enforced server-side
+//   - per-min pricing — debited from wallet on each call
+//   - feature_flags — boolean capability gates wired across the platform
+
+export type FeatureKey =
+  // call channels / capabilities
+  | 'web_calls' | 'phone_calls' | 'whatsapp' | 'bulk_calls' | 'voice_cloning' | 'multilingual'
+  // analytics & data
+  | 'basic_analytics' | 'advanced_analytics' | 'sentiment_detection' | 'lead_scoring' | 'transcript' | 'recording'
+  // automation & integrations
+  | 'webhooks' | 'calendar' | 'crm_basic' | 'crm_advanced' | 'custom_workflows' | 'api_access'
+  // collaboration & access
+  | 'multi_team' | 'rbac' | 'sso'
+  // enterprise
+  | 'dedicated_support' | 'sla' | 'custom_models' | 'on_prem' | 'agent_training_from_recordings';
+
+export type FeatureFlags = Partial<Record<FeatureKey, boolean>>;
+
 export interface PlanFeature {
   agents: number | 'unlimited';
   included_minutes: number;
-  channels: number;
+  concurrent_calls: number;
   knowledge_base_mb: number;
-  rate_per_min: number;
-  extra_per_min: number;
+  rate_per_min: number;        // included-minutes price (used to compute "minutes worth")
+  extra_per_min: number;       // overage rate after included minutes are exhausted
   support: string;
   highlights: string[];
 }
@@ -12,139 +32,182 @@ export interface PlanFeature {
 export interface Plan {
   id: string;
   name: string;
-  price: number;
+  tagline: string;
+  price: number;               // INR / month
   currency: 'INR';
   billing_cycle: 'monthly';
   description?: string;
   features: PlanFeature;
+  feature_flags: FeatureFlags;
   popular?: boolean;
-  original_price?: number;
-  discount_pct?: number;
-  custom?: boolean;
+  custom?: boolean;            // true → contact-sales, no self-serve checkout
   hidden_from_grid?: boolean;
 }
 
-// OmniDim-style 5-tier catalog (+ implicit Free for new tenants).
-// Pricing in INR. Per-min rates were derived to give nice "minutes included"
-// numbers (price ÷ rate_per_min).
+// ── Catalog ─────────────────────────────────────────────────────────────────
 export const PLANS: Plan[] = [
   {
     id: 'free',
     name: 'Free',
+    tagline: 'Start free. No credit card.',
     price: 0,
     currency: 'INR',
     billing_cycle: 'monthly',
-    description: 'Free tier for trying things out.',
-    hidden_from_grid: true,
+    description: 'For testing and demos. Web calls only — no phone calling, no bulk campaigns.',
     features: {
       agents: 1,
       included_minutes: 100,
-      channels: 1,
+      concurrent_calls: 1,
       knowledge_base_mb: 5,
-      rate_per_min: 4.5,
+      rate_per_min: 5.0,
       extra_per_min: 0.5,
       support: 'Community',
-      highlights: ['1 AI Agent', '100 free minutes/mo', '1 channel', 'Community support'],
+      highlights: ['1 AI agent', '100 free minutes / month', 'Web calls only', 'Basic analytics', 'English only'],
+    },
+    feature_flags: {
+      web_calls: true,
+      basic_analytics: true,
+      transcript: true,
+      // explicitly disabled — listed for clarity even though absence = false
+      phone_calls: false, bulk_calls: false, voice_cloning: false, multilingual: false,
+      webhooks: false, api_access: false, advanced_analytics: false,
     },
   },
   {
     id: 'starter',
     name: 'Starter',
+    tagline: 'For small teams testing voice AI in production.',
     price: 999,
     currency: 'INR',
     billing_cycle: 'monthly',
-    description: 'Great for quick experimentations.',
+    description: 'Phone + web calls, basic bulk campaigns, basic CRM integration.',
     features: {
-      agents: 2,
-      included_minutes: 222,
-      channels: 1,
-      knowledge_base_mb: 5,
+      agents: 3,
+      included_minutes: 500,
+      concurrent_calls: 2,
+      knowledge_base_mb: 25,
       rate_per_min: 4.5,
       extra_per_min: 0.5,
       support: 'Email',
-      highlights: ['2 AI Agents', '222 included minutes', '1 channel', 'Email support'],
+      highlights: ['3 AI agents', '500 included minutes', 'Phone + web calls', 'Basic bulk campaigns (500 contacts)', 'CRM basics', 'Email notifications'],
     },
-  },
-  {
-    id: 'jump_starter',
-    name: 'Jump Starter',
-    price: 2499,
-    currency: 'INR',
-    billing_cycle: 'monthly',
-    description: 'Best for building and sharing voice AI demos.',
-    features: {
-      agents: 5,
-      included_minutes: 625,
-      channels: 2,
-      knowledge_base_mb: 10,
-      rate_per_min: 4.0,
-      extra_per_min: 0.4,
-      support: 'Email',
-      highlights: ['5 AI Agents', '625 included minutes', '2 channels', 'Custom voice cloning'],
-    },
-  },
-  {
-    id: 'early',
-    name: 'Early deployers',
-    price: 2999,
-    original_price: 3299,
-    discount_pct: 10,
-    popular: true,
-    currency: 'INR',
-    billing_cycle: 'monthly',
-    description: 'Best for users doing a POC with a live voice AI agent.',
-    features: {
-      agents: 10,
-      included_minutes: 857,
-      channels: 3,
-      knowledge_base_mb: 50,
-      rate_per_min: 3.5,
-      extra_per_min: 0.3,
-      support: 'Priority',
-      highlights: ['10 AI Agents', '857 included minutes', '3 channels', 'Priority support', 'Advanced analytics'],
+    feature_flags: {
+      web_calls: true, phone_calls: true,
+      bulk_calls: true, transcript: true, recording: true,
+      basic_analytics: true, crm_basic: true,
     },
   },
   {
     id: 'growth',
     name: 'Growth',
+    tagline: 'For growing businesses scaling voice automation.',
+    price: 4999,
+    popular: true,
+    currency: 'INR',
+    billing_cycle: 'monthly',
+    description: 'Multilingual, advanced analytics, webhooks, calendar, CSV bulk campaigns, retry logic.',
+    features: {
+      agents: 10,
+      included_minutes: 1500,
+      concurrent_calls: 5,
+      knowledge_base_mb: 100,
+      rate_per_min: 3.5,
+      extra_per_min: 0.4,
+      support: 'Priority email',
+      highlights: ['10 AI agents', '1,500 included minutes', 'Bulk CSV campaigns', 'Multilingual (Te/Hi/En + 10 more)', 'Advanced analytics', 'Webhooks + calendar', 'Call retry logic'],
+    },
+    feature_flags: {
+      web_calls: true, phone_calls: true,
+      bulk_calls: true, multilingual: true, transcript: true, recording: true,
+      basic_analytics: true, advanced_analytics: true, sentiment_detection: true,
+      crm_basic: true, webhooks: true, calendar: true,
+    },
+  },
+  {
+    id: 'pro',
+    name: 'Pro',
+    tagline: 'For serious automation and high-scale ops.',
     price: 14999,
     currency: 'INR',
     billing_cycle: 'monthly',
-    description: 'Best for users scaling post-POC voice AI usage.',
+    description: 'Unlimited agents, voice cloning, AI lead scoring, RBAC, API access, advanced CRM.',
     features: {
-      agents: 25,
-      included_minutes: 6000,
-      channels: 5,
-      knowledge_base_mb: 100,
-      rate_per_min: 2.5,
-      extra_per_min: 0.2,
+      agents: 'unlimited',
+      included_minutes: 5000,
+      concurrent_calls: 15,
+      knowledge_base_mb: 500,
+      rate_per_min: 2.8,
+      extra_per_min: 0.3,
       support: 'Priority',
-      highlights: ['25 AI Agents', '6,000 included minutes', '5 channels', 'API access', 'White-glove onboarding'],
+      highlights: ['Unlimited agents', '5,000 included minutes', 'Voice cloning', 'AI lead scoring + sentiment', 'Custom workflows', 'Salesforce / Zoho / HubSpot', 'Multi-team + RBAC', 'API access'],
+    },
+    feature_flags: {
+      web_calls: true, phone_calls: true, whatsapp: true,
+      bulk_calls: true, voice_cloning: true, multilingual: true,
+      transcript: true, recording: true,
+      basic_analytics: true, advanced_analytics: true, sentiment_detection: true, lead_scoring: true,
+      crm_basic: true, crm_advanced: true, webhooks: true, calendar: true, custom_workflows: true, api_access: true,
+      multi_team: true, rbac: true,
     },
   },
   {
     id: 'enterprise',
     name: 'Enterprise',
+    tagline: 'For large companies — custom pricing & deployment.',
     price: 0,
-    custom: true,
+    custom: true,                  // sales quote required, no self-serve checkout
     currency: 'INR',
     billing_cycle: 'monthly',
-    description: 'Launch at scale with volume-based discounts.',
+    description: 'Custom AI models, agent training from recordings, on-prem option, SLA, dedicated support.',
     features: {
       agents: 'unlimited',
-      included_minutes: 0,
-      channels: 20,
-      knowledge_base_mb: 1000,
-      rate_per_min: 2.0,
+      included_minutes: 0,         // bespoke
+      concurrent_calls: 100,
+      knowledge_base_mb: 5000,
+      rate_per_min: 2.0,           // ₹2/min target — actual rate negotiated per contract
       extra_per_min: 0,
-      support: 'Dedicated',
-      highlights: ['Agent training from recording', 'Dedicated support', 'SSO + custom contracts', 'GST invoicing'],
+      support: 'Dedicated CSM + SLA',
+      highlights: ['Custom pricing', 'From ₹2.0/min — volume tiered', '100+ concurrent calls', 'Dedicated support + SLA', 'Custom AI models', 'Agent training from recordings', 'Custom integrations', 'On-prem / private cloud', 'SSO + SOC 2'],
+    },
+    feature_flags: {
+      web_calls: true, phone_calls: true, whatsapp: true,
+      bulk_calls: true, voice_cloning: true, multilingual: true,
+      transcript: true, recording: true,
+      basic_analytics: true, advanced_analytics: true, sentiment_detection: true, lead_scoring: true,
+      crm_basic: true, crm_advanced: true, webhooks: true, calendar: true, custom_workflows: true, api_access: true,
+      multi_team: true, rbac: true, sso: true,
+      dedicated_support: true, sla: true, custom_models: true, on_prem: true, agent_training_from_recordings: true,
     },
   },
 ];
 
+// ── Public API ─────────────────────────────────────────────────────────────
 export function getPlan(planId: string): Plan | undefined {
   return PLANS.find((p) => p.id === planId);
+}
+
+// Legacy plan-id migration. Old catalog had jump_starter and early; map them
+// onto the closest equivalents in the new 5-tier so existing subscriptions
+// (and the seed data) don't break on the next ensureSubscription call.
+const LEGACY_MAP: Record<string, string> = {
+  jump_starter: 'starter',
+  early: 'growth',
+};
+export function migratePlanId(planId: string): string {
+  if (LEGACY_MAP[planId]) return LEGACY_MAP[planId];
+  if (getPlan(planId)) return planId;
+  return DEFAULT_PLAN_ID;
+}
+
+export function resolveFeatures(planId: string): FeatureFlags {
+  const plan = getPlan(migratePlanId(planId));
+  return plan?.feature_flags || {};
+}
+
+// Resolve a single feature flag with default false. Used at call sites:
+//   if (!hasFeature(plan, 'voice_cloning')) throw new ForbiddenError(...)
+export function hasFeature(planId: string, feature: FeatureKey): boolean {
+  return !!resolveFeatures(planId)[feature];
 }
 
 export const DEFAULT_PLAN_ID = 'free';

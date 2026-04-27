@@ -53,14 +53,43 @@ export async function createOtp(pool: Pool, userId: string, email: string): Prom
 }
 
 async function sendOtpEmail(email: string, otp: string): Promise<void> {
-  // Real email infra is phase-2. For now: log with pino so dev can copy it
-  // from the identity-service log if they didn't get the dev_otp in the
-  // response. notification-service can be wired in later.
-  logger.info({ email, otp }, '[DEV] email verification OTP — replace with real SMTP send in production');
+  const subject = 'Your VoiceAgent AI verification code';
+  const body = [
+    `Your verification code is: ${otp}`,
+    '',
+    'This code expires in 10 minutes. If you did not request it, you can safely ignore this email.',
+    '',
+    '— VoiceAgent AI',
+  ].join('\n');
 
-  // Hook point for production:
-  // const { sendEmail } = await import('../adapters/email');
-  // await sendEmail({ to: email, subject: 'Your verification code', body: `Your code is ${otp}. Valid 10 minutes.` });
+  // Always log to identity-service so dev can grab the OTP if SMTP isn't set up.
+  logger.info({ email, otp }, '[OTP] email verification — see notification-service log to confirm delivery');
+
+  // Try the real send via notification-service. Best-effort: failures are
+  // logged, never raised, so signup never fails because email infra is down.
+  const url = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3004';
+  // No tenant context exists yet for a new signup — use the synthetic platform
+  // tenant id so the notification-service route's x-tenant-id check passes.
+  const platformTenantId = process.env.PLATFORM_TENANT_ID || '7ae83e63-dd52-4586-8633-826cb032d4f6';
+  try {
+    const r = await fetch(`${url}/api/v1/notifications/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-tenant-id': platformTenantId,
+      },
+      body: JSON.stringify({ type: 'email', recipient: email, subject, body }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      logger.warn({ status: r.status, text: text.slice(0, 200) }, '[OTP] notification-service rejected email send');
+    } else {
+      logger.info({ email }, '[OTP] dispatched to notification-service for SendGrid delivery');
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, '[OTP] could not reach notification-service — OTP visible only in identity-service log');
+  }
 }
 
 export interface VerifyOtpResult {

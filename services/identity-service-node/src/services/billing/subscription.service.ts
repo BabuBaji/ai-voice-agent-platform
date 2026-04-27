@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { DEFAULT_PLAN_ID, getPlan, Plan } from './plans';
+import { DEFAULT_PLAN_ID, getPlan, Plan, migratePlanId } from './plans';
 
 export interface Subscription {
   id: string;
@@ -39,6 +39,18 @@ export async function ensureSubscription(pool: Pool, tenantId: string): Promise<
   );
   if (existing.rows.length > 0) {
     const sub = existing.rows[0] as Subscription;
+    // Auto-migrate stale plan ids (legacy catalog) to the new 5-tier ones,
+    // so existing tenants on jump_starter/early don't end up with a NULL plan.
+    const migrated = migratePlanId(sub.plan_id);
+    if (migrated !== sub.plan_id) {
+      const np = getPlan(migrated)!;
+      await pool.query(
+        `UPDATE subscriptions SET plan_id = $1, plan_name = $2, price = $3, updated_at = now() WHERE id = $4`,
+        [np.id, np.name, np.price, sub.id],
+      );
+      await pool.query(`UPDATE tenants SET plan = $1, updated_at = now() WHERE id = $2`, [np.id, tenantId]);
+      sub.plan_id = np.id; sub.plan_name = np.name; sub.price = np.price;
+    }
     sub.plan = getPlan(sub.plan_id);
     return sub;
   }

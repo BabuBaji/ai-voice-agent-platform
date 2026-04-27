@@ -12,6 +12,20 @@ export const config = {
     fromEmail: process.env.SENDGRID_FROM_EMAIL || 'noreply@example.com',
   },
 
+  // Plain SMTP (Gmail, Office365, Mailgun-SMTP, AWS-SES-SMTP, any provider).
+  // If SMTP_HOST + SMTP_USER + SMTP_PASS are set, the email provider prefers
+  // SMTP over SendGrid. Gmail-specific note: use an App Password, not your
+  // account password (https://myaccount.google.com/apppasswords).
+  smtp: {
+    host: process.env.SMTP_HOST || '',
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    secure: process.env.SMTP_SECURE === 'true',         // true for 465, false for STARTTLS on 587
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    fromEmail: process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || 'noreply@example.com',
+    fromName: process.env.SMTP_FROM_NAME || 'VoiceAgent AI',
+  },
+
   twilio: {
     accountSid: process.env.TWILIO_ACCOUNT_SID || '',
     authToken: process.env.TWILIO_AUTH_TOKEN || '',

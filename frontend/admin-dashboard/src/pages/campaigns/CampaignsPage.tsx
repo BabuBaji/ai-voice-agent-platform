@@ -8,6 +8,8 @@ import { campaignApi, type Campaign } from '@/services/campaign.api';
 import { agentApi } from '@/services/agent.api';
 import { phoneNumberApi, type PhoneNumberRecord } from '@/services/phoneNumber.api';
 import { formatDate } from '@/utils/formatters';
+import { UpgradeBanner } from '@/components/billing/UpgradeBanner';
+import { useFeature } from '@/stores/features.context';
 
 // OmniDim-style status labels mapped to our internal statuses. We display the
 // richer OmniDim list in the filter dropdown but only DRAFT / RUNNING / PAUSED /
@@ -117,8 +119,13 @@ export function CampaignsPage() {
     .reduce((sum, c) => sum + (c.concurrency || 1), 0);
   const concurrentLimit = Math.max(1, totalConcurrent);
 
+  const canBulk = useFeature('bulk_calls');
+
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
+      <UpgradeBanner flag="bulk_calls" label="Bulk call campaigns"
+        sub="Run CSV-based outbound campaigns at scale — included in Starter and above." />
+
       {/* ─── Header ─── */}
       <div className="flex items-start justify-between">
         <div>
@@ -129,8 +136,12 @@ export function CampaignsPage() {
           <span className="text-xs font-medium px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700">
             Total Concurrent Limit: {concurrentLimit}
           </span>
-          <Button variant="gradient" onClick={() => navigate('/campaigns/new')} className="rounded-xl">
-            <Plus className="h-4 w-4" /> Create New Campaign
+          <Button variant="gradient"
+            onClick={() => canBulk ? navigate('/campaigns/new') : navigate('/settings/pricing')}
+            className="rounded-xl"
+            disabled={!canBulk && false /* keep clickable so it routes to upgrade */}
+          >
+            <Plus className="h-4 w-4" /> {canBulk ? 'Create New Campaign' : 'Upgrade to Create'}
           </Button>
         </div>
       </div>

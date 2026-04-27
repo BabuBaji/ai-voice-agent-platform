@@ -383,16 +383,11 @@ function RecordingPlayer({ conversationId, recordingUrl }: { conversationId: str
     if (resolvedUrl) return resolvedUrl;
     setLoading(true);
     try {
-      let blob: Blob | null = null;
-      if (recordingUrl && /^https?:\/\//i.test(recordingUrl)) {
-        // Phone-call WAV from ngrok tunnel. Header bypasses ngrok-free's
-        // browser-warning interstitial; <audio src> can't do that.
-        const resp = await fetch(recordingUrl, { headers: { 'ngrok-skip-browser-warning': '1' } });
-        if (resp.ok) blob = await resp.blob();
-      } else {
-        const r = await api.get(`/conversations/${conversationId}/recording`, { responseType: 'blob' });
-        blob = r.data;
-      }
+      // Always go through conversation-service. It serves local web-call uploads,
+      // sibling telephony-adapter WAVs, and (last resort) proxies the remote URL —
+      // so playback works whether or not the ngrok tunnel is up.
+      const r = await api.get(`/conversations/${conversationId}/recording`, { responseType: 'blob' });
+      const blob: Blob | null = r.data;
       if (!blob) return null;
       const url = URL.createObjectURL(blob);
       setResolvedUrl(url);

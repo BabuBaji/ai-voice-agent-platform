@@ -3,6 +3,7 @@ import { config } from './config';
 import { createApp } from './app';
 import { initDatabase } from './db/init';
 import { startRenewalCron } from './services/billing/renewalCron';
+import { startAnomalyCron } from './services/superAdmin/anomalyDetector';
 import pino from 'pino';
 
 const logger = pino({
@@ -36,6 +37,7 @@ async function main() {
   });
 
   startRenewalCron(pool);
+  startAnomalyCron(pool);
 
   // Graceful shutdown
   const shutdown = async () => {

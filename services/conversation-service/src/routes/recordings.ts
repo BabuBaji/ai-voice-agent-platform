@@ -378,18 +378,27 @@ recordingRouter.get('/conversations/:id/recording', async (req: Request, res: Re
     // Tenant check is optional here to allow <audio src> tags without headers,
     // but we still require a matching conversation exists.
     const tenantId = (req.headers['x-tenant-id'] as string) || null;
+    // Super admins (cross-tenant) bypass the tenant filter — their JWT carries
+    // the synthetic platform tenant id, which would never match a real tenant's
+    // recording. Roles list is forwarded by the api-gateway as a header.
+    const roles = String(req.headers['x-user-roles'] || '')
+      .split(',').map((r) => r.trim().toUpperCase()).filter(Boolean);
+    const isSuperAdmin = roles.includes('SUPER_ADMIN');
+    const effectiveTenantId = isSuperAdmin ? null : tenantId;
 
-    const check = await pool.query(
-      tenantId
-        ? 'SELECT id FROM conversations WHERE id = $1 AND tenant_id = $2'
-        : 'SELECT id FROM conversations WHERE id = $1',
-      tenantId ? [id, tenantId] : [id]
+    const row = await pool.query(
+      effectiveTenantId
+        ? 'SELECT id, recording_url FROM conversations WHERE id = $1 AND tenant_id = $2'
+        : 'SELECT id, recording_url FROM conversations WHERE id = $1',
+      effectiveTenantId ? [id, effectiveTenantId] : [id]
     );
-    if (check.rows.length === 0) {
+    if (row.rows.length === 0) {
       res.status(404).json({ error: 'Not Found', message: 'Conversation not found' });
       return;
     }
+    const recordingUrl: string | null = row.rows[0].recording_url || null;
 
+    // 1. Web-call uploads — POSTed to this service, live in our own dir.
     const dir = ensureDir();
     const candidates = ['webm', 'ogg', 'mp4', 'wav'];
     let filePath: string | null = null;
@@ -402,7 +411,50 @@ recordingRouter.get('/conversations/:id/recording', async (req: Request, res: Re
         break;
       }
     }
+
+    // 2. Phone-call WAVs — written by telephony-adapter, named after the Plivo
+    //    callSid. The recording_url stored in DB is the public ngrok URL whose
+    //    basename is that callSid; map it back to the sibling service's local
+    //    file so playback doesn't depend on the tunnel being up.
+    if (!filePath && recordingUrl) {
+      const basename = path.basename(recordingUrl.split('?')[0]);
+      if (/^[\w.-]+\.wav$/i.test(basename)) {
+        const telDir = path.resolve(config.telephonyRecordingsDir);
+        const candidate = path.join(telDir, basename);
+        if (fs.existsSync(candidate)) {
+          filePath = candidate;
+          ext = 'wav';
+        }
+      }
+    }
+
     if (!filePath) {
+      // 3. Last resort — proxy the remote URL (e.g. ngrok). Streams body straight
+      //    through so we don't buffer the whole WAV in memory.
+      if (recordingUrl && /^https?:\/\//i.test(recordingUrl)) {
+        try {
+          const upstream = await fetch(recordingUrl, { headers: { 'ngrok-skip-browser-warning': '1' } });
+          if (!upstream.ok || !upstream.body) {
+            res.status(502).json({ error: 'Upstream', message: `Recording fetch failed: ${upstream.status}` });
+            return;
+          }
+          res.setHeader('Content-Type', upstream.headers.get('content-type') || 'audio/wav');
+          const len = upstream.headers.get('content-length');
+          if (len) res.setHeader('Content-Length', len);
+          res.setHeader('Accept-Ranges', 'bytes');
+          const reader = upstream.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(Buffer.from(value));
+          }
+          res.end();
+          return;
+        } catch (err: any) {
+          res.status(502).json({ error: 'Upstream', message: `Recording fetch error: ${err.message}` });
+          return;
+        }
+      }
       res.status(404).json({ error: 'Not Found', message: 'Recording file not found' });
       return;
     }

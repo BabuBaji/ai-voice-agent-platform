@@ -2,6 +2,28 @@ import { Request, Response, NextFunction } from 'express';
 import { pool } from '../index';
 
 const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
+const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || 'http://localhost:8080';
+
+// Best-effort feature lookup against identity-service. Returns:
+//   true  → feature is allowed (or lookup failed in a way that fails open)
+//   false → identity-service confirmed the feature is gated for this tenant
+// We pass through the caller's auth header so identity-service can resolve
+// the subscription for the right tenant. Cached responses come back fast,
+// so a per-call lookup is cheap (<10ms in normal conditions).
+async function tenantHasFeature(_tenantId: string, flag: string, auth: string | undefined): Promise<boolean> {
+  if (!auth) return true;          // can't authenticate the lookup → fail open
+  try {
+    const r = await fetch(`${IDENTITY_SERVICE_URL}/billing/features`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return true;        // identity outage → fail open
+    const data = await r.json() as { flags?: Record<string, boolean> };
+    return !!data.flags?.[flag];
+  } catch {
+    return true;                   // network blip → fail open
+  }
+}
 
 /**
  * Upload audio sample → ElevenLabs voice cloning → persist metadata.
@@ -19,6 +41,22 @@ export async function createClonedVoice(req: Request, res: Response, next: NextF
     const userId = req.headers['x-user-id'] as string | undefined;
     if (!tenantId) {
       res.status(400).json({ error: 'Bad Request', message: 'tenant required' });
+      return;
+    }
+
+    // Plan-feature gate. Hits identity-service /billing/features and aborts
+    // with 402 if the tenant's plan doesn't include voice_cloning. Falls
+    // open if the lookup itself errors so a billing outage doesn't block
+    // tenants that already have the feature.
+    const allowed = await tenantHasFeature(tenantId, 'voice_cloning', req.headers['authorization'] as string | undefined);
+    if (allowed === false) {
+      res.status(402).json({
+        error: 'Plan upgrade required',
+        message: 'Voice cloning is part of the Pro plan. Upgrade to unlock.',
+        feature: 'voice_cloning',
+        required_plan: 'pro',
+        upgrade_url: '/settings/pricing',
+      });
       return;
     }
 
