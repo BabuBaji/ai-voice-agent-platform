@@ -4,6 +4,16 @@
 @tailwind components;
 @tailwind utilities;
 
+@property --prompt-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes prompt-border-spin {
+  to { --prompt-angle: 360deg; }
+}
+
 :root {
   --sidebar-width: 260px;
   --sidebar-collapsed-width: 72px;
@@ -81,6 +91,29 @@
     @apply text-white;
     background-color: #0a0a0f;
   }
+
+  /* Animated gradient border for prompt input — landing page */
+  .prompt-animated-border {
+    position: relative;
+    padding: 2px;
+    border-radius: 14px;
+    background: conic-gradient(
+      from var(--prompt-angle),
+      #f59e0b 0deg,
+      #f43f5e 120deg,
+      #fb7185 240deg,
+      #f59e0b 360deg
+    );
+    animation: prompt-border-spin 4s linear infinite;
+    transition: filter 0.3s ease;
+  }
+  .prompt-animated-border:focus-within {
+    filter: drop-shadow(0 0 14px rgba(245, 158, 11, 0.45));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-animated-border { animation: none; }
 }
 
 @layer utilities {
