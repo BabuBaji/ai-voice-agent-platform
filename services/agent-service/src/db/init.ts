@@ -89,6 +89,18 @@ export async function initDatabase(pool: Pool): Promise<void> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_cloned_voices_tenant ON cloned_voices(tenant_id);
+
+      -- Lifetime per-user counter for the 50-attempt voice-cloning demo
+      -- allowance. Increments only when a clone insert succeeds; never
+      -- decrements on delete, so users can't reset the counter by deleting
+      -- voices. Paid users (voice_cloning feature flag) bypass this counter.
+      CREATE TABLE IF NOT EXISTS voice_clone_attempts (
+        user_id UUID PRIMARY KEY,
+        tenant_id UUID NOT NULL,
+        attempts_used INT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_voice_clone_attempts_tenant ON voice_clone_attempts(tenant_id);
     `);
     logger.info('Agent service database tables initialized');
   } finally {

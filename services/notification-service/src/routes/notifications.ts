@@ -14,6 +14,7 @@ const SendNotificationSchema = z.object({
   recipient: z.string().min(1),
   subject: z.string().optional(),
   body: z.string().min(1),
+  html: z.string().optional(),
   metadata: z.record(z.any()).optional(),
 });
 
@@ -127,7 +128,7 @@ notificationRouter.post('/send', async (req: Request, res: Response) => {
     return;
   }
 
-  const { type, recipient, subject, body, metadata } = parseResult.data;
+  const { type, recipient, subject, body, html, metadata } = parseResult.data;
 
   // If a templateId is provided in metadata, look up the template and interpolate
   let finalSubject = subject || '';
@@ -176,7 +177,7 @@ notificationRouter.post('/send', async (req: Request, res: Response) => {
           to: recipient,
           subject: finalSubject,
           body: finalBody,
-          html: finalBody,
+          html: html || finalBody,
         });
         break;
       case 'sms':

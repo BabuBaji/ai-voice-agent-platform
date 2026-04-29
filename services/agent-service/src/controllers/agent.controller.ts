@@ -140,9 +140,10 @@ export async function getAgentPublic(req: Request, res: Response, next: NextFunc
     const result = await pool.query(
       `SELECT id, tenant_id, name, status, system_prompt,
               llm_provider, llm_model, temperature, greeting_message,
-              voice_config, call_config, integrations_config, knowledge_base_ids
+              voice_config, call_config, integrations_config, knowledge_base_ids,
+              metadata
        FROM agents
-       WHERE id = $1 AND status = 'ACTIVE'`,
+       WHERE id = $1 AND status IN ('ACTIVE', 'PUBLISHED')`,
       [id]
     );
     if (result.rows.length === 0) {

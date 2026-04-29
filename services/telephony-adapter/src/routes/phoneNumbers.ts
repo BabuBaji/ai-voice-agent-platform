@@ -30,6 +30,16 @@ const buySchema = z.object({
   capabilities: z.array(z.enum(['voice', 'sms'])).default(['voice']),
 });
 
+// Used for "Add existing number" — imports a number the tenant already owns
+// on the carrier (typical for Exotel which has no number-catalog API, and
+// for Twilio/Plivo numbers bought via the carrier's own dashboard).
+const importSchema = z.object({
+  provider: z.enum(['twilio', 'exotel', 'plivo']),
+  phone_number: z.string().min(5).max(20),
+  provider_sid: z.string().optional(),
+  capabilities: z.array(z.enum(['voice', 'sms'])).default(['voice']),
+});
+
 const updatePhoneNumberSchema = z.object({
   agent_id: z.string().uuid().nullable().optional(),
   is_active: z.boolean().optional(),
@@ -111,6 +121,55 @@ phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFun
         purchased.number,
         parsed.provider,
         purchased.providerNumberId,
+        JSON.stringify({
+          voice: parsed.capabilities.includes('voice'),
+          sms: parsed.capabilities.includes('sms'),
+        }),
+      ],
+    );
+
+    res.status(201).json(inserted.rows[0]);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation Error', details: err.errors });
+      return;
+    }
+    next(err);
+  }
+});
+
+// POST /phone-numbers/import — register a number the tenant ALREADY owns at
+// the carrier (Plivo / Twilio / Exotel) without going through provisioning.
+// Required for Exotel (no catalog API) and useful for numbers purchased
+// directly via Plivo/Twilio dashboards. Just inserts a row in our DB.
+phoneNumberRouter.post('/import', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const parsed = importSchema.parse(req.body);
+
+    const normalized = parsed.phone_number.trim().startsWith('+')
+      ? parsed.phone_number.trim()
+      : '+' + parsed.phone_number.trim().replace(/^\+/, '');
+
+    const dup = await pool.query(
+      `SELECT id FROM phone_numbers WHERE phone_number = $1`,
+      [normalized],
+    );
+    if (dup.rows.length > 0) {
+      res.status(409).json({ error: 'Already Imported', message: 'This number is already in your account.' });
+      return;
+    }
+
+    const inserted = await pool.query(
+      `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
+       VALUES ($1, $2, $3, $4, $5, TRUE)
+       RETURNING *`,
+      [
+        tenantId,
+        normalized,
+        parsed.provider,
+        parsed.provider_sid || null,
         JSON.stringify({
           voice: parsed.capabilities.includes('voice'),
           sms: parsed.capabilities.includes('sms'),

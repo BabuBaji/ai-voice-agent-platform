@@ -47,6 +47,9 @@ import { KnowledgeBasePage } from '@/pages/knowledge/KnowledgeBasePage';
 
 // Voice cloning
 import { VoiceCloningPage } from '@/pages/voiceCloning/VoiceCloningPage';
+import { ChatbotsListPage } from '@/pages/chatbots/ChatbotsListPage';
+import { ChatbotBuilderPage } from '@/pages/chatbots/ChatbotBuilderPage';
+import { SuperAdminChatbotsPage } from '@/pages/superAdmin/ChatbotsPage';
 
 // Workflows
 import { WorkflowListPage } from '@/pages/workflows/WorkflowListPage';
@@ -137,6 +140,7 @@ export const routes: RouteObject[] = [
       { path: '/super-admin/calls', element: <SuperAdminCallsPage /> },
       { path: '/super-admin/calls/:id', element: <SuperAdminCallDetailPage /> },
       { path: '/super-admin/agents', element: <SuperAdminAgentsPage /> },
+      { path: '/super-admin/chatbots', element: <SuperAdminChatbotsPage /> },
       { path: '/super-admin/billing', element: <SuperAdminBillingPage /> },
       { path: '/super-admin/audit-logs', element: <SuperAdminAuditLogsPage /> },
       { path: '/super-admin/integrations', element: <SuperAdminIntegrationsPage /> },
@@ -158,14 +162,10 @@ export const routes: RouteObject[] = [
   { path: '/report', element: <PublicReportPage /> },
   // Public Contact Us marketing page
   { path: '/contact', element: <ContactPage /> },
-  // Auth pages
-  {
-    element: <AuthLayout />,
-    children: [
-      { path: '/login', element: <LoginPage /> },
-      { path: '/register', element: <RegisterPage /> },
-    ],
-  },
+  // Auth pages — full-screen standalone layouts (no AuthLayout wrapper) to
+  // mirror the super-admin login chrome.
+  { path: '/login', element: <LoginPage /> },
+  { path: '/register', element: <RegisterPage /> },
   // Dashboard (protected)
   {
     element: (
@@ -193,6 +193,8 @@ export const routes: RouteObject[] = [
       { path: '/crm/pipeline', element: <PipelinePage /> },
       { path: '/knowledge', element: <KnowledgeBasePage /> },
       { path: '/voice-cloning', element: <VoiceCloningPage /> },
+      { path: '/chatbots', element: <ChatbotsListPage /> },
+      { path: '/chatbots/:id', element: <ChatbotBuilderPage /> },
       { path: '/workflows', element: <WorkflowListPage /> },
       { path: '/workflows/new', element: <WorkflowBuilderPage /> },
       { path: '/workflows/:id', element: <WorkflowBuilderPage /> },

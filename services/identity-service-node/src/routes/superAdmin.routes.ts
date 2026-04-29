@@ -205,6 +205,7 @@ export function superAdminRouter(): Router {
       const rows = await pool.query(
         `SELECT
            t.id, t.name, t.slug, t.plan, t.is_active, t.created_at,
+           t.settings->>'company_size' AS company_size,
            COALESCE(w.balance, 0)::float8 AS wallet_balance,
            (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id) AS user_count,
            (SELECT MAX(last_login_at) FROM users u WHERE u.tenant_id = t.id) AS last_login_at,
@@ -491,6 +492,98 @@ export function superAdminRouter(): Router {
   });
 
   // ── 9. Agents list (cross-tenant) ───────────────────────────────────────
+  // ── Chatbots cross-tenant view ──────────────────────────────────────────
+  // A "chatbot" is just an agent stored with metadata.chatbot=true. This
+  // endpoint mirrors /agents but adds the JSONB filter, returns the
+  // chatbot_config blob (category / theme / lead_fields / languages) and
+  // counts chat-channel conversations only.
+  router.get('/chatbots', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pool: Pool = (req as any).pool;
+      const agPool = agentPool();
+      const convPool = conversationPool();
+      const { limit, offset } = pageParams(req);
+      const tenantId = String(req.query.tenant_id || '').trim();
+      const status = String(req.query.status || '').trim();
+      const category = String(req.query.category || '').trim();
+      const search = String(req.query.search || '').trim();
+
+      const wheres: string[] = [`(metadata->>'chatbot') = 'true'`];
+      const params: any[] = [];
+      if (tenantId) {
+        params.push(tenantId);
+        wheres.push(`tenant_id = $${params.length}`);
+      }
+      if (status && status !== 'all') {
+        params.push(status.toUpperCase());
+        wheres.push(`status = $${params.length}`);
+      }
+      if (category && category !== 'all') {
+        params.push(category);
+        wheres.push(`metadata->'chatbot_config'->>'category' = $${params.length}`);
+      }
+      if (search) {
+        params.push(`%${search}%`);
+        wheres.push(`name ILIKE $${params.length}`);
+      }
+      const where = `WHERE ${wheres.join(' AND ')}`;
+
+      const total = await agPool.query(`SELECT COUNT(*) FROM agents ${where}`, params);
+      params.push(limit);
+      params.push(offset);
+      const rows = await agPool.query(
+        `SELECT id, tenant_id, name, description, status, llm_provider, llm_model,
+                metadata->'chatbot_config' AS chatbot_config,
+                metadata->'chatbot_config'->>'category' AS category,
+                created_at, updated_at
+         FROM agents ${where}
+         ORDER BY created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params,
+      );
+
+      const ids = rows.rows.map((r: any) => r.id);
+      const sessionsByBot = new Map<string, { sessions: number; messages: number; last_at: string | null }>();
+      if (ids.length) {
+        const cs = await convPool.query(
+          `SELECT agent_id,
+                  COUNT(*)::int AS sessions,
+                  MAX(started_at) AS last_at
+             FROM conversations
+             WHERE agent_id = ANY($1::uuid[]) AND channel IN ('WEB','CHAT')
+             GROUP BY agent_id`,
+          [ids],
+        );
+        cs.rows.forEach((r: any) =>
+          sessionsByBot.set(r.agent_id, {
+            sessions: Number(r.sessions),
+            messages: 0,
+            last_at: r.last_at,
+          }),
+        );
+      }
+
+      const tenantIds = Array.from(new Set(rows.rows.map((r: any) => r.tenant_id).filter(Boolean)));
+      const tenantNames = new Map<string, string>();
+      if (tenantIds.length) {
+        const tn = await pool.query(`SELECT id, name FROM tenants WHERE id = ANY($1::uuid[])`, [tenantIds]);
+        tn.rows.forEach((r: any) => tenantNames.set(r.id, r.name));
+      }
+
+      res.json({
+        total: Number(total.rows[0].count),
+        data: rows.rows.map((r: any) => ({
+          ...r,
+          tenant_name: tenantNames.get(r.tenant_id) || null,
+          sessions: sessionsByBot.get(r.id)?.sessions ?? 0,
+          last_session_at: sessionsByBot.get(r.id)?.last_at ?? null,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get('/agents', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const pool: Pool = (req as any).pool;

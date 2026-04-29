@@ -585,6 +585,15 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     await appendMessage(session.conversationId, session.tenantId, 'user', text);
   }
 
+  // Mid-call language switch: if the caller asks ("speak in Telugu") OR
+  // suddenly speaks in a different script, swap STT/TTS providers and tell
+  // the LLM to follow them. Done before triggering the LLM reply so the
+  // very next response comes back in the new language.
+  const newLang = detectLanguageRequest(text, session.language);
+  if (newLang && session.plivoWs) {
+    await switchLanguage(session.plivoWs, session, newLang);
+  }
+
   if (session.inFlightReply) {
     // Agent is still replying to a previous turn. The newly-stored user
     // turn will be picked up automatically by handleUserUtterance's drain
@@ -951,4 +960,158 @@ async function finalizeRecording(session: StreamSession): Promise<void> {
   } catch (err: any) {
     logger.warn({ err: err.message, callSid: session.callSid }, 'finalizeRecording error');
   }
+}
+
+// ---- Mid-call language switching -------------------------------------------
+//
+// Goal: when the caller says "speak in Telugu" / "switch to Hindi" / starts
+// speaking in a different script entirely, swap STT + TTS providers AND tell
+// the LLM to respond in the new language going forward.
+//
+// Three signals trigger a switch:
+//   1. Script detection — if the transcribed text contains a non-Latin
+//      script that maps to a specific language (Telugu/Hindi/Tamil/etc).
+//      This is deterministic and fast (one regex per script range).
+//   2. English request — "speak in <lang>", "switch to <lang>", etc.
+//   3. Indic-romanized request — "<lang> lo matladu" (Telugu),
+//      "<lang> mein baat karo" (Hindi), etc.
+
+const LANG_KEYWORDS: Record<string, string[]> = {
+  'te-IN': ['telugu', 'తెలుగు'],
+  'hi-IN': ['hindi', 'हिंदी', 'हिन्दी'],
+  'ta-IN': ['tamil', 'தமிழ்'],
+  'kn-IN': ['kannada', 'ಕನ್ನಡ'],
+  'ml-IN': ['malayalam', 'മലയാളം'],
+  'mr-IN': ['marathi', 'मराठी'],
+  'bn-IN': ['bengali', 'bangla', 'বাংলা'],
+  'gu-IN': ['gujarati', 'ગુજરાતી'],
+  'pa-IN': ['punjabi', 'ਪੰਜਾਬੀ'],
+  'or-IN': ['odia', 'oriya', 'ଓଡ଼ିଆ'],
+  'as-IN': ['assamese', 'অসমীয়া'],
+  'ur-IN': ['urdu', 'اردو'],
+  'en-IN': ['english'],
+};
+
+const SCRIPT_TO_LANG: Array<{ re: RegExp; lang: string }> = [
+  { re: /[ఀ-౿]/, lang: 'te-IN' }, // Telugu
+  { re: /[஀-௿]/, lang: 'ta-IN' }, // Tamil
+  { re: /[ಀ-೿]/, lang: 'kn-IN' }, // Kannada
+  { re: /[ഀ-ൿ]/, lang: 'ml-IN' }, // Malayalam
+  { re: /[ঀ-৿]/, lang: 'bn-IN' }, // Bengali
+  { re: /[઀-૿]/, lang: 'gu-IN' }, // Gujarati
+  { re: /[਀-੿]/, lang: 'pa-IN' }, // Gurmukhi (Punjabi)
+  { re: /[଀-୿]/, lang: 'or-IN' }, // Odia
+  { re: /[ऀ-ॿ]/, lang: 'hi-IN' }, // Devanagari — Hindi/Marathi (default Hindi)
+];
+
+const FRIENDLY: Record<string, string> = {
+  'en-IN': 'English', 'te-IN': 'Telugu', 'hi-IN': 'Hindi', 'ta-IN': 'Tamil',
+  'kn-IN': 'Kannada', 'ml-IN': 'Malayalam', 'mr-IN': 'Marathi', 'bn-IN': 'Bengali',
+  'gu-IN': 'Gujarati', 'pa-IN': 'Punjabi', 'or-IN': 'Odia', 'as-IN': 'Assamese',
+  'ur-IN': 'Urdu',
+};
+
+const SWITCH_VERB_RE = /\b(speak|talk|switch|change|continue|reply|respond|converse|chat)\s+(in|to)\b/i;
+const INDIC_ASK_HINTS_RE = /\b(lo|mein|me|la|il|para|please|kindly|matladu|matladandi|baat|karo|karein|karo na|pesu|pesungal|maatadi|kannadalli)\b/i;
+
+function detectLanguageRequest(text: string, currentLang: string): string | null {
+  const lower = (text || '').toLowerCase();
+  if (!lower) return null;
+
+  // 1. Explicit English ask: "speak in Telugu", "switch to Hindi"
+  if (SWITCH_VERB_RE.test(lower)) {
+    for (const lang of Object.keys(LANG_KEYWORDS)) {
+      const kws = LANG_KEYWORDS[lang];
+      if (kws.some((k) => lower.includes(k.toLowerCase()))) {
+        return lang === currentLang ? null : lang;
+      }
+    }
+  }
+
+  // 2. Indic-romanized ask: "Telugu lo matladu" / "Hindi mein baat karo"
+  const langWord = /(telugu|hindi|tamil|kannada|malayalam|marathi|bengali|bangla|gujarati|punjabi|odia|oriya|assamese|urdu|english)/i.exec(lower);
+  if (langWord && INDIC_ASK_HINTS_RE.test(lower)) {
+    const k = langWord[1].toLowerCase();
+    for (const lang of Object.keys(LANG_KEYWORDS)) {
+      if (LANG_KEYWORDS[lang].some((kw) => kw.toLowerCase() === k)) {
+        return lang === currentLang ? null : lang;
+      }
+    }
+  }
+
+  // 3. Script detection — caller is suddenly speaking in a different script.
+  // We require enough non-Latin characters to avoid false positives from a
+  // single emoji or stray glyph.
+  for (const s of SCRIPT_TO_LANG) {
+    if ((text.match(s.re) || []).length >= 3 && s.lang !== currentLang) {
+      return s.lang;
+    }
+  }
+
+  return null;
+}
+
+async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLang: string): Promise<void> {
+  const oldLang = session.language;
+  if (oldLang === newLang || session.closed) return;
+
+  // Pick backends for the new language using the same priority as onStart.
+  let stt: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
+  let tts: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
+  if (!deepgramCanHandle(newLang)) {
+    if (sarvamConfigured() && sarvamCanHandle(newLang)) {
+      stt = 'sarvam'; tts = 'sarvam';
+    } else if (azureSpeechConfigured()) {
+      stt = 'azure'; tts = 'azure';
+    }
+  }
+
+  logger.info({ callSid: session.callSid, oldLang, newLang, stt, tts }, 'Stream: switching language mid-call');
+
+  // Tear down whichever STT was active.
+  if (session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
+    try { session.dgWs.send(JSON.stringify({ type: 'CloseStream' })); } catch { /* ignore */ }
+    try { session.dgWs.close(); } catch { /* ignore */ }
+  }
+  session.dgWs = null;
+  if (session.azureStt) {
+    try { session.azureStt.close(); } catch { /* ignore */ }
+    session.azureStt = null;
+  }
+  if (session.sarvamStt) {
+    try { session.sarvamStt.close(); } catch { /* ignore */ }
+    session.sarvamStt = null;
+  }
+
+  // Update session state BEFORE opening the new STT so any race with
+  // incoming media uses the new backend pointer.
+  session.language = newLang;
+  session.sttBackend = stt;
+  session.ttsBackend = tts;
+
+  // Open the new STT.
+  if (stt === 'sarvam') {
+    session.sarvamStt = startSarvamStt({
+      language: newLang,
+      onFinal: (t) => dispatchUserUtterance(session, t),
+      onError: (m) => logger.warn({ callSid: session.callSid, err: m }, 'Sarvam STT error (post-switch)'),
+    });
+  } else if (stt === 'azure') {
+    session.azureStt = startAzureStt({
+      language: newLang,
+      onFinal: (t) => dispatchUserUtterance(session, t),
+      onError: (m) => logger.warn({ callSid: session.callSid, err: m }, 'Azure STT error (post-switch)'),
+    });
+  } else {
+    await connectDeepgram(session, newLang);
+  }
+
+  // Tell the LLM to follow them. The next LLM turn (which is about to fire
+  // because we're already inside dispatchUserUtterance) will see this hint
+  // at the tail of history and reply in the new language.
+  const friendlyNew = FRIENDLY[newLang] || newLang;
+  session.history.push({
+    role: 'system',
+    content: `The caller wants to continue in ${friendlyNew}. From this point forward, respond ONLY in ${friendlyNew}, in short natural sentences for a phone call. If they switch language again, follow them.`,
+  });
 }

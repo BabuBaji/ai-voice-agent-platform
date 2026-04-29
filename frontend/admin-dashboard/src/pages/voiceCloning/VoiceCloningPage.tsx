@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Mic, Square, Play, Pause, Upload, Trash2, Loader2, CheckCircle2,
-  AlertCircle, FileAudio, X, Volume2, Sparkles, RefreshCw,
+  AlertCircle, FileAudio, X, Volume2, Sparkles, RefreshCw, Lock, Zap,
 } from 'lucide-react';
-import { voiceCloneApi, type ClonedVoice } from '@/services/voiceClone.api';
+import { voiceCloneApi, type ClonedVoice, type VoiceCloneQuota } from '@/services/voiceClone.api';
 import { agentApi } from '@/services/agent.api';
 import type { Agent } from '@/types';
-import { FeatureGate } from '@/components/billing/FeatureGate';
 
 type Msg = { type: 'success' | 'error'; text: string };
 
@@ -43,6 +43,11 @@ export function VoiceCloningPage() {
   const [voices, setVoices] = useState<ClonedVoice[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [msg, setMsg] = useState<Msg | null>(null);
+  const [quota, setQuota] = useState<VoiceCloneQuota | null>(null);
+
+  const refreshQuota = async () => {
+    try { setQuota(await voiceCloneApi.quota()); } catch { /* non-fatal */ }
+  };
 
   // Form
   const [name, setName] = useState('');
@@ -84,7 +89,7 @@ export function VoiceCloningPage() {
     }
   };
 
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { reload(); refreshQuota(); }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -239,6 +244,7 @@ export function VoiceCloningPage() {
       // Reset form
       setName(''); setDescription(''); clearSample();
       reload();
+      refreshQuota();
     } catch (err: any) {
       const detail = err?.response?.data?.message || err?.response?.data?.error || err.message || 'Clone failed';
       setMsg({ type: 'error', text: detail });
@@ -283,7 +289,43 @@ export function VoiceCloningPage() {
         </p>
       </div>
 
-      <FeatureGate flag="voice_cloning" feature_label="Voice cloning">
+      {/* Demo-quota banner. Hidden when the user is on a plan that includes
+          voice_cloning (has_unlimited). Replaces the form with a paywall when
+          the 50 free demo clones are used up. */}
+      {quota && !quota.has_unlimited && (
+        <div className={`rounded-2xl border p-4 ${quota.exhausted
+            ? 'bg-rose-50 border-rose-200'
+            : (quota.remaining ?? Infinity) <= 5 ? 'bg-amber-50 border-amber-200' : 'bg-teal-50 border-teal-200'}`}>
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${quota.exhausted ? 'bg-rose-500' : (quota.remaining ?? Infinity) <= 5 ? 'bg-amber-500' : 'bg-teal-500'}`}>
+              {quota.exhausted ? <Lock className="h-5 w-5 text-white" /> : <Zap className="h-5 w-5 text-white" />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className={`text-sm font-semibold ${quota.exhausted ? 'text-rose-900' : 'text-slate-900'}`}>
+                {quota.exhausted
+                  ? 'Demo limit reached'
+                  : `${quota.used} / ${quota.limit} demo voice clones used`}
+              </p>
+              <p className="text-xs text-slate-600 mt-0.5">
+                {quota.exhausted
+                  ? `You've used all ${quota.limit} free demo clones. Upgrade your plan to keep cloning new voices.`
+                  : `${quota.remaining} cloning attempt${quota.remaining === 1 ? '' : 's'} remaining on the free demo. Upgrade for unlimited.`}
+              </p>
+              {/* Progress bar */}
+              <div className="mt-2 h-1.5 bg-white/70 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${quota.exhausted ? 'bg-rose-500' : (quota.remaining ?? Infinity) <= 5 ? 'bg-amber-500' : 'bg-teal-500'}`}
+                  style={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
+                />
+              </div>
+            </div>
+            <Link to="/settings/pricing" className={`text-xs px-3 py-2 rounded-lg font-semibold inline-flex items-center gap-1.5 flex-shrink-0 ${quota.exhausted ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-slate-900 hover:bg-slate-800 text-white'}`}>
+              {quota.exhausted ? 'Upgrade now' : 'See pricing'}
+            </Link>
+          </div>
+        </div>
+      )}
+
       {msg && (
         <div
           className={`flex items-center gap-2 p-3 rounded-xl text-sm font-medium ${
@@ -481,11 +523,13 @@ export function VoiceCloningPage() {
 
           <button
             onClick={handleClone}
-            disabled={submitting || !sampleBlob || !name.trim() || !gender}
+            disabled={submitting || !sampleBlob || !name.trim() || !gender || (quota?.exhausted && !quota?.has_unlimited)}
             className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-lg bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-700 hover:to-cyan-700 text-white text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
-            {submitting ? 'Cloning voice...' : 'Clone Voice'}
+            {quota?.exhausted && !quota?.has_unlimited ? <Lock className="h-4 w-4" /> : submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+            {quota?.exhausted && !quota?.has_unlimited
+              ? 'Demo limit reached — upgrade to clone'
+              : submitting ? 'Cloning voice...' : 'Clone Voice'}
           </button>
         </div>
       </div>
@@ -510,7 +554,6 @@ export function VoiceCloningPage() {
           </div>
         )}
       </div>
-      </FeatureGate>
     </div>
   );
 }

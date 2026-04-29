@@ -87,6 +87,7 @@ const navSections: NavSection[] = [
   {
     title: 'Chat',
     items: [
+      { label: 'Chatbots', path: '/chatbots', icon: 'Bot', badge: 'New' },
       { label: 'WhatsApp', path: '/chat/whatsapp', icon: 'MessageSquare' },
     ],
   },

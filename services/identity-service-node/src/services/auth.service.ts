@@ -59,6 +59,7 @@ export async function register(
     password: string;
     firstName: string;
     lastName: string;
+    companySize?: string;
   },
 ): Promise<{ tokens: AuthTokens; user: UserDTO }> {
   const client = await pool.connect();
@@ -67,10 +68,11 @@ export async function register(
 
     // Create tenant
     const tenantId = uuidv4();
-    const slug = slugify(data.tenantName) || 'tenant-' + tenantId.slice(0, 8);
+    const slug = (slugify(data.tenantName) || 'tenant') + '-' + tenantId.slice(0, 8);
+    const tenantSettings = data.companySize ? { company_size: data.companySize } : {};
     await client.query(
-      `INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)`,
-      [tenantId, data.tenantName, slug],
+      `INSERT INTO tenants (id, name, slug, settings) VALUES ($1, $2, $3, $4)`,
+      [tenantId, data.tenantName, slug, JSON.stringify(tenantSettings)],
     );
 
     // Hash password
@@ -175,9 +177,15 @@ export async function login(
   email: string,
   password: string,
 ): Promise<{ tokens: AuthTokens; user: UserDTO }> {
-  // Find user by email
+  // Find user by email. The same email can legitimately exist across multiple
+  // tenants (a user signs up to more than one workspace). Prefer the
+  // platform-admin row so the /super-admin/login flow is deterministic, then
+  // fall back to the most recently updated row.
   const userResult = await pool.query(
-    `SELECT * FROM users WHERE email = $1 AND status = 'ACTIVE' LIMIT 1`,
+    `SELECT * FROM users
+       WHERE email = $1 AND status = 'ACTIVE'
+       ORDER BY is_platform_admin DESC, updated_at DESC
+       LIMIT 1`,
     [email],
   );
 

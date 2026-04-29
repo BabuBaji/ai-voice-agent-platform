@@ -91,6 +91,17 @@ proxyRouter.all('/api/v1/super-admin', authMiddleware, forwardRequest(config.ser
 proxyRouter.all('/api/v1/broadcasts/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
 proxyRouter.all('/api/v1/broadcasts', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
 
+// --- In-app help assistant (chat) ---
+proxyRouter.all('/api/v1/assistant/*', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+proxyRouter.all('/api/v1/assistant', authMiddleware, forwardRequest(config.services.identity, stripPrefix));
+
+// --- PUBLIC chatbot widget endpoints (no auth — called from 3rd-party sites)
+// /widget/agent/:id  → agent-service /api/v1/agents-public/:id  (read theme + greeting)
+// /widget/chat       → ai-runtime  /chat/widget                 (send a message)
+proxyRouter.all('/widget/agent/:id', forwardRequest(config.services.agent, (p: string) =>
+  p.replace(/^\/widget\/agent\//, '/api/v1/agents-public/')));
+proxyRouter.all('/widget/chat', forwardRequest(config.services.aiRuntime, () => '/chat/widget'));
+
 // --- Agent service ---
 proxyRouter.all('/api/v1/agents/*', authMiddleware, forwardRequest(config.services.agent, keepPath));
 proxyRouter.all('/api/v1/agents', authMiddleware, forwardRequest(config.services.agent, keepPath));

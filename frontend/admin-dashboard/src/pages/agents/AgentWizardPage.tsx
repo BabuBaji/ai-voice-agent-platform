@@ -28,6 +28,7 @@ import {
 } from '@/utils/constants';
 import { agentApi } from '@/services/agent.api';
 import { callApi } from '@/services/call.api';
+import { formatCallError } from '@/services/callError';
 import { generateConversationFlow } from '@/utils/conversationFlow';
 import { MyAssistantsSection } from '@/components/agent-builder/MyAssistantsSection';
 import {
@@ -425,10 +426,25 @@ export function AgentWizardPage() {
     }
   };
 
-  const handleStartWebCall = () => {
+  // Idempotent — publishing an already-published agent is a no-op. We do this
+  // implicitly when the user clicks "Start Phone Call" / "Start Web Call" so
+  // they don't have to also remember to click "Deploy" first.
+  const ensurePublished = async (): Promise<void> => {
     if (!createdAgentId) return;
-    setShowCallModal(false);
-    navigate(`/agents/${createdAgentId}/call`);
+    try { await agentApi.publish(createdAgentId); } catch { /* surfaced via the call attempt below */ }
+  };
+
+  const handleStartWebCall = async () => {
+    if (!createdAgentId) return;
+    setCallSubmitting(true);
+    setError(null);
+    try {
+      await ensurePublished();
+      setShowCallModal(false);
+      navigate(`/agents/${createdAgentId}/call`);
+    } finally {
+      setCallSubmitting(false);
+    }
   };
 
   const handleStartPhoneCall = async () => {
@@ -440,18 +456,14 @@ export function AgentWizardPage() {
     setCallSubmitting(true);
     setError(null);
     try {
+      // Auto-deploy first so users don't hit "Click Deploy on the agent" 400.
+      await ensurePublished();
       const fullNumber = `${countryCode}${phoneNumber.replace(/\s+/g, '')}`;
       await callApi.initiate({ agentId: createdAgentId, phoneNumber: fullNumber });
       setShowCallModal(false);
       navigate(`/agents/${createdAgentId}`);
     } catch (e: any) {
-      const msg =
-        e?.response?.data?.message ||
-        e?.response?.data?.error ||
-        e?.response?.data?.err ||
-        e.message ||
-        'Failed to start phone call';
-      setError(msg);
+      setError(formatCallError(e));
     } finally {
       setCallSubmitting(false);
     }

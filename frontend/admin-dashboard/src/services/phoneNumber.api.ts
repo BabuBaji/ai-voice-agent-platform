@@ -59,6 +59,23 @@ export const phoneNumberApi = {
     });
     return r.data;
   },
+
+  /** Import a number the tenant already owns at the carrier (Plivo/Twilio/Exotel).
+   * Required for Exotel since they don't expose a number-catalog API. */
+  importExisting: async (params: {
+    provider: 'plivo' | 'twilio' | 'exotel';
+    phone_number: string;
+    provider_sid?: string;
+    capabilities?: ('voice' | 'sms')[];
+  }): Promise<PhoneNumberRecord> => {
+    const r = await api.post('/phone-numbers/import', {
+      provider: params.provider,
+      phone_number: params.phone_number,
+      provider_sid: params.provider_sid,
+      capabilities: params.capabilities || ['voice'],
+    });
+    return r.data;
+  },
 };
 
 export interface AvailableNumber {

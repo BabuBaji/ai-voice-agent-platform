@@ -4,6 +4,32 @@ import { pool } from '../index';
 const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
 const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || 'http://localhost:8080';
 
+// Free-demo allowance. Every user gets this many successful voice clones
+// regardless of plan; users on plans that already include the voice_cloning
+// feature bypass the cap and clone unlimited voices.
+const VOICE_CLONE_DEMO_LIMIT = 50;
+
+async function getQuotaUsed(userId: string): Promise<number> {
+  const r = await pool.query(
+    `SELECT attempts_used FROM voice_clone_attempts WHERE user_id = $1`,
+    [userId],
+  );
+  return r.rows[0]?.attempts_used ?? 0;
+}
+
+async function incrementQuotaUsed(userId: string, tenantId: string): Promise<number> {
+  const r = await pool.query(
+    `INSERT INTO voice_clone_attempts (user_id, tenant_id, attempts_used)
+       VALUES ($1, $2, 1)
+     ON CONFLICT (user_id) DO UPDATE
+       SET attempts_used = voice_clone_attempts.attempts_used + 1,
+           updated_at = NOW()
+     RETURNING attempts_used`,
+    [userId, tenantId],
+  );
+  return r.rows[0].attempts_used;
+}
+
 // Best-effort feature lookup against identity-service. Returns:
 //   true  → feature is allowed (or lookup failed in a way that fails open)
 //   false → identity-service confirmed the feature is gated for this tenant
@@ -44,20 +70,28 @@ export async function createClonedVoice(req: Request, res: Response, next: NextF
       return;
     }
 
-    // Plan-feature gate. Hits identity-service /billing/features and aborts
-    // with 402 if the tenant's plan doesn't include voice_cloning. Falls
-    // open if the lookup itself errors so a billing outage doesn't block
-    // tenants that already have the feature.
-    const allowed = await tenantHasFeature(tenantId, 'voice_cloning', req.headers['authorization'] as string | undefined);
-    if (allowed === false) {
-      res.status(402).json({
-        error: 'Plan upgrade required',
-        message: 'Voice cloning is part of the Pro plan. Upgrade to unlock.',
-        feature: 'voice_cloning',
-        required_plan: 'pro',
-        upgrade_url: '/settings/pricing',
-      });
-      return;
+    // Hybrid gate:
+    //   1. If the tenant's plan includes voice_cloning → unlimited.
+    //   2. Otherwise the user gets up to VOICE_CLONE_DEMO_LIMIT successful
+    //      clones as a free demo. Past that, return 402 with a pricing CTA.
+    const auth = req.headers['authorization'] as string | undefined;
+    const hasUnlimited = await tenantHasFeature(tenantId, 'voice_cloning', auth);
+    if (!hasUnlimited) {
+      if (!userId) {
+        res.status(401).json({ error: 'Unauthorized', message: 'user identity missing' });
+        return;
+      }
+      const used = await getQuotaUsed(userId);
+      if (used >= VOICE_CLONE_DEMO_LIMIT) {
+        res.status(402).json({
+          error: 'Demo limit reached',
+          message: `You've used all ${VOICE_CLONE_DEMO_LIMIT} free demo voice clones. Upgrade your plan to keep cloning.`,
+          feature: 'voice_cloning',
+          quota: { used, limit: VOICE_CLONE_DEMO_LIMIT, remaining: 0 },
+          upgrade_url: '/settings/pricing',
+        });
+        return;
+      }
     }
 
     const file = (req as any).file as Express.Multer.File | undefined;
@@ -157,8 +191,47 @@ export async function createClonedVoice(req: Request, res: Response, next: NextF
         ...row,
       });
     } else {
-      res.status(httpStatus).json(row);
+      // Only successful clones consume a demo attempt. Paid users (with
+      // unlimited access via the feature flag) still get tracked for visibility
+      // but it has no gating effect for them.
+      let quotaAttemptsUsed: number | null = null;
+      if (userId) {
+        try { quotaAttemptsUsed = await incrementQuotaUsed(userId, tenantId); } catch { /* non-fatal */ }
+      }
+      res.status(httpStatus).json({
+        ...row,
+        quota: quotaAttemptsUsed != null ? {
+          used: quotaAttemptsUsed,
+          limit: VOICE_CLONE_DEMO_LIMIT,
+          remaining: hasUnlimited ? null : Math.max(0, VOICE_CLONE_DEMO_LIMIT - quotaAttemptsUsed),
+          has_unlimited: hasUnlimited,
+        } : null,
+      });
     }
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Quota status for the current user — drives the UI banner & paywall.
+export async function getVoiceCloneQuota(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const userId = req.headers['x-user-id'] as string | undefined;
+    if (!tenantId || !userId) {
+      res.status(400).json({ error: 'Bad Request', message: 'tenant and user required' });
+      return;
+    }
+    const auth = req.headers['authorization'] as string | undefined;
+    const hasUnlimited = await tenantHasFeature(tenantId, 'voice_cloning', auth);
+    const used = await getQuotaUsed(userId);
+    res.json({
+      used,
+      limit: VOICE_CLONE_DEMO_LIMIT,
+      remaining: hasUnlimited ? null : Math.max(0, VOICE_CLONE_DEMO_LIMIT - used),
+      has_unlimited: hasUnlimited,
+      exhausted: !hasUnlimited && used >= VOICE_CLONE_DEMO_LIMIT,
+    });
   } catch (err) {
     next(err);
   }

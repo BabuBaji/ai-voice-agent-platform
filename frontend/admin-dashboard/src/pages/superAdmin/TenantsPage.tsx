@@ -56,6 +56,7 @@ export function SuperAdminTenantsPage() {
       { key: 'name',        label: 'Name' },
       { key: 'slug',        label: 'Slug' },
       { key: 'plan',        label: 'Plan' },
+      { key: 'company_size', label: 'Company size', render: (r) => r.company_size || '' },
       { key: 'is_active',   label: 'Active', render: (r) => r.is_active ? 'yes' : 'no' },
       { key: 'wallet_balance', label: 'Wallet (₹)' },
       { key: 'user_count',  label: 'Users' },
@@ -154,6 +155,7 @@ export function SuperAdminTenantsPage() {
                 <th className="text-left px-4 py-3 font-medium">Tenant</th>
                 <th className="text-left px-4 py-3 font-medium">Owner</th>
                 <th className="text-left px-4 py-3 font-medium">Plan</th>
+                <th className="text-left px-4 py-3 font-medium">Size</th>
                 <th className="text-left px-4 py-3 font-medium">Status</th>
                 <th className="text-left px-4 py-3 font-medium">Health</th>
                 <th className="text-right px-4 py-3 font-medium">Wallet</th>
@@ -171,6 +173,13 @@ export function SuperAdminTenantsPage() {
                   </td>
                   <td className="px-4 py-3 text-slate-700">{t.owner_email || '—'}</td>
                   <td className="px-4 py-3"><span className="text-[10px] uppercase tracking-wide font-semibold text-slate-600">{t.plan}</span></td>
+                  <td className="px-4 py-3">
+                    {t.company_size ? (
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">{t.company_size}</span>
+                    ) : (
+                      <span className="text-[10px] text-slate-400">—</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
                       t.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'

@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import {
   Shield, LayoutDashboard, Building2, PhoneCall, Bot, CreditCard,
   ScrollText, Plug, LogOut, Activity, AlertTriangle, TrendingDown,
-  Webhook, Megaphone, Lock, Crown,
+  Webhook, Megaphone, Lock, Crown, MessageSquare,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -18,6 +18,7 @@ const sections: Array<{ title?: string; items: Item[] }> = [
     { label: 'Calls',        path: '/super-admin/calls',        icon: PhoneCall },
     { label: 'Failed calls', path: '/super-admin/failed-calls', icon: AlertTriangle },
     { label: 'Agents',       path: '/super-admin/agents',       icon: Bot },
+    { label: 'Chatbots',     path: '/super-admin/chatbots',     icon: MessageSquare },
   ]},
   { title: 'Money', items: [
     { label: 'Subscriptions', path: '/super-admin/subscriptions', icon: Crown },

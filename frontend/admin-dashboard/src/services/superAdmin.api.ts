@@ -28,6 +28,7 @@ export interface TenantListRow {
   user_count: string | number;
   last_login_at: string | null;
   owner_email: string | null;
+  company_size: string | null;
 }
 
 export interface TenantDetail {
@@ -166,6 +167,17 @@ export const superAdminApi = {
 
   agents: (params: { page?: number; limit?: number; tenant_id?: string; status?: string; search?: string } = {}) =>
     api.get<Paged<AgentRow>>('/super-admin/agents', { params }).then((r) => r.data),
+
+  chatbots: (params: { page?: number; limit?: number; tenant_id?: string; status?: string; category?: string; search?: string } = {}) =>
+    api.get<Paged<{
+      id: string; tenant_id: string; tenant_name: string | null;
+      name: string; description: string | null; status: string;
+      llm_provider: string | null; llm_model: string | null;
+      category: string | null;
+      chatbot_config: Record<string, any> | null;
+      sessions: number; last_session_at: string | null;
+      created_at: string; updated_at: string;
+    }>>('/super-admin/chatbots', { params }).then((r) => r.data),
 
   billing: () => api.get<BillingOverview>('/super-admin/billing').then((r) => r.data),
   walletAdjust: (payload: { tenant_id: string; amount: number; type: 'credit' | 'debit'; reason: string }) =>

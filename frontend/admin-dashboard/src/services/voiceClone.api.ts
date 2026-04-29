@@ -17,10 +17,23 @@ export interface ClonedVoice {
   updated_at?: string;
 }
 
+export interface VoiceCloneQuota {
+  used: number;
+  limit: number;
+  remaining: number | null; // null when has_unlimited is true
+  has_unlimited: boolean;
+  exhausted: boolean;
+}
+
 export const voiceCloneApi = {
   list: async (): Promise<ClonedVoice[]> => {
     const response = await api.get('/voice-clones');
     return response.data.data ?? response.data;
+  },
+
+  quota: async (): Promise<VoiceCloneQuota> => {
+    const response = await api.get('/voice-clones/quota');
+    return response.data;
   },
 
   create: async (payload: {

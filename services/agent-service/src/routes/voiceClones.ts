@@ -11,6 +11,7 @@ const upload = multer({
 });
 
 voiceCloneRouter.get('/', ctrl.listClonedVoices);
+voiceCloneRouter.get('/quota', ctrl.getVoiceCloneQuota);
 voiceCloneRouter.post('/', upload.single('audio') as unknown as RequestHandler, ctrl.createClonedVoice);
 voiceCloneRouter.get('/:id/sample', ctrl.getClonedVoiceSample);
 voiceCloneRouter.post('/:id/retry', ctrl.retryClonedVoice);

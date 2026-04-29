@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { Dropdown } from '@/components/ui/Dropdown';
 import { agentApi } from '@/services/agent.api';
+import { callApi } from '@/services/call.api';
+import { formatCallError } from '@/services/callError';
 import type { Agent } from '@/types';
 
 /**
@@ -67,9 +69,26 @@ export function MyAssistantsSection() {
     }
   };
 
+  // "Voice Call" must place a real PSTN/SIP outbound call (callApi.initiate),
+  // NOT navigate to /agents/:id/call which is the browser-audio Web Call page.
+  // We prompt for the destination number and dial via the same path the
+  // wizard's "Start Phone Call" button uses.
+  const handlePhoneCall = async (a: Agent) => {
+    const raw = window.prompt('Phone number to call (E.164, e.g. +919493324795):');
+    const num = (raw || '').trim();
+    if (!num) return;
+    try {
+      await agentApi.publish(a.id).catch(() => { /* idempotent — fine if already published */ });
+      await callApi.initiate({ agentId: a.id, phoneNumber: num });
+      alert(`Call queued to ${num}. Your phone will ring within ~1 minute.`);
+    } catch (e: any) {
+      alert('Call failed.\n\n' + formatCallError(e));
+    }
+  };
+
   const menuItems = (a: Agent) => [
     { label: 'Edit', icon: <Edit className="h-4 w-4" />, onClick: () => navigate(`/agents/${a.id}`) },
-    { label: 'Voice Call', icon: <Phone className="h-4 w-4" />, onClick: () => navigate(`/agents/${a.id}/call`) },
+    { label: 'Voice Call', icon: <Phone className="h-4 w-4" />, onClick: () => handlePhoneCall(a) },
     { label: 'Web Call (Live)', icon: <Phone className="h-4 w-4" />, onClick: () => navigate(`/agents/${a.id}/web-call`) },
     { label: 'Duplicate', icon: <Copy className="h-4 w-4" />, onClick: () => handleClone(a) },
     { label: 'Delete', icon: <Trash2 className="h-4 w-4" />, onClick: () => handleDelete(a), danger: true, divider: true },

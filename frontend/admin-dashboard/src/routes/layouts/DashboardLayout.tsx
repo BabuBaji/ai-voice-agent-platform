@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { Header } from '@/components/layout/Header';
 import { ImpersonationBanner } from '@/components/layout/ImpersonationBanner';
 import { BroadcastBanner } from '@/components/layout/BroadcastBanner';
+import { TenantAssistant } from '@/components/assistant/TenantAssistant';
 
 export function DashboardLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -23,6 +24,7 @@ export function DashboardLayout() {
           <Outlet />
         </main>
       </div>
+      <TenantAssistant />
     </div>
   );
 }

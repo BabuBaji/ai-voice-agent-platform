@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Plus, Phone, Settings, Puzzle, Users, CreditCard, ScrollText, KeyRound,
   ShoppingCart, Loader2, AlertCircle, CheckCircle2, RefreshCw, Trash2, Search,
+  Download, X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -51,6 +52,16 @@ export function PhoneNumbersPage() {
   const [buying, setBuying] = useState<string | null>(null); // number being purchased
   const [buyMsg, setBuyMsg] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+
+  // Import-existing-number modal state
+  const [importOpen, setImportOpen] = useState(false);
+  const [importProvider, setImportProvider] = useState<'plivo' | 'twilio' | 'exotel'>('exotel');
+  const [importNumber, setImportNumber] = useState('');
+  const [importSid, setImportSid] = useState('');
+  const [importVoice, setImportVoice] = useState(true);
+  const [importSms, setImportSms] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const reloadOwned = async () => {
     setOwnedLoading(true);
@@ -101,6 +112,32 @@ export function PhoneNumbersPage() {
     }
   };
 
+  const submitImport = async () => {
+    setImporting(true);
+    setImportError(null);
+    try {
+      const caps: ('voice' | 'sms')[] = [];
+      if (importVoice) caps.push('voice');
+      if (importSms) caps.push('sms');
+      if (caps.length === 0) caps.push('voice');
+      await phoneNumberApi.importExisting({
+        provider: importProvider,
+        phone_number: importNumber.trim(),
+        provider_sid: importSid.trim() || undefined,
+        capabilities: caps,
+      });
+      setImportOpen(false);
+      setImportNumber('');
+      setImportSid('');
+      setBuyMsg(`Imported number into your account.`);
+      reloadOwned();
+    } catch (e: any) {
+      setImportError(e?.response?.data?.message || e?.message || 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const release = async (rec: PhoneNumberRecord) => {
     if (!confirm(`Release ${rec.phone_number}? This removes it from your account and the carrier.`)) return;
     try {
@@ -121,9 +158,14 @@ export function PhoneNumbersPage() {
                 <h3 className="text-lg font-semibold text-gray-900">Your Phone Numbers</h3>
                 <p className="text-sm text-gray-500">Numbers in your account — assign them to agents on the agent's Call Configuration tab.</p>
               </div>
-              <Button variant="outline" size="sm" onClick={reloadOwned} disabled={ownedLoading} className="rounded-xl">
-                <RefreshCw className={`h-3.5 w-3.5 ${ownedLoading ? 'animate-spin' : ''}`} /> Refresh
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => { setImportError(null); setImportOpen(true); }} className="rounded-xl">
+                  <Download className="h-3.5 w-3.5" /> Add existing number
+                </Button>
+                <Button variant="outline" size="sm" onClick={reloadOwned} disabled={ownedLoading} className="rounded-xl">
+                  <RefreshCw className={`h-3.5 w-3.5 ${ownedLoading ? 'animate-spin' : ''}`} /> Refresh
+                </Button>
+              </div>
             </div>
 
             {ownedError && (
@@ -242,9 +284,15 @@ export function PhoneNumbersPage() {
             )}
 
             {hasSearched && !searching && available.length === 0 && !searchError && (
-              <div className="text-center py-8 text-sm text-gray-400">
-                No numbers available from <strong>{provider}</strong> in <strong>{country}</strong> right now.
-                Try a different country, or check your provider account is properly verified.
+              <div className="text-center py-8 text-sm text-gray-500">
+                {provider === 'exotel' ? (
+                  <>
+                    <p className="font-medium text-gray-700 mb-1">Exotel doesn't expose a number-catalog API.</p>
+                    <p className="text-xs">Buy or transfer the number through the <a href="https://my.exotel.com" target="_blank" rel="noopener noreferrer" className="text-primary-600 underline">Exotel dashboard</a>, then click <strong>Add existing number</strong> above to register it here.</p>
+                  </>
+                ) : (
+                  <>No numbers available from <strong>{provider}</strong> in <strong>{country}</strong> right now. Try a different country, or check your provider account is properly verified.</>
+                )}
               </div>
             )}
 
@@ -298,6 +346,91 @@ export function PhoneNumbersPage() {
             </p>
           </Card>
       </div>
+
+      {/* ── Import existing number modal ─────────────────────────────── */}
+      {importOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4" onClick={() => !importing && setImportOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900">Add an existing number</h3>
+                <p className="text-xs text-gray-500 mt-0.5">Register a number you already own at Plivo, Twilio, or Exotel.</p>
+              </div>
+              <button onClick={() => !importing && setImportOpen(false)} className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center"><X className="h-4 w-4 text-gray-500" /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              {importError && (
+                <div className="flex items-start gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200 text-sm text-danger-700">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                  <span>{importError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Carrier</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['plivo', 'twilio', 'exotel'] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setImportProvider(p)}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium border transition ${importProvider === p ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-gray-200 hover:border-gray-300 text-gray-700'}`}
+                    >
+                      {p === 'plivo' ? 'Plivo' : p === 'twilio' ? 'Twilio' : 'Exotel'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Phone number (E.164)</label>
+                <input
+                  type="tel"
+                  value={importNumber}
+                  onChange={(e) => setImportNumber(e.target.value)}
+                  placeholder="+919493324795"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-500"
+                />
+                <p className="text-[11px] text-gray-400 mt-1">Include the country code with a leading "+".</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Provider SID / ID <span className="text-gray-400">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={importSid}
+                  onChange={(e) => setImportSid(e.target.value)}
+                  placeholder="e.g. PNxxxxxxxxxxxxxxxx (Twilio) — leave blank if unsure"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white font-mono focus:outline-none focus:ring-2 focus:ring-primary-200 focus:border-primary-500"
+                />
+                <p className="text-[11px] text-gray-400 mt-1">Needed only if you want this app to release the number on the carrier later.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Capabilities</label>
+                <div className="flex gap-3 text-sm">
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={importVoice} onChange={(e) => setImportVoice(e.target.checked)} className="accent-primary-600" />
+                    <span>Voice</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={importSms} onChange={(e) => setImportSms(e.target.checked)} className="accent-primary-600" />
+                    <span>SMS</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex justify-end gap-2 bg-gray-50/60 rounded-b-2xl">
+              <Button variant="outline" size="sm" onClick={() => setImportOpen(false)} disabled={importing} className="rounded-lg">Cancel</Button>
+              <Button variant="primary" size="sm" onClick={submitImport} disabled={importing || !importNumber.trim()} className="rounded-lg">
+                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                Add to my numbers
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

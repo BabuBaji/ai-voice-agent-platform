@@ -7,12 +7,15 @@ import { config } from '../config';
 import { authMiddleware } from '../middleware/auth.middleware';
 import * as jwtService from '../services/jwt.service';
 
+const COMPANY_SIZE_VALUES = ['1-10', '11-50', '51-200', '201-500', '501-1000', '1000+'] as const;
+
 const registerSchema = z.object({
   tenantName: z.string().min(1).max(100),
   email: z.string().email(),
   password: z.string().min(8).max(128),
   firstName: z.string().min(1).max(100),
   lastName: z.string().max(100).default(''),
+  companySize: z.enum(COMPANY_SIZE_VALUES).optional(),
 });
 
 const loginSchema = z.object({

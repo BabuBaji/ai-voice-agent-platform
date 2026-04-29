@@ -14,6 +14,7 @@ import { docRouter } from './routes/doc.routes';
 import { billingRouter } from './routes/billing.routes';
 import { superAdminRouter } from './routes/superAdmin.routes';
 import { broadcastsRouter } from './routes/broadcasts.routes';
+import { assistantRouter } from './routes/assistant.routes';
 import { auditMiddleware } from './middleware/audit.middleware';
 import pino from 'pino';
 
@@ -54,6 +55,7 @@ export function createApp(pool: Pool) {
   app.use('/billing', billingRouter());
   app.use('/super-admin', superAdminRouter());
   app.use('/broadcasts', broadcastsRouter());
+  app.use('/assistant', assistantRouter());
 
   // Global error handler
   app.use(
