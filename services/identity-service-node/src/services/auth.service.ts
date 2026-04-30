@@ -60,16 +60,20 @@ export async function register(
     firstName: string;
     lastName: string;
     companySize?: string;
+    employeeCount?: number;
   },
 ): Promise<{ tokens: AuthTokens; user: UserDTO }> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Create tenant
+    // Create tenant — slug is unique, so a duplicate company name collides
+    // (one company = one workspace).
     const tenantId = uuidv4();
-    const slug = (slugify(data.tenantName) || 'tenant') + '-' + tenantId.slice(0, 8);
-    const tenantSettings = data.companySize ? { company_size: data.companySize } : {};
+    const slug = slugify(data.tenantName) || 'tenant';
+    const tenantSettings: Record<string, unknown> = {};
+    if (data.companySize) tenantSettings.company_size = data.companySize;
+    if (data.employeeCount != null) tenantSettings.employee_count = data.employeeCount;
     await client.query(
       `INSERT INTO tenants (id, name, slug, settings) VALUES ($1, $2, $3, $4)`,
       [tenantId, data.tenantName, slug, JSON.stringify(tenantSettings)],

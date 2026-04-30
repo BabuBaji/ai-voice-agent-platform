@@ -16,6 +16,7 @@ const registerSchema = z.object({
   firstName: z.string().min(1).max(100),
   lastName: z.string().max(100).default(''),
   companySize: z.enum(COMPANY_SIZE_VALUES).optional(),
+  employeeCount: z.coerce.number().int().min(1).max(1_000_000).optional(),
 });
 
 const loginSchema = z.object({
@@ -68,8 +69,11 @@ export function authRouter(): Router {
           return;
         }
         if (err.code === '23505') {
-          // unique constraint violation
-          res.status(409).json({ error: 'Email or tenant already exists' });
+          const isCompany = String(err.constraint || '').includes('slug');
+          res.status(409).json({
+            error: isCompany ? 'Company already exists' : 'Email or tenant already exists',
+            reason: isCompany ? 'company_exists' : 'duplicate',
+          });
           return;
         }
         next(err);
@@ -154,7 +158,11 @@ export function authRouter(): Router {
           return;
         }
         if (err?.code === '23505') {
-          res.status(409).json({ error: 'Email or tenant already exists' });
+          const isCompany = String(err.constraint || '').includes('slug');
+          res.status(409).json({
+            error: isCompany ? 'Company already exists' : 'Email or tenant already exists',
+            reason: isCompany ? 'company_exists' : 'duplicate',
+          });
           return;
         }
         next(err);

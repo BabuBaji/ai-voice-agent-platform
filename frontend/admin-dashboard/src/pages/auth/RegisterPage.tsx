@@ -24,6 +24,12 @@ const registerSchema = z
   .object({
     companyName: z.string().min(2, 'Company name is required'),
     companySize: z.string().optional(),
+    employeeCount: z
+      .string()
+      .optional()
+      .refine((v) => !v || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 1_000_000), {
+        message: 'Enter a whole number between 1 and 1,000,000',
+      }),
     name: z.string().min(2, 'Name is required'),
     email: z.string().email('Please enter a valid email'),
     phone: z.string().optional(),
@@ -94,6 +100,7 @@ export function RegisterPage() {
         email: data.email,
         password: data.password,
         ...(data.companySize ? { companySize: data.companySize } : {}),
+        ...(data.employeeCount ? { employeeCount: Number(data.employeeCount) } : {}),
       });
       setPendingUserId(res.data.user_id);
       setPendingEmail(res.data.email);
@@ -103,7 +110,11 @@ export function RegisterPage() {
       setInfo(`We sent a 6-digit code to ${res.data.email}`);
       setTimeout(() => inputRefs.current[0]?.focus(), 50);
     } catch (err: any) {
-      setError(err?.response?.data?.error || err?.message || 'Registration failed');
+      const reason = err?.response?.data?.reason;
+      const msg = reason === 'company_exists'
+        ? 'A workspace for this company already exists. Ask your admin for an invite, or use a different company name.'
+        : err?.response?.data?.error || err?.message || 'Registration failed';
+      setError(msg);
     } finally { setLoading(false); }
   }
 
@@ -237,15 +248,28 @@ export function RegisterPage() {
 
                   <Field label="Company name" error={errors.companyName?.message}>
                     <input placeholder="Acme Inc." {...register('companyName')} className={inputCls} />
-                    <p className="text-[11px] text-slate-400 mt-1">Multiple employees from the same company can register — names don't need to be unique.</p>
+                    <p className="text-[11px] text-slate-400 mt-1">One workspace per company. If your team is already on VoiceAgent, ask your admin for an invite.</p>
                   </Field>
-                  <Field label="Company size (optional)" error={errors.companySize?.message}>
-                    <select {...register('companySize')} className={inputCls} defaultValue="">
-                      {COMPANY_SIZE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
-                  </Field>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Company size (optional)" error={errors.companySize?.message}>
+                      <select {...register('companySize')} className={inputCls} defaultValue="">
+                        {COMPANY_SIZE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Employee strength (optional)" error={errors.employeeCount?.message}>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000000}
+                        step={1}
+                        placeholder="e.g. 42"
+                        {...register('employeeCount')}
+                        className={inputCls}
+                      />
+                    </Field>
+                  </div>
                   <Field label="Full name" error={errors.name?.message}>
                     <input placeholder="John Doe" {...register('name')} className={inputCls} />
                   </Field>
