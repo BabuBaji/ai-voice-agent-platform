@@ -5,6 +5,7 @@ import { healthRouter } from './routes/health';
 import { conversationRouter } from './routes/conversations';
 import { messageRouter } from './routes/messages';
 import { recordingRouter } from './routes/recordings';
+import { translateRouter } from './routes/translate';
 import { webCallRouter } from './routes/webCalls';
 import { webCallInternalRouter } from './routes/webCallsInternal';
 import { userReportRouter, adminReportRouter } from './routes/support';
@@ -36,6 +37,7 @@ app.use('/api/v1/reports', userReportRouter);
 app.use('/api/v1/admin/reports', adminReportRouter);
 app.use('/api/v1/contact', publicContactRouter);
 app.use('/api/v1/admin/contact-requests', adminContactRouter);
+app.use('/api/v1', translateRouter);
 
 app.use(errorHandler);
 

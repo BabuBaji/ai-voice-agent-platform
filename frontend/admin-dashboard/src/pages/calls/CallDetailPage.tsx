@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { CallPlayer } from '@/components/calls/CallPlayer';
 import { TranscriptViewer } from '@/components/calls/TranscriptViewer';
 import { AiAnalyticsPanel } from '@/components/calls/AiAnalyticsPanel';
+import { TranslationCard } from '@/components/calls/TranslationCard';
 import { formatDuration, formatDate } from '@/utils/formatters';
 import { conversationApi, type Conversation, type ConversationMessage, type WhisperTranscript } from '@/services/conversation.api';
 import { agentApi } from '@/services/agent.api';
@@ -228,6 +229,8 @@ export function CallDetailPage() {
               )}
             </div>
           </Card>
+
+          <TranslationCard conversationId={conversation.id} hasTranscript={transcript.length > 0} />
 
           <Card>
             <CardHeader

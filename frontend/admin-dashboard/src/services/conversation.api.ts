@@ -47,6 +47,15 @@ export interface WhisperTranscript {
   transcribed_at: string;
 }
 
+export interface TranslatedTranscript {
+  target_language: string;
+  target_name: string;
+  translated_at: string;
+  provider: string;
+  cached?: boolean;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+}
+
 export interface ConversationMessage {
   id: string;
   conversation_id: string;
@@ -133,6 +142,18 @@ export const conversationApi = {
 
   transcribe: async (conversationId: string): Promise<WhisperTranscript> => {
     const res = await api.post(`/conversations/${conversationId}/transcribe`);
+    return res.data;
+  },
+
+  translate: async (
+    conversationId: string,
+    targetLanguage: string,
+    force = false,
+  ): Promise<TranslatedTranscript> => {
+    const res = await api.post(`/conversations/${conversationId}/translate`, {
+      target_language: targetLanguage,
+      force,
+    });
     return res.data;
   },
 
