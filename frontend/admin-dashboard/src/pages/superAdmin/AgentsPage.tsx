@@ -158,7 +158,7 @@ export function SuperAdminAgentsPage() {
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-700">{a.tenant_name || '—'}</td>
                   <td className="px-4 py-3">
-                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${a.status === 'ACTIVE' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{a.status}</span>
+                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${a.status === 'ACTIVE' || a.status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{a.status}</span>
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-600">{a.direction}</td>
                   <td className="px-4 py-3 text-xs text-slate-600">{a.llm_provider || '—'} <span className="text-slate-400">/ {a.llm_model || '—'}</span></td>

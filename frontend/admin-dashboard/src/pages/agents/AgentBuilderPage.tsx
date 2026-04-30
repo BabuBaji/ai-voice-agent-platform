@@ -1646,7 +1646,7 @@ function EmbedWidgetCard({ agentId, status }: { agentId?: string; status: string
     );
   }
 
-  if (status !== 'ACTIVE') {
+  if (status !== 'PUBLISHED' && status !== 'ACTIVE') {
     return (
       <Card>
         <div className="flex items-center gap-2 mb-1">
@@ -1654,7 +1654,7 @@ function EmbedWidgetCard({ agentId, status }: { agentId?: string; status: string
           <h3 className="text-sm font-semibold text-gray-900">Embed Chat Widget</h3>
         </div>
         <p className="text-sm text-warning-700 bg-warning-50 border border-warning-200 rounded-lg p-3">
-          The widget only loads <strong>ACTIVE</strong> agents. Switch this agent to ACTIVE (top of page) and save before embedding it on a public site.
+          The widget only loads deployed agents. Click <strong>Deploy</strong> at the top of the page before embedding this agent on a public site.
         </p>
       </Card>
     );

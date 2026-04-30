@@ -33,6 +33,7 @@ import { buildVoiceAgentPrompt } from '../prompts/voiceAgent';
 import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, SarvamSttHandle } from '../providers/sarvamSpeech';
+import { plivoProvider } from '../providers/plivo.provider';
 
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
@@ -249,6 +250,16 @@ interface StreamSession {
   callerMulaw: Buffer[];
   callerBytes: number;             // running count = current timeline position
   agentMulawEvents: Array<{ offsetBytes: number; mulaw: Buffer }>;
+  // Barge-in control: while playText() is streaming TTS chunks, this is true.
+  // If the caller speaks (substantive utterance, not a filler) during this
+  // window, we set bargeInRequested = true and the chunk loop aborts +
+  // sends Plivo a clearAudio event to flush whatever's still buffered.
+  isAgentSpeaking: boolean;
+  bargeInRequested: boolean;
+  // End-of-call latch: once the caller says goodbye / thank-you-bye / cut
+  // the call, we set this and stop firing the LLM on any further utterances.
+  // The caller still controls the actual hangup; we just stop talking.
+  callEnded: boolean;
 }
 
 // ---- main setup ------------------------------------------------------------
@@ -290,6 +301,9 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       callerMulaw: [],
       callerBytes: 0,
       agentMulawEvents: [],
+      isAgentSpeaking: false,
+      bargeInRequested: false,
+      callEnded: false,
     };
 
     logger.info({ agentId, tenantId }, 'Plivo audio stream WS connected');
@@ -572,9 +586,288 @@ async function connectDeepgram(session: StreamSession, language: string): Promis
  * a new LLM turn; otherwise the utterance stays in history + messages
  * and gets picked up when the current reply finishes.
  */
+// Common acknowledgement-only utterances across the languages we support.
+// When the caller responds with one of these RIGHT after the agent answered
+// (and the agent's last turn was not a question), it's a back-channel
+// acknowledgement — NOT a new request — and re-firing the LLM on it makes
+// the agent re-explain what it just said. We still persist these to the
+// transcript for fidelity, but skip the LLM call.
+const FILLER_PATTERNS: RegExp[] = [
+  // English
+  /^(ok|okay|kk?|yes|yeah|yep|yup|right|sure|alright|fine|got it|i see|uh|uh-huh|mm|mmhmm|hmm|hm|nope|no problem|cool|nice|great|true|correct)\b/i,
+  // Telugu
+  /^(సరే|ఓకే|అవును|హా|ఉమ్|ఆ|హ్మ్|హ్మ|ఉ|హుం|హ|ఎస్|ఓ|హాయ్)/,
+  // Hindi
+  /^(हाँ|हां|ठीक|ठीक है|अच्छा|अच्छी|हम्म|जी|जी हाँ|हम|हू)/,
+  // Tamil
+  /^(சரி|ஆமா|ஆம்|ம்|ஓகே|ஓகே சரி|ஹா)/,
+  // Kannada
+  /^(ಸರಿ|ಹೌದು|ಹಾಂ|ಆಯ್ತು|ಹಾ)/,
+  // Malayalam
+  /^(ശരി|അതെ|ഉം|ഹം)/,
+  // Marathi
+  /^(ठीक|बरं|हो|बरोबर)/,
+  // Bengali / Gujarati / Punjabi (basic acks)
+  /^(হ্যাঁ|ঠিক|હા|ઠીક|ਹਾਂ|ਠੀਕ)/,
+];
+
+/**
+ * Voice-mode brevity guard: keep at most 2 sentences AND ≤ 45 words. If the
+ * reply contains a question, prefer to keep that question even if it's the
+ * 3rd sentence — callers should hear "answer + one question", not five
+ * paragraphs of encyclopaedia followed by a question that gets cut.
+ */
+export function trimReplyForVoice(text: string, maxSentences = 2, maxWords = 45): string {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return trimmed;
+
+  // Split on sentence-ending punctuation across scripts (latin .!? + Devanagari ।॥).
+  // Keep the punctuation as part of each piece by using a lookbehind split.
+  const sentences = trimmed
+    .split(/(?<=[.!?।॥])\s+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (sentences.length === 0) return trimmed;
+
+  // Pick the first N sentences; if a later sentence is a question, swap it
+  // into the last slot so the agent keeps the call moving instead of just
+  // dumping facts.
+  let pick = sentences.slice(0, maxSentences);
+  if (sentences.length > maxSentences) {
+    const tail = sentences.slice(maxSentences).find((s) => /[?？]\s*$/.test(s));
+    if (tail) pick[pick.length - 1] = tail;
+  }
+  let out = pick.join(' ');
+
+  // Hard word cap as a second safety net (handles single-sentence rambles).
+  const words = out.split(/\s+/);
+  if (words.length > maxWords) {
+    out = words.slice(0, maxWords).join(' ').replace(/[,;:]?$/, '');
+    if (!/[.!?।॥]$/u.test(out)) out += '.';
+  }
+  return out.trim();
+}
+
+// End-of-call signals across the languages we support. Matched against the
+// trimmed user utterance — if any pattern fires, the agent says ONE short
+// farewell and refuses to fire the LLM again. Caller still hangs up at their
+// own pace; we just stay quiet.
+const GOODBYE_PATTERNS: RegExp[] = [
+  // English / common Indian-English phrasing.
+  // Bare "bye"/"goodbye" / "tata" / "cya" anywhere in the utterance.
+  /\b(bye|goodbye|good\s*bye|byee+|tata|cya)\b/i,
+  // "thanks" + explicit goodbye token. "thanks for the info" must NOT match,
+  // so we require "bye/goodbye" right after thanks/thank you (with optional
+  // intensifier in between).
+  /\b(thanks|thank\s*you)\s+(so\s+much\s+|a\s+lot\s+|very\s+much\s+)?(bye|goodbye)\b/i,
+  // "thanks" alone — only when it's the WHOLE utterance (caller signing off).
+  /^(thanks|thank\s*you)\s*[.!]?\s*$/i,
+  /\b(that['']?s\s+(it|all)|i['']?m\s+done|i\s+am\s+done|nothing\s+(else|more)|no\s+more|that\s+will\s+be\s+all)\b/i,
+  /\b(cut\s+the\s+call|hang\s+up|end\s+the\s+call|disconnect|please\s+stop|stop\s+(it|talking|speaking)|shut\s+up)\b/i,
+  // Telugu
+  /(బాయ్|వీడ్కోలు|ఇంక\s*చాలు|ఇంక\s*ఇంకేం|ధన్యవాదాలు\s*బాయ్|థాంక్\s*యూ\s*బాయ్|కాల్\s*కట్|కట్\s*చేయి|ఇది\s*చాలు|వద్దు\s*ఇంకేం)/,
+  // Hindi
+  /(अलविदा|टाटा|बाय|धन्यवाद\s*बाय|बस\s*हो\s*गया|बस\s*इतना|कॉल\s*काटो|बंद\s*करो)/,
+  // Tamil
+  /(விடைபெறுகிறேன்|பை|நன்றி\s*பை|போதும்|அவ்வளவே)/,
+  // Kannada / Malayalam basic
+  /(ಬೈ|ಧನ್ಯವಾದಗಳು\s*ಬೈ|ಸಾಕು)/,
+  /(വിട|നന്ദി\s*ബൈ|മതി)/,
+];
+
+function isGoodbye(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+  return GOODBYE_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * Generate a short farewell line dynamically in the caller's language and
+ * the agent's persona. We feed the live conversation history so the goodbye
+ * can reference what was just discussed if the LLM wants to ("Glad I could
+ * help with the temple info — bye!"). Strict brevity guard: ≤ 1 sentence.
+ *
+ * Falls back to a static line per language if the LLM is unreachable, so
+ * the call never hangs in silence after a goodbye is detected.
+ */
+async function generateFarewell(session: StreamSession, callerGoodbye: string): Promise<string> {
+  const lang = (session.language || '').toLowerCase();
+  const staticByLang: Record<string, string> = {
+    te: 'సరే, కాల్ చేసినందుకు ధన్యవాదాలు. మీ రోజు బాగుండాలి!',
+    hi: 'ठीक है, कॉल करने के लिए धन्यवाद। आपका दिन शुभ हो!',
+    ta: 'சரி, அழைப்பிற்கு நன்றி. நல்ல நாள்!',
+    kn: 'ಸರಿ, ಕರೆ ಮಾಡಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ಒಳ್ಳೆಯ ದಿನವಾಗಲಿ!',
+    ml: 'ശരി, വിളിച്ചതിന് നന്ദി. നല്ല ദിവസം!',
+    mr: 'ठीक आहे, कॉल केल्याबद्दल धन्यवाद. तुमचा दिवस छान जावो!',
+    bn: 'ঠিক আছে, কল করার জন্য ধন্যবাদ। আপনার দিন শুভ হোক!',
+    gu: 'ઠીક છે, કૉલ કરવા બદલ આભાર. તમારો દિવસ સારો જાય!',
+    pa: 'ਠੀਕ ਹੈ, ਕਾਲ ਕਰਨ ਲਈ ਧੰਨਵਾਦ। ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ!',
+  };
+  const fallback = staticByLang[lang.slice(0, 2)] || 'Alright, thanks for calling — have a great day!';
+
+  try {
+    const reply = await callLLM(
+      session.agent,
+      [
+        ...session.history,
+        { role: 'user', content: callerGoodbye },
+        {
+          role: 'user',
+          content:
+            `[FAREWELL_MODE] The caller is hanging up. Reply with ONE short, warm farewell in their language (max 8 words). ` +
+            `Do NOT ask any question. Do NOT offer more info. Do NOT mention follow-ups. ` +
+            `Just thank them briefly and wish them well. Match their language exactly.`,
+        },
+      ],
+      null,
+      'outbound',
+      session.language,
+    );
+    const cleaned = trimReplyForVoice((reply || '').replace(/\[END_CALL\]/gi, '').trim(), 1, 15);
+    return cleaned || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isFillerOnly(text: string): boolean {
+  const t = text
+    .toLowerCase()
+    .trim()
+    // Strip terminal punctuation across scripts
+    .replace(/[.!?,;:।॥]/g, '')
+    // Drop common deference suffixes that decorate a real ack but don't
+    // change its meaning ("okay sir", "హా సార్", "ठीक है साहब")
+    .replace(/\b(sir|madam|saar|sar|mam|maam|saab|garu|jee|ji)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length > 3) return false;
+  return FILLER_PATTERNS.some((re) => re.test(t));
+}
+
 async function dispatchUserUtterance(session: StreamSession, rawText: string): Promise<void> {
   const text = (rawText || '').trim();
   if (!text) return;
+
+  // Greeting-race guard: the caller often speaks within the first 1-2 seconds
+  // of the call connecting (e.g. "హలో"), but our seeded greeting LLM call
+  // takes ~2-4s to generate. If we let user input through before the greeting
+  // is in history, BOTH the greeting LLM call AND a fresh handleUserUtterance
+  // run in parallel — Plivo plays both replies back-to-back ("Telugu hello"
+  // then "Nice to meet you"). Drop everything until the greeting lands.
+  if (session.history.length === 0) {
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 60) },
+      'Stream: dropping pre-greeting user utterance (greeting still generating)',
+    );
+    return;
+  }
+
+  // End-of-call latch: caller said goodbye / thank-you-bye / cut the call.
+  // We've already played the farewell once (or are about to). Any further
+  // utterance is just the caller hanging up or background noise — log + drop,
+  // never fire the LLM again on this call.
+  if (session.callEnded) {
+    if (session.conversationId) {
+      await appendMessage(session.conversationId, session.tenantId, 'user', text);
+    }
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 60) },
+      'Stream: dropped post-farewell utterance (call already ended verbally)',
+    );
+    return;
+  }
+
+  // Goodbye detection: caller signalled they're done. Persist their utterance,
+  // emit ONE short language-appropriate farewell, set the latch, and bail —
+  // do NOT fire the LLM (which has been ignoring "please stop" rules).
+  if (isGoodbye(text)) {
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 60) },
+      'Stream: goodbye detected — emitting farewell + latching callEnded',
+    );
+    if (session.conversationId) {
+      await appendMessage(session.conversationId, session.tenantId, 'user', text);
+    }
+    session.history.push({ role: 'user', content: text });
+    // Make sure any in-flight playback is killed first so the caller actually
+    // hears the farewell promptly instead of the tail end of the previous reply.
+    if (session.isAgentSpeaking) {
+      session.bargeInRequested = true;
+    }
+    // Latch immediately so any utterance arriving while the farewell is being
+    // generated/played is dropped (won't trigger a second LLM call).
+    session.callEnded = true;
+    const farewell = await generateFarewell(session, text);
+    session.history.push({ role: 'assistant', content: farewell });
+    if (session.conversationId) {
+      await appendMessage(session.conversationId, session.tenantId, 'assistant', farewell);
+    }
+    if (session.plivoWs) {
+      // Play the farewell, then hang up the actual phone call. We await the
+      // chunk-streaming loop so we know our last byte was sent, then wait a
+      // small buffer for Plivo to flush its playback queue to the caller's
+      // ear (~2s — chunks land at the caller at near real-time pace).
+      // After that, hit Plivo's REST hangup so the call doesn't sit in
+      // ACTIVE state with the caller wondering whether the line is dead.
+      const wsRef = session.plivoWs;
+      const callSidRef = session.callSid;
+      playText(wsRef, session, farewell)
+        .catch(() => { /* swallow */ })
+        .then(() => new Promise((r) => setTimeout(r, 1800)))
+        .then(async () => {
+          if (!callSidRef) return;
+          logger.info(
+            { callSid: callSidRef },
+            'Stream: hanging up Plivo call after farewell',
+          );
+          try {
+            await plivoProvider.endCall(callSidRef);
+          } catch (e: any) {
+            logger.warn({ callSid: callSidRef, err: e?.message }, 'Plivo hangup failed');
+          }
+        });
+    }
+    return;
+  }
+
+  // Detect "back-channel" acks BEFORE pushing to in-memory history so they
+  // don't pollute the LLM context window either. We still persist them to
+  // the messages table so the recorded transcript reflects what was said.
+  const lastIdx = session.history.length - 1;
+  const lastEntry = lastIdx >= 0 ? session.history[lastIdx] : null;
+  const lastWasAssistant = lastEntry?.role === 'assistant';
+  const lastAssistantAskedQuestion = lastWasAssistant && /[?？]\s*$/.test((lastEntry?.content || '').trim());
+  const filler = isFillerOnly(text);
+
+  if (filler && lastWasAssistant && !lastAssistantAskedQuestion) {
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 60) },
+      'Stream: skipped back-channel ack (no LLM trigger, would cause repeat)',
+    );
+    // Persist for transcript fidelity, but DON'T add to LLM history and
+    // DON'T fire a reply.
+    if (session.conversationId) {
+      await appendMessage(session.conversationId, session.tenantId, 'user', text);
+    }
+    return;
+  }
+
+  // BARGE-IN: caller is speaking substantively while the agent is mid-reply.
+  // Flag the playback loop to stop streaming TTS chunks and flush Plivo's
+  // queue so the agent shuts up immediately and listens to what was said.
+  if (session.isAgentSpeaking) {
+    session.bargeInRequested = true;
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 60) },
+      'Stream: barge-in requested — caller spoke during agent reply',
+    );
+  }
+
   logger.info({ callSid: session.callSid, userText: text.slice(0, 100), inFlight: session.inFlightReply }, 'Stream: user utterance');
 
   // Persist the utterance to BOTH the in-memory conversation history
@@ -621,13 +914,36 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
     // older prompt cache — never say "END_CALL" aloud, never hang up ourselves.
     // The caller always controls when the call ends; we just stop asking new
     // questions and go quiet after the farewell.
-    const spoken = raw.replace(/\[END_CALL\]/gi, '').trim() || 'Sorry, could you repeat that?';
+    const cleaned = raw.replace(/\[END_CALL\]/gi, '').trim() || 'Sorry, could you repeat that?';
+
+    // Hard brevity cap: cut to first 2 sentences AND ≤ 45 words. Sarvam-m
+    // (used for Indic calls) routinely ignores the prompt's "ONE or TWO short
+    // sentences" rule and emits 5-paragraph encyclopedia entries. We trim
+    // post-LLM so the rule is enforced regardless of which provider replied.
+    const spoken = trimReplyForVoice(cleaned);
 
     session.history.push({ role: 'assistant', content: spoken });
     if (session.conversationId) {
       await appendMessage(session.conversationId, session.tenantId, 'assistant', spoken);
     }
     if (session.plivoWs) await playText(session.plivoWs, session, spoken);
+
+    // If the caller barged in mid-playback, only the first ~10-20% of the
+    // reply actually reached their ear. Trim what's in the LLM history down
+    // to the spoken portion + an [interrupted] marker, otherwise the next
+    // LLM call sees the full reply and thinks "I already covered this" — so
+    // when the caller's barge-in utterance was "yes I want to know", the
+    // LLM cheerfully re-emits the same answer it never finished delivering.
+    if (session.bargeInRequested) {
+      const last = session.history[session.history.length - 1];
+      if (last && last.role === 'assistant') {
+        // Take only the first sentence (caller heard at most ~1-2 sec).
+        const firstSentence = last.content.split(/(?<=[.!?।॥])\s+/u)[0] || last.content.slice(0, 60);
+        last.content = `${firstSentence.trim()} … [interrupted by caller before I could finish]`;
+      }
+      // Clear the flag so the very next reply starts with a clean slate.
+      session.bargeInRequested = false;
+    }
   }
 }
 
@@ -660,25 +976,59 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   // Capture the agent's TTS audio for the stereo recording, positioned at
   // the current caller-timeline offset. This lines up the agent's speech
   // with where the caller was "listening" at send-time.
+  const fullBytes = Buffer.from(b64, 'base64');
   session.agentMulawEvents.push({
     offsetBytes: session.callerBytes,
-    mulaw: Buffer.from(b64, 'base64'),
+    mulaw: fullBytes,
   });
-  // Plivo AudioStream playAudio event. Single-shot: Plivo buffers and plays it
-  // out to the caller at the correct pace (20ms frames). We do NOT need to
-  // chunk it ourselves for outbound.
-  const playEvent = {
-    event: 'playAudio',
-    media: {
-      contentType: 'audio/x-mulaw',
-      sampleRate: '8000',
-      payload: b64,
-    },
-  };
+
+  // Chunked playback for barge-in support. mulaw 8kHz = 8000 bytes/sec, so
+  // ~800-byte chunks ≈ 100ms each. We send chunks at a 90ms cadence (slightly
+  // ahead of real-time so playback never starves) and check bargeInRequested
+  // between sends — the moment the caller starts speaking, we stop sending
+  // and flush Plivo's queue. Caller hears at most ~150ms of overrun.
+  const CHUNK_BYTES = 800;        // 100ms of mulaw 8kHz
+  const SEND_INTERVAL_MS = 90;    // slightly ahead of playback rate
+  session.isAgentSpeaking = true;
+  session.bargeInRequested = false;
+  let sentBytes = 0;
   try {
-    plivoWs.send(JSON.stringify(playEvent));
-  } catch (err: any) {
-    logger.warn({ callSid: session.callSid, err: err.message }, 'Failed to send playAudio');
+    for (let off = 0; off < fullBytes.length; off += CHUNK_BYTES) {
+      if (session.bargeInRequested) {
+        // Flush Plivo's playback queue so the caller stops hearing the agent.
+        try {
+          plivoWs.send(JSON.stringify({ event: 'clearAudio' }));
+        } catch { /* socket may be gone */ }
+        logger.info(
+          { callSid: session.callSid, sentBytes, totalBytes: fullBytes.length },
+          'Stream: barge-in — playback aborted',
+        );
+        break;
+      }
+      const slice = fullBytes.subarray(off, Math.min(off + CHUNK_BYTES, fullBytes.length));
+      const playEvent = {
+        event: 'playAudio',
+        media: {
+          contentType: 'audio/x-mulaw',
+          sampleRate: '8000',
+          payload: slice.toString('base64'),
+        },
+      };
+      try {
+        plivoWs.send(JSON.stringify(playEvent));
+        sentBytes += slice.length;
+      } catch (err: any) {
+        logger.warn({ callSid: session.callSid, err: err.message }, 'Failed to send playAudio chunk');
+        break;
+      }
+      // Pace ourselves so we don't blast the entire reply faster than playback.
+      // Skip the sleep on the last chunk to avoid an extra idle delay.
+      if (off + CHUNK_BYTES < fullBytes.length) {
+        await new Promise((r) => setTimeout(r, SEND_INTERVAL_MS));
+      }
+    }
+  } finally {
+    session.isAgentSpeaking = false;
   }
 }
 

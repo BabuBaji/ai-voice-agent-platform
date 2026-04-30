@@ -443,7 +443,7 @@ function AgentsTab({ tenantId }: { tenantId: string }) {
           {data.data.map((a: any) => (
             <tr key={a.id} className="border-t border-slate-100">
               <td className="px-4 py-3"><p className="font-medium text-slate-900">{a.name}</p><p className="text-[10px] text-slate-400 font-mono">{a.id.slice(0,8)}</p></td>
-              <td className="px-4 py-3"><span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${a.status === 'ACTIVE' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{a.status}</span></td>
+              <td className="px-4 py-3"><span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${a.status === 'ACTIVE' || a.status === 'PUBLISHED' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{a.status}</span></td>
               <td className="px-4 py-3 text-xs text-slate-600">{a.direction}</td>
               <td className="px-4 py-3 text-xs text-slate-600">{a.llm_provider} / {a.llm_model}</td>
               <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{a.total_calls}</td>

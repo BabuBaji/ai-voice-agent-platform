@@ -377,9 +377,10 @@ export async function callSarvamLLM(opts: {
           { role: 'system', content: opts.systemPrompt },
           ...cleaned,
         ],
-        // sarvam-m burns a chunk of tokens on <think>…</think>. Give it
-        // enough headroom that the real reply isn't truncated.
-        max_tokens: opts.maxTokens ?? 600,
+        // sarvam-m burns a chunk of tokens on <think>…</think>; voice replies
+        // are then capped to ~2 sentences post-stream by the caller, so 350
+        // is enough headroom for the think block + a short reply.
+        max_tokens: opts.maxTokens ?? 350,
         temperature: opts.temperature ?? 0.6,
       }),
     });

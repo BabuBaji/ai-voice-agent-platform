@@ -230,9 +230,9 @@ export function AgentLiveCallPage() {
             Streaming Deepgram STT + chunked OpenAI TTS over a single WebSocket. Sub-second latency.
           </p>
         </div>
-        {agentStatus && agentStatus !== 'ACTIVE' && (
+        {agentStatus && agentStatus !== 'PUBLISHED' && agentStatus !== 'ACTIVE' && (
           <span className="text-xs px-2 py-1 rounded bg-warning-100 text-warning-700 font-medium">
-            Agent is {agentStatus} — switch to ACTIVE for production calls
+            Agent is {agentStatus} — click Deploy on the agent page to enable production calls
           </span>
         )}
       </div>
@@ -265,7 +265,7 @@ export function AgentLiveCallPage() {
           </div>
           <div className="flex items-center gap-2">
             {!isActive ? (
-              <Button variant="primary" onClick={startCall} disabled={callState === 'connecting' || agentStatus !== 'ACTIVE'}>
+              <Button variant="primary" onClick={startCall} disabled={callState === 'connecting' || (agentStatus !== 'PUBLISHED' && agentStatus !== 'ACTIVE')}>
                 {callState === 'connecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />}
                 Start live call
               </Button>
