@@ -7,7 +7,12 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/Badge';
-import { formatDuration, formatDate } from '@/utils/formatters';
+import { formatDuration, formatDate, formatINR } from '@/utils/formatters';
+
+// USD → INR conversion. Backend stores call cost in USD (provider rates are
+// quoted in USD); we display both. Override at build time with
+// VITE_USD_TO_INR=85 if the rate moves.
+const USD_TO_INR = Number(import.meta.env.VITE_USD_TO_INR) || 83;
 import { conversationApi } from '@/services/conversation.api';
 import { agentApi } from '@/services/agent.api';
 import api from '@/services/api';
@@ -25,6 +30,7 @@ interface CallRow {
   status: string;
   endedBy: string;
   cost: number;
+  costInr: number;
   recordingUrl: string | null;
   createdAt: string;
 }
@@ -39,7 +45,8 @@ const ALL_COLUMNS = [
   { key: 'channel',   label: 'Call Type',  default: true },
   { key: 'status',    label: 'Status',     default: true },
   { key: 'endedBy',   label: 'Ended By',   default: true },
-  { key: 'cost',      label: 'Cost',       default: true },
+  { key: 'cost',      label: 'Cost (USD)', default: true },
+  { key: 'costInr',   label: 'Cost (INR)', default: true },
   { key: 'recording', label: 'Recording',  default: true },
 ];
 
@@ -86,8 +93,16 @@ export function CallLogPage() {
         agentApi.list().catch(() => [] as any[]),
       ]);
       const agentMap = new Map<string, string>();
+      // cost_per_min is in USD per minute (DB default 0.115). We zip it on the
+      // call rows so each call's cost reflects the agent's actual configured
+      // rate instead of a hardcoded constant.
+      const agentCostMap = new Map<string, number>();
       const agentArr = Array.isArray(agentList) ? agentList : (agentList as any)?.data || [];
-      agentArr.forEach((a: any) => agentMap.set(a.id, a.name));
+      agentArr.forEach((a: any) => {
+        agentMap.set(a.id, a.name);
+        const cpm = a.cost_per_min != null ? parseFloat(a.cost_per_min) : NaN;
+        if (Number.isFinite(cpm)) agentCostMap.set(a.id, cpm);
+      });
       setAgents(agentArr.map((a: any) => ({ id: a.id, name: a.name })));
 
       // Hide stale orphan rows: a conversation is "stale" if it's still on
@@ -104,22 +119,32 @@ export function CallLogPage() {
         return started > 0 && now - started < STALE_MS;
       });
 
-      const rows: CallRow[] = filteredRaw.map((c: any) => ({
-        id: c.id,
-        callerNumber: c.caller_number || '—',
-        calledNumber: c.called_number || '—',
-        agentId: c.agent_id || '',
-        agentName: agentMap.get(c.agent_id) || 'Agent',
-        channel: c.channel || 'PHONE',
-        direction: (c.direction || 'INBOUND').toLowerCase(),
-        duration: c.duration_seconds ?? 0,
-        outcome: c.outcome || '',
-        status: (c.outcome || c.status || 'completed').toLowerCase().replace(/\s+/g, '-'),
-        endedBy: c.ended_by || (c.outcome ? 'agent' : 'user'),
-        cost: parseFloat(c.cost || (c.duration_seconds ? c.duration_seconds * 0.0019 : 0).toFixed(3)),
-        recordingUrl: c.recording_url || null,
-        createdAt: c.started_at || c.created_at || '',
-      }));
+      const rows: CallRow[] = filteredRaw.map((c: any) => {
+        const seconds = Number(c.duration_seconds) || 0;
+        // Use the agent's configured per-minute rate (USD). Fall back to the
+        // platform default 0.115 USD/min if the agent record is missing
+        // (deleted agent, cross-tenant view, etc.). Result is a number — no
+        // string parsing later, no double rounding.
+        const ratePerMin = agentCostMap.get(c.agent_id || '') ?? 0.115;
+        const costUsd = Number(((seconds / 60) * ratePerMin).toFixed(3));
+        return {
+          id: c.id,
+          callerNumber: c.caller_number || '—',
+          calledNumber: c.called_number || '—',
+          agentId: c.agent_id || '',
+          agentName: agentMap.get(c.agent_id) || 'Agent',
+          channel: c.channel || 'PHONE',
+          direction: (c.direction || 'INBOUND').toLowerCase(),
+          duration: c.duration_seconds ?? 0,
+          outcome: c.outcome || '',
+          status: (c.outcome || c.status || 'completed').toLowerCase().replace(/\s+/g, '-'),
+          endedBy: c.ended_by || (c.outcome ? 'agent' : 'user'),
+          cost: costUsd,
+          costInr: costUsd * USD_TO_INR,
+          recordingUrl: c.recording_url || null,
+          createdAt: c.started_at || c.created_at || '',
+        };
+      });
       setCalls(rows);
       setTotal(result.total ?? rows.length);
     } catch (err: any) {
@@ -172,6 +197,7 @@ export function CallLogPage() {
         case 'status':       return esc(r.status);
         case 'endedBy':      return esc(r.endedBy);
         case 'cost':         return esc(`$${r.cost.toFixed(3)}`);
+        case 'costInr':      return esc(`₹${r.costInr.toFixed(2)}`);
         default:             return '';
       }
     }).join(',')).join('\n');
@@ -342,6 +368,7 @@ export function CallLogPage() {
                   {isVisible('status') && <td className="px-3 py-2.5 whitespace-nowrap"><StatusBadge status={c.status} /></td>}
                   {isVisible('endedBy') && <td className="px-3 py-2.5"><span className="text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 text-gray-700 capitalize whitespace-nowrap">{c.endedBy}</span></td>}
                   {isVisible('cost') && <td className="px-3 py-2.5 font-mono text-xs text-gray-700 whitespace-nowrap">${c.cost.toFixed(3)}</td>}
+                  {isVisible('costInr') && <td className="px-3 py-2.5 font-mono text-xs text-gray-700 whitespace-nowrap">{formatINR(c.costInr, { decimals: 2 })}</td>}
                   {isVisible('recording') && (
                     <td className="px-3 py-2.5 min-w-[180px]">
                       <RecordingPlayer conversationId={c.id} recordingUrl={c.recordingUrl} />

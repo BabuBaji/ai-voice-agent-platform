@@ -492,38 +492,38 @@ export function SuperAdminCallsPage() {
         )}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         {loading ? (
-          <div className="flex justify-center py-16"><Loader2 className="h-7 w-7 animate-spin text-amber-500" /></div>
+          <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-amber-500" /></div>
         ) : rows.length === 0 ? (
-          <div className="text-center py-16 text-sm text-slate-400">No calls match these filters.</div>
+          <div className="text-center py-8 text-sm text-slate-400">No calls match these filters.</div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500">
+            <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
               <tr>
-                <th className="text-left px-4 py-3 font-medium">Started</th>
-                <th className="text-left px-4 py-3 font-medium">Tenant</th>
-                <th className="text-left px-4 py-3 font-medium">From → To</th>
-                <th className="text-left px-4 py-3 font-medium">Channel</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
-                <th className="text-right px-4 py-3 font-medium">Duration</th>
-                <th className="px-4 py-3" />
+                <th className="text-left px-3 py-1.5 font-medium">Started</th>
+                <th className="text-left px-3 py-1.5 font-medium">Tenant</th>
+                <th className="text-left px-3 py-1.5 font-medium">From → To</th>
+                <th className="text-left px-3 py-1.5 font-medium">Channel</th>
+                <th className="text-left px-3 py-1.5 font-medium">Status</th>
+                <th className="text-right px-3 py-1.5 font-medium">Duration</th>
+                <th className="px-3 py-1.5" />
               </tr>
             </thead>
             <tbody>
               {rows.map((c) => (
                 <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50/60">
-                  <td className="px-4 py-3 text-xs text-slate-700">{new Date(c.started_at).toLocaleString()}</td>
-                  <td className="px-4 py-3">
-                    <div className="text-xs text-slate-700">{c.tenant_name || '—'}</div>
-                    <div className="text-[10px] text-slate-400 font-mono">{c.tenant_id?.slice(0, 8)}</div>
+                  <td className="px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap">{new Date(c.started_at).toLocaleString()}</td>
+                  <td className="px-3 py-1.5">
+                    <div className="text-xs text-slate-700 leading-tight">{c.tenant_name || '—'}</div>
+                    <div className="text-[10px] text-slate-400 font-mono leading-tight">{c.tenant_id?.slice(0, 8)}</div>
                   </td>
-                  <td className="px-4 py-3 font-mono text-[11px] text-slate-600">{c.caller_number || '—'} → {c.called_number || '—'}</td>
-                  <td className="px-4 py-3"><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{c.channel}</span></td>
-                  <td className="px-4 py-3"><span className={`text-[10px] px-1.5 py-0.5 rounded-full ${STATUS_COLORS[c.status] || 'bg-slate-100 text-slate-600'}`}>{c.status}</span></td>
-                  <td className="px-4 py-3 text-right font-mono text-xs text-slate-600">{c.duration_seconds ? `${Math.round(c.duration_seconds)}s` : '—'}</td>
-                  <td className="px-4 py-3">
-                    <button onClick={() => navigate(`/super-admin/calls/${c.id}`)} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-medium">
+                  <td className="px-3 py-1.5 font-mono text-[11px] text-slate-600">{c.caller_number || '—'} → {c.called_number || '—'}</td>
+                  <td className="px-3 py-1.5"><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{c.channel}</span></td>
+                  <td className="px-3 py-1.5"><span className={`text-[10px] px-1.5 py-0.5 rounded-full ${STATUS_COLORS[c.status] || 'bg-slate-100 text-slate-600'}`}>{c.status}</span></td>
+                  <td className="px-3 py-1.5 text-right font-mono text-xs text-slate-600">{c.duration_seconds ? `${Math.round(c.duration_seconds)}s` : '—'}</td>
+                  <td className="px-3 py-1.5">
+                    <button onClick={() => navigate(`/super-admin/calls/${c.id}`)} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-medium">
                       <Eye className="h-3 w-3" /> View
                     </button>
                   </td>
@@ -532,7 +532,7 @@ export function SuperAdminCallsPage() {
             </tbody>
           </table>
         )}
-        <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
+        <div className="px-3 py-1.5 border-t border-slate-100 flex items-center justify-between">
           <p className="text-xs text-slate-500">Showing {rows.length} of {total}</p>
           <div className="flex items-center gap-2">
             <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="p-1.5 rounded border border-slate-200 disabled:opacity-40">

@@ -8,7 +8,7 @@ export function SuperAdminLayout() {
       <SuperAdminSidebar />
       <div className="ml-[230px]">
         <SuperAdminHeader />
-        <main className="px-6 py-6 animate-fade-in">
+        <main className="px-4 py-3 animate-fade-in">
           <Outlet />
         </main>
       </div>
