@@ -377,11 +377,17 @@ export async function callSarvamLLM(opts: {
           { role: 'system', content: opts.systemPrompt },
           ...cleaned,
         ],
-        // sarvam-m burns a chunk of tokens on <think>…</think>; voice replies
-        // are then capped to ~2 sentences post-stream by the caller, so 350
-        // is enough headroom for the think block + a short reply.
-        max_tokens: opts.maxTokens ?? 350,
+        // sarvam-m's <think>…</think> reasoning eats half the budget on
+        // anything non-trivial. Capping at 350-500 left zero room for the
+        // actual reply on long contexts (the model emitted only think and
+        // got truncated, so the caller heard say-again instead of an answer).
+        // 1500 gives think ~1000 tokens of room and still leaves 500 for the
+        // spoken reply, which is then trimmed to 90 words / 4 sentences.
+        // `reasoning_effort: low` reduces think length when the API supports
+        // it (no-op otherwise) so most replies come back well under the cap.
+        max_tokens: opts.maxTokens ?? 1500,
         temperature: opts.temperature ?? 0.6,
+        reasoning_effort: 'low',
       }),
     });
     if (!resp.ok) {

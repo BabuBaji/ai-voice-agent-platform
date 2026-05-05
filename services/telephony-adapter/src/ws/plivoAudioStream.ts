@@ -120,6 +120,158 @@ async function appendMessage(
  *   3. Anything fails → empty string (caller uses a "sorry, could you repeat"
  *      fallback).
  */
+/**
+ * Live Wikipedia grounding. Hits Wikipedia's public search + summary REST
+ * APIs (no key, free, public) and returns 1-2 short page extracts to inject
+ * into the LLM prompt. This is the workaround for "Sarvam-M makes up movie
+ * cast and confuses Animal with Brahmastra" — when the model would otherwise
+ * hallucinate, we hand it the actual encyclopedia entry first so it answers
+ * from facts, not guesses.
+ *
+ * Strategy:
+ *   - Build a short search query from the last user utterance + agent name.
+ *     Agent name (e.g. "2024 Bollywood movies") biases the search toward the
+ *     agent's domain when the user query is ambiguous ("tell me cast" → no
+ *     entity to look up; agent name gives a hint).
+ *   - Try the language's native Wikipedia first (hi.wikipedia for Hindi
+ *     calls, te.wikipedia for Telugu, etc.) — Indic Wikipedia titles match
+ *     better when the user's query is in Indic script. Fall through to
+ *     English Wikipedia which has far more Bollywood coverage.
+ *   - 800ms total budget. If Wikipedia is slow, we serve without grounding
+ *     rather than make every voice turn 1-2s slower.
+ */
+async function fetchWebContext(
+  agent: any,
+  history: Array<{ role: string; content: string }>,
+  language: string | null | undefined,
+): Promise<string> {
+  // Build query from last user utterance.
+  let query = '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'user') { query = history[i].content; break; }
+  }
+  query = (query || '').trim();
+  if (!query || query.length < 3) return '';
+
+  // Add the agent's domain hint so a vague follow-up like "uske director ka
+  // naam" still routes to the right page set.
+  const agentHint = (agent?.name || agent?.description || '').trim();
+  const enrichedQuery = agentHint ? `${query} ${agentHint}` : query;
+
+  // Race en.wikipedia AND the native-script wiki (when call is Indic).
+  // Native-wiki matters because Hindi queries like "मशीन लर्निंग" return 0
+  // hits on en.wikipedia (no transliteration), but match perfectly on
+  // hi.wikipedia. We launch both, take whichever returns valid hits first.
+  // Total budget 1500ms — most replies come back well under 800ms.
+  const langCode = (language || 'en').toLowerCase().slice(0, 2);
+  const hosts = ['en.wikipedia.org'];
+  if (langCode !== 'en' && /^(hi|te|ta|kn|ml|mr|bn|gu|pa|or|as|ur|ne)$/.test(langCode)) {
+    hosts.push(`${langCode}.wikipedia.org`);
+  }
+  const deadline = Date.now() + 1500;
+
+  async function fetchOneHost(host: string): Promise<string[] | null> {
+    try {
+      const searchUrl = `https://${host}/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(enrichedQuery)}&srlimit=2&utf8=1&origin=*`;
+      const c1 = new AbortController();
+      const t1 = setTimeout(() => c1.abort(), Math.max(200, deadline - Date.now()));
+      const sres = await fetch(searchUrl, { signal: c1.signal });
+      clearTimeout(t1);
+      if (!sres.ok) return null;
+      const sdata = await sres.json() as any;
+      const hits = (sdata?.query?.search || []).slice(0, 2);
+      if (hits.length === 0) return null;
+
+      const summaries = await Promise.all(hits.map(async (h: any) => {
+        try {
+          const title = encodeURIComponent(h.title);
+          const remaining = Math.max(150, deadline - Date.now());
+          if (remaining < 150) return null;
+          const c2 = new AbortController();
+          const t2 = setTimeout(() => c2.abort(), remaining);
+          const r = await fetch(`https://${host}/api/rest_v1/page/summary/${title}`, { signal: c2.signal });
+          clearTimeout(t2);
+          if (!r.ok) return null;
+          const d = await r.json() as any;
+          const extract = (d?.extract || '').toString().trim();
+          if (!extract) return null;
+          return `### ${d.title || h.title}\n${extract.slice(0, 600)}`;
+        } catch { return null; }
+      }));
+      const valid = summaries.filter((s): s is string => !!s);
+      return valid.length > 0 ? valid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Race: take the FIRST host that returns a non-null result, but wait for
+  // both to settle so we don't miss a hi.wikipedia hit just because en
+  // happened to error out faster. Promise.any resolves on first success.
+  try {
+    const results = await Promise.any(
+      hosts.map((h) => fetchOneHost(h).then((r) => r ? { host: h, items: r } : Promise.reject(new Error('no hits'))))
+    );
+    logger.info(
+      { host: results.host, query: query.slice(0, 60), hits: results.items.length },
+      'Stream: web context fetched',
+    );
+    return `\n\n## LIVE_WEB_CONTEXT (Wikipedia summaries — quote facts from here verbatim; never contradict these)\n${results.items.join('\n\n')}\n`;
+  } catch {
+    // All hosts returned null / errored. Degrade silently.
+    return '';
+  }
+}
+
+/**
+ * Best-effort RAG: query the knowledge-service /search with the latest user
+ * utterance and return a markdown block to prepend to the system prompt.
+ * Returns '' on any failure or if the agent has no knowledge_base_ids — the
+ * caller should still operate (the agent's system_prompt and the relaxed
+ * safety rule give the LLM enough to work with).
+ */
+async function fetchRagContext(
+  agent: any,
+  history: Array<{ role: string; content: string }>,
+): Promise<string> {
+  const kbIds: string[] = Array.isArray(agent?.knowledge_base_ids)
+    ? agent.knowledge_base_ids
+    : Array.isArray(agent?.knowledgeBaseIds)
+      ? agent.knowledgeBaseIds
+      : [];
+  if (kbIds.length === 0) return '';
+
+  // Use the last user utterance as the search query.
+  let query = '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'user') { query = history[i].content; break; }
+  }
+  if (!query.trim()) return '';
+
+  const url = process.env.KNOWLEDGE_SERVICE_URL || 'http://localhost:8003';
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500); // hard 1.5s budget — RAG must not block speech
+    const resp = await fetch(`${url}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, knowledge_base_ids: kbIds, top_k: 4 }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!resp.ok) return '';
+    const data = (await resp.json()) as { chunks?: Array<{ content?: string; score?: number }> };
+    const chunks = (data.chunks || []).filter((c) => c.content && c.content.trim());
+    if (chunks.length === 0) return '';
+    const joined = chunks.map((c, i) => `### Source ${i + 1}\n${c.content!.trim()}`).join('\n\n');
+    return `\n\n## RETRIEVED_CONTEXT (relevant excerpts from your knowledge base — quote facts from here when applicable)\n${joined}\n`;
+  } catch {
+    // Timeout / network / index error — degrade silently. The expanded
+    // system_prompt already carries the most-needed facts inline.
+    return '';
+  }
+}
+
 async function callLLM(
   agent: any,
   history: Array<{ role: string; content: string }>,
@@ -128,23 +280,59 @@ async function callLLM(
   language?: string | null,
 ): Promise<string> {
   const basePrompt = agent.system_prompt || 'helpful customer conversation';
-  const systemPrompt = buildVoiceAgentPrompt(basePrompt, agent, {
+
+  // Grounding strategy: every turn we run BOTH a Wikipedia lookup (live web
+  // facts, ~600ms typical) and — for English calls — the in-house RAG. They
+  // run in parallel so the slowest of the two sets the floor. For Indic
+  // calls we skip RAG (the system_prompt has the inline facts and Sarvam
+  // can't handle huge context anyway), but we DO keep Wikipedia: that's
+  // what stops the model from inventing cast/director when the caller asks
+  // about a specific film.
+  const isIndic = !!(language && !/^en/i.test(language) && sarvamCanHandle(language));
+  const [webContext, ragContext] = await Promise.all([
+    fetchWebContext(agent, history, language || null),
+    isIndic ? Promise.resolve('') : fetchRagContext(agent, history),
+  ]);
+  const groundingContext = (webContext || '') + (ragContext || '');
+  const systemPrompt = buildVoiceAgentPrompt(basePrompt + groundingContext, agent, {
     customerName,
     callType,
     language: language || undefined,
   });
 
-  // Indic path: call Sarvam directly.
-  const isIndic = language && !/^en/i.test(language) && sarvamCanHandle(language);
+  // Indic path: call Sarvam directly. Two-attempt strategy — full history
+  // first, then trimmed history if Sarvam returned null (likely context-
+  // length blowout, sarvam-m's reply slot got eaten by <think>).
   if (isIndic && sarvamConfigured()) {
-    const sarvamReply = await callSarvamLLM({
+    let sarvamReply = await callSarvamLLM({
       systemPrompt,
       messages: history,
+      maxTokens: 500,
       temperature: parseFloat(agent.temperature) || 0.7,
     });
+    if (!sarvamReply && history.length > 6) {
+      // Retry with last 6 turns only — keeps the dialogue tail that the
+      // model needs to answer the latest user turn, drops earlier history.
+      sarvamReply = await callSarvamLLM({
+        systemPrompt,
+        messages: history.slice(-6),
+        maxTokens: 500,
+        temperature: parseFloat(agent.temperature) || 0.7,
+      });
+    }
     if (sarvamReply) return sarvamReply;
-    // Sarvam failed for some reason — fall through to ai-runtime so we at
-    // least attempt the configured provider before giving up.
+
+    // Both Sarvam attempts failed. We do NOT fall through to ai-runtime
+    // here because that path ends in mock-English when Gemini is 429'd —
+    // and an English template on a Hindi/Telugu call is the worst possible
+    // outcome. Instead emit a native "could you say that again?" so the
+    // caller stays in their own language.
+    logger.warn(
+      { language, historyLen: history.length },
+      'callLLM: Sarvam returned null twice on Indic call — emitting native say-again',
+    );
+    const lang = String(language).toLowerCase();
+    return SAY_AGAIN[lang] || SAY_AGAIN[lang.slice(0, 2)] || 'Sorry, could you say that again?';
   }
 
   try {
@@ -173,12 +361,55 @@ async function callLLM(
       });
       if (fallback) return fallback;
     }
-    return (data.reply || '').trim();
+    const reply = (data.reply || '').trim();
+
+    // Language-mismatch guard: if the call is in an Indic language but the
+    // reply has zero Indic-script characters, the LLM (mock or otherwise)
+    // produced English on a Hindi/Telugu/Tamil call. Replace with a polite
+    // "say-that-again" in the call's language so the caller doesn't hear
+    // canned English on a Hindi call. We've already exhausted Sarvam in the
+    // chain above, so this is the last line of defence.
+    if (isIndic && reply && !hasIndicScript(reply)) {
+      logger.warn(
+        { language, replyPreview: reply.slice(0, 80) },
+        'callLLM: Latin-only reply on Indic call — replacing with native say-again',
+      );
+      return SAY_AGAIN[String(language).toLowerCase()] || SAY_AGAIN[String(language).slice(0, 2).toLowerCase()] || reply;
+    }
+    return reply;
   } catch (err: any) {
     logger.warn({ err: err.message }, 'callLLM failed in stream handler');
     return '';
   }
 }
+
+/** True when the text contains any Devanagari / Telugu / Tamil / Kannada /
+ *  Malayalam / Bengali / Gujarati / Gurmukhi / Oriya code-point. Used to spot
+ *  an English-only reply on an Indic-language call. */
+function hasIndicScript(text: string): boolean {
+  return /[ऀ-ॿ਀-੿઀-૿଀-୿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]/.test(text);
+}
+
+const SAY_AGAIN: Record<string, string> = {
+  'hi-IN': 'माफ़ कीजिए, क्या आप दोबारा बोल सकते हैं?',
+  hi: 'माफ़ कीजिए, क्या आप दोबारा बोल सकते हैं?',
+  'te-IN': 'క్షమించండి, మీరు మళ్ళీ చెప్పగలరా?',
+  te: 'క్షమించండి, మీరు మళ్ళీ చెప్పగలరా?',
+  'ta-IN': 'மன்னிக்கவும், மீண்டும் சொல்ல முடியுமா?',
+  ta: 'மன்னிக்கவும், மீண்டும் சொல்ல முடியுமா?',
+  'kn-IN': 'ಕ್ಷಮಿಸಿ, ಮತ್ತೊಮ್ಮೆ ಹೇಳುವಿರಾ?',
+  kn: 'ಕ್ಷಮಿಸಿ, ಮತ್ತೊಮ್ಮೆ ಹೇಳುವಿರಾ?',
+  'ml-IN': 'ക്ഷമിക്കണം, ഒന്ന് കൂടി പറയാമോ?',
+  ml: 'ക്ഷമിക്കണം, ഒന്ന് കൂടി പറയാമോ?',
+  'mr-IN': 'माफ करा, परत बोलाल का?',
+  mr: 'माफ करा, परत बोलाल का?',
+  'bn-IN': 'দুঃখিত, আবার বলবেন?',
+  bn: 'দুঃখিত, আবার বলবেন?',
+  'gu-IN': 'માફ કરશો, ફરી કહેશો?',
+  gu: 'માફ કરશો, ફરી કહેશો?',
+  'pa-IN': 'ਮੁਆਫ਼ ਕਰਨਾ, ਦੁਬਾਰਾ ਕਹੋਗੇ?',
+  pa: 'ਮੁਆਫ਼ ਕਰਨਾ, ਦੁਬਾਰਾ ਕਹੋਗੇ?',
+};
 
 /** Deepgram Aura TTS → base64 mulaw 8000hz bytes (ready to send as Plivo playAudio). */
 async function ttsDeepgramMulaw(text: string, voiceIdRaw?: string): Promise<string | null> {
@@ -256,6 +487,11 @@ interface StreamSession {
   // sends Plivo a clearAudio event to flush whatever's still buffered.
   isAgentSpeaking: boolean;
   bargeInRequested: boolean;
+  // Earliest wall-clock time barge-in is allowed for the current agent reply.
+  // Set when playText() starts streaming. Suppresses barge-in for the first
+  // ~1.5s of every agent reply so trivial "హలో" / "yes" interjections don't
+  // chop the agent off after only a few hundred bytes of audio.
+  bargeInAllowedAt: number;
   // End-of-call latch: once the caller says goodbye / thank-you-bye / cut
   // the call, we set this and stop firing the LLM on any further utterances.
   // The caller still controls the actual hangup; we just stop talking.
@@ -303,6 +539,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       agentMulawEvents: [],
       isAgentSpeaking: false,
       bargeInRequested: false,
+      bargeInAllowedAt: 0,
       callEnded: false,
     };
 
@@ -379,13 +616,21 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
 
   const lang = firstNonEmpty(session.agent.voice_config?.language, session.agent.voiceConfig?.language) || 'en-IN';
   session.language = lang;
-  // Backend selection priority for non-English/Indic languages:
-  //   1) Sarvam    — best Indic quality; native neural voices for te/ta/hi/kn/ml/mr/bn/gu/pa
-  //   2) Azure     — fallback, also covers Indic
-  //   3) Deepgram  — default for English and other Deepgram-native languages
+  // Backend selection priority:
+  //   - English / non-Indic           → Deepgram (Aura is English-trained)
+  //   - Indic (hi/te/ta/kn/ml/mr/bn/gu/pa/or/as) → Sarvam if configured
+  //                                                 (bulbul:v2 has native Indic voices,
+  //                                                 Aura sounds English-accented in Hindi)
+  //   - Indic without Sarvam          → Azure if configured, else Deepgram fallback
+  // We do NOT defer to Deepgram just because it nominally supports Hindi —
+  // its Hindi TTS is markedly worse than Sarvam's, and that's the symptom
+  // callers complain about ("aapka accent achha nahi hai").
+  const isIndicLang = sarvamCanHandle(lang) && !/^en/i.test(lang);
   let stt: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
   let tts: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
-  if (!deepgramCanHandle(lang)) {
+  if (isIndicLang && sarvamConfigured()) {
+    stt = 'sarvam'; tts = 'sarvam';
+  } else if (!deepgramCanHandle(lang)) {
     if (sarvamConfigured() && sarvamCanHandle(lang)) {
       stt = 'sarvam'; tts = 'sarvam';
     } else if (azureSpeechConfigured()) {
@@ -593,31 +838,55 @@ async function connectDeepgram(session: StreamSession, language: string): Promis
 // the agent re-explain what it just said. We still persist these to the
 // transcript for fidelity, but skip the LLM call.
 const FILLER_PATTERNS: RegExp[] = [
-  // English
-  /^(ok|okay|kk?|yes|yeah|yep|yup|right|sure|alright|fine|got it|i see|uh|uh-huh|mm|mmhmm|hmm|hm|nope|no problem|cool|nice|great|true|correct)\b/i,
-  // Telugu
-  /^(సరే|ఓకే|అవును|హా|ఉమ్|ఆ|హ్మ్|హ్మ|ఉ|హుం|హ|ఎస్|ఓ|హాయ్)/,
-  // Hindi
-  /^(हाँ|हां|ठीक|ठीक है|अच्छा|अच्छी|हम्म|जी|जी हाँ|हम|हू)/,
+  // English — acks + continuation cues ("go on", "tell me", "continue")
+  /^(ok|okay|kk?|yes|yeah|yep|yup|right|sure|alright|fine|got it|i see|uh|uh-huh|mm|mmhmm|hmm|hm|nope|no problem|cool|nice|great|true|correct|hello|hi|hey|continue|go on|tell me|please|carry on|keep going)\b/i,
+  // Telugu — adds హలో (hello), చెప్పు/చెప్పండి (tell), కంటిన్యూ (continue), మన ఇష్టం (as you wish)
+  /^(సరే|ఓకే|అవును|హా|ఉమ్|ఆ|హ్మ్|హ్మ|ఉ|హుం|హ|ఎస్|ఓ|హాయ్|హలో|హలో హలో|చెప్పు|చెప్పండి|చెప్పగలరా|కంటిన్యూ|అలాగే|మన ఇష్టం)/,
+  // Hindi — adds हैलो / हलो (hello), बोलो/बताओ (tell), जारी रखो (continue)
+  /^(हाँ|हां|ठीक|ठीक है|अच्छा|अच्छी|हम्म|जी|जी हाँ|हम|हू|हैलो|हलो|बोलो|बताओ|जारी रखो|कंटिन्यू)/,
   // Tamil
-  /^(சரி|ஆமா|ஆம்|ம்|ஓகே|ஓகே சரி|ஹா)/,
+  /^(சரி|ஆமா|ஆம்|ம்|ஓகே|ஓகே சரி|ஹா|ஹலோ|சொல்லு|தொடரு)/,
   // Kannada
-  /^(ಸರಿ|ಹೌದು|ಹಾಂ|ಆಯ್ತು|ಹಾ)/,
+  /^(ಸರಿ|ಹೌದು|ಹಾಂ|ಆಯ್ತು|ಹಾ|ಹಲೋ|ಹೇಳಿ|ಮುಂದುವರಿಸಿ)/,
   // Malayalam
-  /^(ശരി|അതെ|ഉം|ഹം)/,
+  /^(ശരി|അതെ|ഉം|ഹം|ഹലോ|പറയൂ|തുടരൂ)/,
   // Marathi
-  /^(ठीक|बरं|हो|बरोबर)/,
+  /^(ठीक|बरं|हो|बरोबर|हॅलो|बोला|पुढे)/,
   // Bengali / Gujarati / Punjabi (basic acks)
-  /^(হ্যাঁ|ঠিক|હા|ઠીક|ਹਾਂ|ਠੀਕ)/,
+  /^(হ্যাঁ|ঠিক|হ্যালো|બોલો|હા|ઠીક|હેલો|ਹਾਂ|ਠੀਕ|ਹੈਲੋ)/,
 ];
 
 /**
- * Voice-mode brevity guard: keep at most 2 sentences AND ≤ 45 words. If the
- * reply contains a question, prefer to keep that question even if it's the
- * 3rd sentence — callers should hear "answer + one question", not five
- * paragraphs of encyclopaedia followed by a question that gets cut.
+ * Stop / interrupt keywords. If a short utterance contains one of these the
+ * caller really IS trying to interrupt the agent — let the barge-in through
+ * even if it's only 1-2 words. Without this list the substantive-utterance
+ * gate below would swallow legitimate "stop" / "ఆగండి" requests.
  */
-export function trimReplyForVoice(text: string, maxSentences = 2, maxWords = 45): string {
+const STOP_KEYWORDS: RegExp[] = [
+  /\b(stop|wait|hold on|pause|shut up|enough|quiet)\b/i,
+  /(ఆగు|ఆగండి|ఆపు|ఆపండి|చాలు)/, // Telugu: stop/enough
+  /(रुको|रुकिए|रोको|रोकिए|बंद|बस|चुप)/,      // Hindi
+  /(நிறுத்து|போதும்)/,              // Tamil
+  /(ನಿಲ್ಲಿಸಿ|ಸಾಕು)/,                // Kannada
+  /(നിർത്തൂ|മതി)/,                  // Malayalam
+  /(थांबा|पुरे)/,                    // Marathi
+];
+
+/**
+ * Voice-mode brevity guard: keep at most 4 sentences AND ≤ 90 words. The
+ * earlier 2/45 cap made content agents (movies, courses, product specs)
+ * sound truncated mid-thought — caller would hear the opening of a story
+ * and the line just stopped. 4/90 is roughly 30 seconds of speech, enough
+ * to deliver a meaningful answer (cast + plot + director, or steps in a
+ * how-to) but not so long that a sales/qualification agent rambles. If a
+ * specific agent needs to be more terse, the prompt itself should ask for
+ * it — this cap is a hard ceiling, not a floor.
+ *
+ * If the reply contains a question, prefer to keep that question even if
+ * it's the 5th sentence — callers should hear "answer + one question", not
+ * five paragraphs of encyclopaedia followed by a question that gets cut.
+ */
+export function trimReplyForVoice(text: string, maxSentences = 4, maxWords = 90): string {
   const trimmed = (text || '').trim();
   if (!trimmed) return trimmed;
 
@@ -647,6 +916,98 @@ export function trimReplyForVoice(text: string, maxSentences = 2, maxWords = 45)
     if (!/[.!?।॥]$/u.test(out)) out += '.';
   }
   return out.trim();
+}
+
+/**
+ * Lightweight token-set similarity. Lowercases, strips punctuation/diacritics
+ * for the latin parts only, splits into ≥2-char tokens. Returns Jaccard ratio
+ * of the token sets — high score = the two replies say essentially the same
+ * thing. Cross-script tokens (Devanagari/Telugu/etc) are compared as-is so
+ * we still detect repeats in Indic-script answers.
+ */
+function tokenSimilarity(a: string, b: string): number {
+  const toks = (s: string): Set<string> => {
+    const cleaned = (s || '')
+      .toLowerCase()
+      .replace(/[.,!?;:।॥"'()\[\]{}*]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const set = new Set<string>();
+    for (const t of cleaned.split(' ')) {
+      if (t.length >= 2) set.add(t);
+    }
+    return set;
+  };
+  const A = toks(a);
+  const B = toks(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  const union = A.size + B.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+const NO_REPEAT_FOLLOWUP: Record<string, string> = {
+  // Map common language tags → "anything else?" phrased natively.
+  en: 'Anything else I can help with?',
+  'en-IN': 'Anything else I can help with?',
+  'en-US': 'Anything else I can help with?',
+  hi: 'क्या और कुछ जानना चाहेंगे?',
+  'hi-IN': 'क्या और कुछ जानना चाहेंगे?',
+  te: 'ఇంకేమైనా అడగాలనుకుంటున్నారా?',
+  'te-IN': 'ఇంకేమైనా అడగాలనుకుంటున్నారా?',
+  ta: 'வேறு ஏதாவது தெரிந்துகொள்ள வேண்டுமா?',
+  'ta-IN': 'வேறு ஏதாவது தெரிந்துகொள்ள வேண்டுமா?',
+  kn: 'ಇನ್ನೇನಾದರೂ ಕೇಳಬೇಕೆ?',
+  'kn-IN': 'ಇನ್ನೇನಾದರೂ ಕೇಳಬೇಕೆ?',
+  ml: 'വേറെ എന്തെങ്കിലും അറിയണോ?',
+  'ml-IN': 'വേറെ എന്തെങ്കിലും അറിയണോ?',
+  mr: 'आणखी काही विचारायचंय का?',
+  'mr-IN': 'आणखी काही विचारायचंय का?',
+  bn: 'আর কিছু জানতে চান?',
+  'bn-IN': 'আর কিছু জানতে চান?',
+  gu: 'બીજું કંઈ પૂછવું છે?',
+  'gu-IN': 'બીજું કંઈ પૂછવું છે?',
+  pa: 'ਹੋਰ ਕੁਝ ਪੁੱਛਣਾ ਚਾਹੁੰਦੇ ਹੋ?',
+  'pa-IN': 'ਹੋਰ ਕੁਝ ਪੁੱਛਣਾ ਚਾਹੁੰਦੇ ਹੋ?',
+};
+
+/**
+ * If `candidate` is too similar to any of the last few assistant turns,
+ * replace it with a short "anything else?" close. Compares against the most
+ * recent 3 assistant turns — that's enough to catch the typical repeat
+ * pattern (caller says "thanks", LLM re-emits its previous fact-dump).
+ *
+ * Threshold 0.55 was picked by eyeballing the live Money-Heist transcript
+ * where verbatim repeats hit ~0.85+ Jaccard and lightly-rephrased repeats
+ * sat at 0.55-0.7. New-content replies score <0.4.
+ */
+function dedupeReply(
+  candidate: string,
+  history: Array<{ role: string; content: string }>,
+  language: string,
+): string {
+  const cand = (candidate || '').trim();
+  if (!cand) return cand;
+  const recentAssistant: string[] = [];
+  for (let i = history.length - 1; i >= 0 && recentAssistant.length < 3; i--) {
+    if (history[i].role === 'assistant') recentAssistant.push(history[i].content || '');
+  }
+  for (const prev of recentAssistant) {
+    const sim = tokenSimilarity(cand, prev);
+    if (sim >= 0.55) {
+      const lang = (language || 'en').toLowerCase();
+      const followUp = NO_REPEAT_FOLLOWUP[lang]
+        || NO_REPEAT_FOLLOWUP[lang.slice(0, 2)]
+        || NO_REPEAT_FOLLOWUP.en;
+      logger.info(
+        { sim: sim.toFixed(2), candidatePreview: cand.slice(0, 80), prevPreview: prev.slice(0, 80) },
+        'Reply: near-duplicate detected — replacing with follow-up',
+      );
+      return followUp;
+    }
+  }
+  return cand;
 }
 
 // End-of-call signals across the languages we support. Matched against the
@@ -860,12 +1221,42 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   // BARGE-IN: caller is speaking substantively while the agent is mid-reply.
   // Flag the playback loop to stop streaming TTS chunks and flush Plivo's
   // queue so the agent shuts up immediately and listens to what was said.
+  //
+  // Gate it on three conditions to stop trivial echoes / continuation-cues
+  // from chopping every agent reply at 5-30% completion:
+  //   1. Grace period: ignore barge-in for the first ~1.5s of agent speech.
+  //      Short interjections at the start ("హలో") are usually echo or the
+  //      caller acknowledging the start, not a real interruption.
+  //   2. Substantive utterance: ≥4 words OR ≥25 chars OR contains a stop
+  //      keyword. Below that the utterance is treated as a back-channel
+  //      and the agent keeps speaking. The transcript still records it.
+  //   3. Already past the agent's reply tail: if 80%+ of the audio has
+  //      been sent, just let it finish — interrupting now only saves
+  //      <1s and leaves the caller hearing a half-cut sentence.
   if (session.isAgentSpeaking) {
-    session.bargeInRequested = true;
-    logger.info(
-      { callSid: session.callSid, userText: text.slice(0, 60) },
-      'Stream: barge-in requested — caller spoke during agent reply',
-    );
+    const isStop = STOP_KEYWORDS.some((re) => re.test(text));
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+    const charCount = text.length;
+    const substantive = isStop || wordCount >= 4 || charCount >= 25;
+    const inGrace = Date.now() < session.bargeInAllowedAt;
+
+    if (!substantive) {
+      logger.info(
+        { callSid: session.callSid, userText: text.slice(0, 60), wordCount, charCount },
+        'Stream: barge-in suppressed — utterance too short to interrupt',
+      );
+    } else if (inGrace && !isStop) {
+      logger.info(
+        { callSid: session.callSid, userText: text.slice(0, 60), msUntilAllowed: session.bargeInAllowedAt - Date.now() },
+        'Stream: barge-in suppressed — within grace period at start of agent reply',
+      );
+    } else {
+      session.bargeInRequested = true;
+      logger.info(
+        { callSid: session.callSid, userText: text.slice(0, 60), wordCount, charCount, isStop },
+        'Stream: barge-in requested — caller spoke during agent reply',
+      );
+    }
   }
 
   logger.info({ callSid: session.callSid, userText: text.slice(0, 100), inFlight: session.inFlightReply }, 'Stream: user utterance');
@@ -920,7 +1311,14 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
     // (used for Indic calls) routinely ignores the prompt's "ONE or TWO short
     // sentences" rule and emits 5-paragraph encyclopedia entries. We trim
     // post-LLM so the rule is enforced regardless of which provider replied.
-    const spoken = trimReplyForVoice(cleaned);
+    const trimmed = trimReplyForVoice(cleaned);
+
+    // Hard anti-repetition guard: if the LLM is about to repeat content it
+    // already said in the previous 3 assistant turns, replace with a short
+    // "anything else?" close. Sarvam-M ignores the NO-REPEAT prompt rule and
+    // happily re-emits "5 sezns 50 epis 33 hours…" 4 turns in a row when the
+    // caller is just acking. Per-turn deterministic check catches it.
+    const spoken = dedupeReply(trimmed, session.history, session.language);
 
     session.history.push({ role: 'assistant', content: spoken });
     if (session.conversationId) {
@@ -989,8 +1387,10 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   // and flush Plivo's queue. Caller hears at most ~150ms of overrun.
   const CHUNK_BYTES = 800;        // 100ms of mulaw 8kHz
   const SEND_INTERVAL_MS = 90;    // slightly ahead of playback rate
+  const BARGE_IN_GRACE_MS = 1500; // protect first 1.5s from trivial interjections
   session.isAgentSpeaking = true;
   session.bargeInRequested = false;
+  session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
   let sentBytes = 0;
   try {
     for (let off = 0; off < fullBytes.length; off += CHUNK_BYTES) {
@@ -1405,10 +1805,14 @@ async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLan
   const oldLang = session.language;
   if (oldLang === newLang || session.closed) return;
 
-  // Pick backends for the new language using the same priority as onStart.
+  // Pick backends for the new language using the same priority as onStart:
+  // any Indic language → Sarvam (native accent), else Deepgram for English.
+  const isIndicLang = sarvamCanHandle(newLang) && !/^en/i.test(newLang);
   let stt: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
   let tts: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
-  if (!deepgramCanHandle(newLang)) {
+  if (isIndicLang && sarvamConfigured()) {
+    stt = 'sarvam'; tts = 'sarvam';
+  } else if (!deepgramCanHandle(newLang)) {
     if (sarvamConfigured() && sarvamCanHandle(newLang)) {
       stt = 'sarvam'; tts = 'sarvam';
     } else if (azureSpeechConfigured()) {
