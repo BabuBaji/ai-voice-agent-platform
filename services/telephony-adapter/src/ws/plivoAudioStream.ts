@@ -121,6 +121,96 @@ async function appendMessage(
  *      fallback).
  */
 /**
+ * Detect when the caller is asking about something that needs *current* data
+ * (trending tools, today's news, latest releases, stock/sports/weather, etc.).
+ * These queries are wasted on Wikipedia (encyclopedia, not a news feed) so we
+ * route them through Tavily instead. Pattern matches both English and Indic
+ * keywords for "latest / trending / today / news / current / recent".
+ */
+function needsLiveSearch(query: string): boolean {
+  if (!query || query.length < 3) return false;
+  const q = query.toLowerCase();
+  return (
+    /\b(latest|trending|today|news|current|recent|now|breaking|live|2024|2025|2026|this week|this month|this year)\b/i.test(q) ||
+    /(अभी|ताज़ा|ताजा|आज|इस साल|इस महीने|इस हफ्ते|हाल ही|नवीनतम|खबर)/.test(query) ||
+    /(ఇప్పుడు|నేడు|తాజా|ఈ సంవత్సరం|ఈ నెల|ఈ వారం|వార్త)/.test(query) ||
+    /(இப்போது|இன்று|சமீபத்திய|இந்த ஆண்டு|இந்த மாதம்|செய்தி)/.test(query) ||
+    /(ಈಗ|ಇಂದು|ಇತ್ತೀಚಿನ|ಈ ವರ್ಷ|ಸುದ್ದಿ)/.test(query)
+  );
+}
+
+/**
+ * Live web-search grounding via Tavily (https://tavily.com). Tavily is built
+ * for AI/agent grounding — returns a synthesized answer plus the underlying
+ * source snippets. We only fire this when the query has "live data" keywords
+ * (see needsLiveSearch) — Wikipedia handles encyclopedia-style questions
+ * faster and cheaper, and Tavily's free tier is 1000 calls/month so we
+ * shouldn't blast it on every "what's the cast of Animal" turn.
+ *
+ * No-op when TAVILY_API_KEY is unset, so this is safe to ship without the
+ * key and have it activate the moment the env var lands.
+ */
+async function fetchLiveSearchContext(
+  history: Array<{ role: string; content: string }>,
+): Promise<string> {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return '';
+  let query = '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'user') { query = history[i].content; break; }
+  }
+  query = (query || '').trim();
+  if (!needsLiveSearch(query)) return '';
+
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2000); // hard 2s budget
+    const resp = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        query,
+        search_depth: 'basic',     // ~1-2s, vs "advanced" which is 3-5s
+        max_results: 3,
+        include_answer: true,       // Tavily synthesises a one-paragraph answer
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, 'Tavily search non-OK');
+      return '';
+    }
+    const data = await resp.json() as any;
+    const answer = (data?.answer || '').toString().trim();
+    const results = (data?.results || []).slice(0, 3) as Array<{ title?: string; content?: string; url?: string }>;
+    if (!answer && results.length === 0) return '';
+
+    const parts: string[] = [];
+    if (answer) parts.push(`### Synthesised answer\n${answer.slice(0, 600)}`);
+    for (const r of results) {
+      const title = (r.title || '').toString().trim();
+      const content = (r.content || '').toString().trim();
+      if (!content) continue;
+      parts.push(`### ${title}\n${content.slice(0, 400)}`);
+    }
+    if (parts.length === 0) return '';
+
+    logger.info(
+      { query: query.slice(0, 60), resultCount: results.length, hasAnswer: !!answer },
+      'Stream: live web-search context fetched',
+    );
+    return `\n\n## LIVE_WEB_SEARCH (current/trending info from Tavily — quote these as fresh facts; supersedes any older info you may have)\n${parts.join('\n\n')}\n`;
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Tavily search failed');
+    return '';
+  }
+}
+
+/**
  * Live Wikipedia grounding. Hits Wikipedia's public search + summary REST
  * APIs (no key, free, public) and returns 1-2 short page extracts to inject
  * into the LLM prompt. This is the workaround for "Sarvam-M makes up movie
@@ -281,19 +371,23 @@ async function callLLM(
 ): Promise<string> {
   const basePrompt = agent.system_prompt || 'helpful customer conversation';
 
-  // Grounding strategy: every turn we run BOTH a Wikipedia lookup (live web
-  // facts, ~600ms typical) and — for English calls — the in-house RAG. They
-  // run in parallel so the slowest of the two sets the floor. For Indic
-  // calls we skip RAG (the system_prompt has the inline facts and Sarvam
-  // can't handle huge context anyway), but we DO keep Wikipedia: that's
-  // what stops the model from inventing cast/director when the caller asks
-  // about a specific film.
+  // Grounding strategy — three parallel sources, slowest sets the floor:
+  //   1. Wikipedia (always, both langs) — encyclopedia facts: cast, plot,
+  //      director, dates. ~800ms typical, public, no key.
+  //   2. Tavily live search (only for "trending/today/news/latest" queries)
+  //      — current data Wikipedia can't have: today's news, trending tools,
+  //      stock prices, latest releases. ~1.5-2s. Conditional so we don't
+  //      burn the 1000/month free quota on plain "tell me about Animal".
+  //   3. Internal RAG (English calls only) — anything we've ingested into
+  //      the agent's knowledge base. Skipped for Indic to keep Sarvam-M's
+  //      context small.
   const isIndic = !!(language && !/^en/i.test(language) && sarvamCanHandle(language));
-  const [webContext, ragContext] = await Promise.all([
+  const [webContext, liveContext, ragContext] = await Promise.all([
     fetchWebContext(agent, history, language || null),
+    fetchLiveSearchContext(history),
     isIndic ? Promise.resolve('') : fetchRagContext(agent, history),
   ]);
-  const groundingContext = (webContext || '') + (ragContext || '');
+  const groundingContext = (liveContext || '') + (webContext || '') + (ragContext || '');
   const systemPrompt = buildVoiceAgentPrompt(basePrompt + groundingContext, agent, {
     customerName,
     callType,
