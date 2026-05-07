@@ -4,6 +4,8 @@ import helmet from 'helmet';
 import { healthRouter } from './routes/health';
 import { callRouter } from './routes/calls';
 import { phoneNumberRouter } from './routes/phoneNumbers';
+import { kycWizardRouter } from './routes/kycWizard';
+import { kycVoiceWebhookRouter } from './routes/kycVoiceWebhook';
 import { webhookRouter } from './routes/webhooks';
 import { audioRouter } from './routes/audio';
 import { recordingsRouter } from './routes/recordings';
@@ -31,6 +33,9 @@ app.use(requestLogger);
 app.use('/health', healthRouter);
 
 // Webhook routes (no auth - verified by provider signature)
+// Mount KYC voice-OTP first so its /kyc-otp-call/* paths take precedence over
+// any catch-alls in the larger webhookRouter.
+app.use('/webhooks', kycVoiceWebhookRouter);
 app.use('/webhooks', webhookRouter);
 
 // Audio cache — Twilio/Plivo fetch generated MP3s from here during calls
@@ -40,6 +45,7 @@ app.use('/recordings', recordingsRouter);
 
 // API routes
 app.use('/api/v1/calls', callRouter);
+app.use('/api/v1/phone-numbers/kyc-wizard', kycWizardRouter);
 app.use('/api/v1/phone-numbers', phoneNumberRouter);
 app.use('/api/v1/campaigns', campaignRouter);
 

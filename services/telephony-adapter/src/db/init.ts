@@ -99,6 +99,87 @@ export async function initDatabase(pool: Pool): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_campaign_targets_campaign ON campaign_targets(campaign_id);
       CREATE INDEX IF NOT EXISTS idx_campaign_targets_status ON campaign_targets(campaign_id, status);
+
+      CREATE TABLE IF NOT EXISTS kyc_submissions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        provider VARCHAR(20) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        business_name VARCHAR(200) NOT NULL,
+        owner_name VARCHAR(200) NOT NULL,
+        owner_email VARCHAR(200),
+        owner_phone VARCHAR(20),
+        pan VARCHAR(20),
+        aadhaar_last4 VARCHAR(4),
+        gstin VARCHAR(20),
+        address_line1 VARCHAR(255) NOT NULL,
+        address_line2 VARCHAR(255),
+        city VARCHAR(100) NOT NULL,
+        state VARCHAR(100) NOT NULL,
+        postal_code VARCHAR(20) NOT NULL,
+        country VARCHAR(2) NOT NULL DEFAULT 'IN',
+        use_case TEXT NOT NULL,
+        provider_end_user_id VARCHAR(255),
+        rejection_reason TEXT,
+        verified_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (tenant_id, provider)
+      );
+      CREATE INDEX IF NOT EXISTS idx_kyc_tenant ON kyc_submissions(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_kyc_status ON kyc_submissions(status);
+
+      CREATE TABLE IF NOT EXISTS kyc_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        provider VARCHAR(20) NOT NULL DEFAULT 'plivo',
+        number VARCHAR(20) NOT NULL,
+        capabilities JSONB DEFAULT '["voice"]'::jsonb,
+        monthly_rate NUMERIC,
+        current_step VARCHAR(20) NOT NULL DEFAULT 'register',
+        full_name VARCHAR(200),
+        email VARCHAR(200),
+        mobile VARCHAR(20),
+        email_otp_hash VARCHAR(128),
+        email_otp_expires TIMESTAMPTZ,
+        email_verified BOOLEAN DEFAULT FALSE,
+        mobile_otp_hash VARCHAR(128),
+        mobile_otp_expires TIMESTAMPTZ,
+        mobile_verified BOOLEAN DEFAULT FALSE,
+        otp_attempts INTEGER NOT NULL DEFAULT 0,
+        pan VARCHAR(10),
+        pan_holder_name VARCHAR(200),
+        pan_verified BOOLEAN DEFAULT FALSE,
+        aadhaar_last4 VARCHAR(4),
+        aadhaar_otp_hash VARCHAR(128),
+        aadhaar_otp_expires TIMESTAMPTZ,
+        aadhaar_verified BOOLEAN DEFAULT FALSE,
+        gstin VARCHAR(20),
+        gstin_verified BOOLEAN DEFAULT FALSE,
+        gstin_skipped BOOLEAN DEFAULT FALSE,
+        provider_end_user_id VARCHAR(255),
+        purchased_phone_id UUID,
+        status VARCHAR(20) NOT NULL DEFAULT 'in_progress',
+        expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 minutes'),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_kyc_sessions_tenant ON kyc_sessions(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_kyc_sessions_number ON kyc_sessions(number);
+
+      -- Sandbox/synthetic flag added in a follow-up — guard with IF NOT EXISTS
+      -- so existing rows from earlier runs don't break the migration.
+      ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS is_sandbox BOOLEAN NOT NULL DEFAULT FALSE;
+
+      -- Plaintext OTP slots used by the voice-call OTP path: when we place an
+      -- outbound call, the answer-URL webhook reads the OTP from here and
+      -- renders Plivo XML <Speak> to TTS the digits to the caller. Cleared
+      -- after the webhook serves them. Hashed copy in *_otp_hash is the
+      -- authoritative verification record.
+      ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS mobile_otp_plain VARCHAR(8);
+      ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS aadhaar_otp_plain VARCHAR(8);
+      ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS mobile_call_uuid VARCHAR(64);
+      ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS aadhaar_call_uuid VARCHAR(64);
     `);
     logger.info('Telephony adapter database tables initialized');
   } finally {

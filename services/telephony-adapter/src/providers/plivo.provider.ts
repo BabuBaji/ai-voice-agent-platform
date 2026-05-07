@@ -188,6 +188,84 @@ export class PlivoProvider implements TelephonyProvider {
     }
   }
 
+  /**
+   * Register a customer (KYC payload) with Plivo as an End User. The returned
+   * end_user_id is later attached to the rented number so Plivo's compliance
+   * trail links the number to a verified business identity.
+   * Plivo API: POST /v1/Account/{auth_id}/EndUser/
+   */
+  async registerEndUser(input: {
+    name: string;
+    last_name?: string;
+    end_user_type?: 'individual' | 'business';
+  }): Promise<{ endUserId: string }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/EndUser/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const body = {
+      name: input.name,
+      last_name: input.last_name || '',
+      end_user_type: input.end_user_type || 'business',
+    };
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    if (r.status !== 201 && r.status !== 200) {
+      let detail: any = text;
+      try { detail = JSON.parse(text); } catch {}
+      const msg = detail?.error || detail?.api_id || text;
+      logger.error({ status: r.status, body: text.slice(0, 300) }, 'Plivo EndUser create failed');
+      throw new Error(`Plivo EndUser ${r.status}: ${String(msg).slice(0, 200)}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    const endUserId = data.end_user_id || data.api_id || '';
+    if (!endUserId) throw new Error('Plivo did not return an end_user_id');
+    return { endUserId };
+  }
+
+  /**
+   * Buy a number and bind it to a previously-created end_user_id. Plivo
+   * accepts the same /PhoneNumber/{number}/ endpoint as provisionNumber but
+   * with an end_user_id in the body so the carrier KYC trail is preserved.
+   */
+  async provisionNumberWithEndUser(opts: {
+    number: string;
+    endUserId: string;
+    capabilities: ('voice' | 'sms')[];
+    appId?: string;
+  }): Promise<ProvisionedNumber> {
+    const exact = opts.number.replace(/[^\d]/g, '');
+    if (!exact) throw new Error('provisionNumberWithEndUser requires a digit-only number');
+
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/PhoneNumber/${exact}/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const payload: Record<string, any> = { end_user_id: opts.endUserId };
+    if (opts.appId) payload.app_id = opts.appId;
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (r.status !== 201 && r.status !== 200) {
+      let detail: any = text;
+      try { detail = JSON.parse(text); } catch {}
+      const errStr = String(detail?.error || detail?.api_id || text).slice(0, 200);
+      logger.error({ status: r.status, body: text.slice(0, 300), exact, endUserId: opts.endUserId }, 'Plivo buy w/ end-user failed');
+      throw new Error(`Plivo ${r.status}: ${errStr}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    const purchased = data?.numbers?.[0]?.number || exact;
+    return {
+      providerNumberId: purchased,
+      number: '+' + purchased.replace(/^\+/, ''),
+      capabilities: opts.capabilities.slice(),
+    };
+  }
+
   async releaseNumber(providerNumberId: string): Promise<void> {
     const number = String(providerNumberId).replace(/[^\d]/g, '');
     if (!number) return;

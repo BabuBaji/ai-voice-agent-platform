@@ -5,6 +5,8 @@ import { twilioProvider } from '../providers/twilio.provider';
 import { exotelProvider } from '../providers/exotel.provider';
 import { plivoProvider } from '../providers/plivo.provider';
 import { getProvider } from '../providers';
+import { validateKyc, aadhaarLast4 } from '../utils/kyc';
+import { generateSandboxNumbers } from '../providers/sandbox.catalog';
 
 export const phoneNumberRouter = Router();
 
@@ -63,20 +65,48 @@ phoneNumberRouter.get('/', async (req: Request, res: Response, next: NextFunctio
 });
 
 // GET /phone-numbers/available?provider=plivo&country=US&capabilities=voice
-// Lists numbers available for purchase from the provider's catalog. No DB write.
+// Lists numbers available for purchase. No DB write.
+//
+// Returns 200 + `data: []` (with `reason` + friendly `message`) for the common
+// soft-failure cases:
+//   - provider credentials missing
+//   - country not served by this provider
+//   - provider blocks new numbers without account verification
+// Only escalates to 502 when the provider call truly errored upstream.
 phoneNumberRouter.get('/available', async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!getTenantId(req, res)) return;
     const provider = ((req.query.provider as string) || 'plivo').toLowerCase();
     const country = ((req.query.country as string) || 'US').toUpperCase();
     const caps = ((req.query.capabilities as string) || 'voice').split(',').map((s) => s.trim()) as ('voice' | 'sms')[];
+
     const p = getProvider(provider);
-    try {
-      const list = await p.listAvailableNumbers(country, caps);
-      res.json({ data: list, provider, country });
-    } catch (err: any) {
-      res.status(502).json({ error: 'Provider Error', message: err.message || 'failed to list numbers' });
+    let real: any[] = [];
+    let realErr: any = null;
+    try { real = await p.listAvailableNumbers(country, caps); } catch (err) { realErr = err; }
+
+    // If the real catalog returned at least one number, use it as-is.
+    if (real.length > 0) {
+      res.json({ data: real, provider, country });
+      return;
     }
+
+    // Real catalog empty — fall back to the synthetic sandbox catalog so
+    // every (provider, country) combo can be demoed end-to-end. The hint
+    // tells the UI these are test numbers (see `synthetic: true`).
+    const sandbox = generateSandboxNumbers({ provider, country, capabilities: caps });
+    const msg = (realErr?.message || '').toLowerCase();
+    const status = realErr?.status || realErr?.statusCode;
+    const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+    let hint = `${cap(provider)} doesn't sell real numbers in ${country} from this account. Showing test (sandbox) numbers — buy one to try the agent flow without live PSTN calls.`;
+    if (msg.includes('credentials') || msg.includes('not configured') || msg.includes('authenticate'))
+      hint = `${cap(provider)} credentials aren't configured. Showing test (sandbox) numbers — add credentials in Settings → Integrations to access the live catalog.`;
+    else if (status === 401 || status === 403 || msg.includes('unauthorized') || msg.includes('forbidden'))
+      hint = `${cap(provider)} rejected the credentials for this account. Showing test (sandbox) numbers in the meantime.`;
+    else if (provider === 'exotel')
+      hint = `Exotel doesn't expose a public number-catalog API. Showing test (sandbox) numbers — for real Exotel numbers, buy via my.exotel.com and click "Add existing number" above.`;
+
+    res.json({ data: sandbox, provider, country, sandbox: true, message: hint });
   } catch (err) { next(err); }
 });
 
@@ -129,6 +159,229 @@ phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFun
     );
 
     res.status(201).json(inserted.rows[0]);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation Error', details: err.errors });
+      return;
+    }
+    next(err);
+  }
+});
+
+// GET /phone-numbers/kyc?provider=plivo — return current KYC submission for
+// this tenant+provider so the UI can pre-fill / skip the form when verified.
+phoneNumberRouter.get('/kyc', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const provider = ((req.query.provider as string) || 'plivo').toLowerCase();
+    const r = await pool.query(
+      `SELECT id, status, business_name, owner_name, owner_email, owner_phone,
+              pan, aadhaar_last4, gstin, address_line1, address_line2, city,
+              state, postal_code, country, use_case, provider_end_user_id,
+              rejection_reason, verified_at, created_at
+         FROM kyc_submissions
+        WHERE tenant_id = $1 AND provider = $2`,
+      [tenantId, provider],
+    );
+    res.json({ data: r.rows[0] || null });
+  } catch (err) { next(err); }
+});
+
+const kycBuySchema = z.object({
+  provider: z.enum(['twilio', 'exotel', 'plivo']).default('plivo'),
+  number: z.string().min(5),
+  capabilities: z.array(z.enum(['voice', 'sms'])).default(['voice']),
+  kyc: z.object({
+    business_name: z.string(),
+    owner_name: z.string(),
+    owner_email: z.string().optional(),
+    owner_phone: z.string().optional(),
+    pan: z.string().optional(),
+    aadhaar: z.string().optional(),
+    gstin: z.string().optional(),
+    address_line1: z.string(),
+    address_line2: z.string().optional(),
+    city: z.string(),
+    state: z.string(),
+    postal_code: z.string(),
+    country: z.string().default('IN'),
+    use_case: z.string(),
+  }),
+});
+
+// POST /phone-numbers/buy-with-kyc — full KYC-gated buy:
+//   1. validate KYC payload format (PAN, Aadhaar Verhoeff, GSTIN, address)
+//   2. reuse a previously-verified KYC for this tenant+provider, or register
+//      a fresh Plivo End User (the carrier-side compliance anchor)
+//   3. rent the number with end_user_id attached
+//   4. persist phone_numbers row + return it
+phoneNumberRouter.post('/buy-with-kyc', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const parsed = kycBuySchema.parse(req.body);
+
+    if (parsed.provider !== 'plivo') {
+      res.status(400).json({
+        error: 'Unsupported',
+        message: `KYC-gated buy is wired for Plivo only right now. ${parsed.provider} numbers go through their own console.`,
+      });
+      return;
+    }
+
+    const v = validateKyc(parsed.kyc, { country: parsed.kyc.country });
+    if (!v.ok) {
+      res.status(422).json({
+        error: 'KYC Validation Failed',
+        message: 'Some KYC fields are invalid — please correct them and try again.',
+        details: v.errors,
+      });
+      return;
+    }
+
+    // Avoid double-rent
+    const existing = await pool.query(
+      `SELECT id FROM phone_numbers WHERE phone_number = $1 OR phone_number = $2`,
+      [parsed.number, '+' + parsed.number.replace(/^\+/, '')],
+    );
+    if (existing.rows.length > 0) {
+      res.status(409).json({ error: 'Already Owned', message: 'This number is already in your account.' });
+      return;
+    }
+
+    // Reuse verified KYC if present; otherwise register fresh
+    const prior = await pool.query(
+      `SELECT id, status, provider_end_user_id FROM kyc_submissions
+        WHERE tenant_id = $1 AND provider = $2`,
+      [tenantId, parsed.provider],
+    );
+    let endUserId: string | null = prior.rows[0]?.provider_end_user_id || null;
+    let kycId: string | null = prior.rows[0]?.id || null;
+
+    if (!endUserId) {
+      try {
+        const ownerParts = parsed.kyc.owner_name.trim().split(/\s+/);
+        const firstName = ownerParts[0] || parsed.kyc.business_name;
+        const lastName = ownerParts.slice(1).join(' ');
+        const r = await plivoProvider.registerEndUser({
+          name: firstName,
+          last_name: lastName,
+          end_user_type: 'business',
+        });
+        endUserId = r.endUserId;
+      } catch (err: any) {
+        // Persist the failed attempt so the UI can show the carrier's reason
+        await pool.query(
+          `INSERT INTO kyc_submissions
+             (tenant_id, provider, status, business_name, owner_name, owner_email, owner_phone,
+              pan, aadhaar_last4, gstin, address_line1, address_line2, city, state, postal_code,
+              country, use_case, rejection_reason)
+           VALUES ($1,$2,'rejected',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           ON CONFLICT (tenant_id, provider) DO UPDATE SET
+             status='rejected',
+             rejection_reason=EXCLUDED.rejection_reason,
+             updated_at=NOW()`,
+          [
+            tenantId, parsed.provider, parsed.kyc.business_name, parsed.kyc.owner_name,
+            parsed.kyc.owner_email || null, parsed.kyc.owner_phone || null,
+            parsed.kyc.pan?.toUpperCase() || null, aadhaarLast4(parsed.kyc.aadhaar),
+            parsed.kyc.gstin?.toUpperCase() || null, parsed.kyc.address_line1,
+            parsed.kyc.address_line2 || null, parsed.kyc.city, parsed.kyc.state,
+            parsed.kyc.postal_code, parsed.kyc.country.toUpperCase(), parsed.kyc.use_case,
+            err.message || 'End-user registration failed',
+          ],
+        );
+        res.status(502).json({
+          error: 'KYC Carrier Rejection',
+          message: `Carrier could not register your KYC: ${err.message}. Verify your Plivo account itself is KYC-cleared at console.plivo.com first.`,
+        });
+        return;
+      }
+    }
+
+    // Upsert KYC submission as verified before the buy attempt
+    const upsert = await pool.query(
+      `INSERT INTO kyc_submissions
+         (tenant_id, provider, status, business_name, owner_name, owner_email, owner_phone,
+          pan, aadhaar_last4, gstin, address_line1, address_line2, city, state, postal_code,
+          country, use_case, provider_end_user_id, verified_at)
+       VALUES ($1,$2,'verified',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+       ON CONFLICT (tenant_id, provider) DO UPDATE SET
+         status='verified',
+         business_name=EXCLUDED.business_name,
+         owner_name=EXCLUDED.owner_name,
+         owner_email=EXCLUDED.owner_email,
+         owner_phone=EXCLUDED.owner_phone,
+         pan=EXCLUDED.pan,
+         aadhaar_last4=EXCLUDED.aadhaar_last4,
+         gstin=EXCLUDED.gstin,
+         address_line1=EXCLUDED.address_line1,
+         address_line2=EXCLUDED.address_line2,
+         city=EXCLUDED.city,
+         state=EXCLUDED.state,
+         postal_code=EXCLUDED.postal_code,
+         country=EXCLUDED.country,
+         use_case=EXCLUDED.use_case,
+         provider_end_user_id=EXCLUDED.provider_end_user_id,
+         rejection_reason=NULL,
+         verified_at=NOW(),
+         updated_at=NOW()
+       RETURNING id`,
+      [
+        tenantId, parsed.provider, parsed.kyc.business_name, parsed.kyc.owner_name,
+        parsed.kyc.owner_email || null, parsed.kyc.owner_phone || null,
+        parsed.kyc.pan?.toUpperCase() || null, aadhaarLast4(parsed.kyc.aadhaar),
+        parsed.kyc.gstin?.toUpperCase() || null, parsed.kyc.address_line1,
+        parsed.kyc.address_line2 || null, parsed.kyc.city, parsed.kyc.state,
+        parsed.kyc.postal_code, parsed.kyc.country.toUpperCase(), parsed.kyc.use_case,
+        endUserId,
+      ],
+    );
+    kycId = upsert.rows[0].id;
+
+    // Now rent the number with the end-user attached
+    let purchased;
+    try {
+      purchased = await plivoProvider.provisionNumberWithEndUser({
+        number: parsed.number,
+        endUserId,
+        capabilities: parsed.capabilities,
+      });
+    } catch (err: any) {
+      const lower = (err.message || '').toLowerCase();
+      const isCompliance = lower.includes('complian') || lower.includes('kyc') ||
+        lower.includes('end user') || lower.includes('document');
+      res.status(isCompliance ? 422 : 502).json({
+        error: isCompliance ? 'Compliance Required' : 'Provider Error',
+        message: isCompliance
+          ? `Plivo compliance check is incomplete: ${err.message}. Submit DOT/TRAI documents at console.plivo.com → Compliance to clear it.`
+          : err.message,
+        kyc_id: kycId,
+      });
+      return;
+    }
+
+    const inserted = await pool.query(
+      `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
+       VALUES ($1, $2, $3, $4, $5, TRUE)
+       RETURNING *`,
+      [
+        tenantId,
+        purchased.number,
+        parsed.provider,
+        purchased.providerNumberId,
+        JSON.stringify({
+          voice: parsed.capabilities.includes('voice'),
+          sms: parsed.capabilities.includes('sms'),
+        }),
+      ],
+    );
+
+    res.status(201).json({
+      ...inserted.rows[0],
+      kyc: { id: kycId, status: 'verified', provider_end_user_id: endUserId },
+    });
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation Error', details: err.errors });

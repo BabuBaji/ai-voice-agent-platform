@@ -8,7 +8,9 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
-import { phoneNumberApi, type PhoneNumberRecord, type AvailableNumber } from '@/services/phoneNumber.api';
+import { phoneNumberApi, type PhoneNumberRecord, type AvailableNumber, type KycSession } from '@/services/phoneNumber.api';
+import { PurchaseNumberModal } from '@/components/settings/PurchaseNumberModal';
+import { InstantKycWizard } from '@/components/settings/InstantKycWizard';
 
 const settingsNav = [
   { label: 'General', path: '/settings', icon: Settings, end: true },
@@ -35,6 +37,7 @@ const providerColor: Record<string, string> = {
   plivo: 'bg-violet-100 text-violet-700',
   twilio: 'bg-red-100 text-red-700',
   exotel: 'bg-emerald-100 text-emerald-700',
+  sandbox: 'bg-amber-100 text-amber-700',
 };
 
 export function PhoneNumbersPage() {
@@ -49,9 +52,16 @@ export function PhoneNumbersPage() {
   const [available, setAvailable] = useState<AvailableNumber[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchInfo, setSearchInfo] = useState<string | null>(null); // soft failure (provider unconfigured / country unsupported)
   const [buying, setBuying] = useState<string | null>(null); // number being purchased
   const [buyMsg, setBuyMsg] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
+
+  // 2-stage purchase flow:
+  //   Stage 1 — PurchaseNumberModal (intro + reserve)
+  //   Stage 2 — InstantKycWizard (6-step KYC + buy)
+  const [purchaseTarget, setPurchaseTarget] = useState<AvailableNumber | null>(null);
+  const [kycSession, setKycSession] = useState<KycSession | null>(null);
 
   // Import-existing-number modal state
   const [importOpen, setImportOpen] = useState(false);
@@ -81,11 +91,16 @@ export function PhoneNumbersPage() {
   const search = async () => {
     setSearching(true);
     setSearchError(null);
+    setSearchInfo(null);
     setBuyMsg(null);
     setHasSearched(true);
     try {
-      const list = await phoneNumberApi.listAvailable({ provider, country, capabilities: ['voice'] });
-      setAvailable(list);
+      const r = await phoneNumberApi.listAvailable({ provider, country, capabilities: ['voice'] });
+      setAvailable(r.data);
+      // Backend returns `message` for both soft failures (provider not
+      // configured, country unsupported) and the sandbox fall-back. Surface
+      // as info, not error.
+      if (r.message) setSearchInfo(r.message);
     } catch (e: any) {
       setSearchError(e?.response?.data?.message || e?.message || 'Search failed');
       setAvailable([]);
@@ -94,22 +109,24 @@ export function PhoneNumbersPage() {
     }
   };
 
-  const buy = async (n: AvailableNumber) => {
-    setBuying(n.number);
+  const buy = (n: AvailableNumber) => {
     setBuyMsg(null);
     setSearchError(null);
-    try {
-      const purchased = await phoneNumberApi.buy({ provider, number: n.number, capabilities: ['voice'] });
-      setBuyMsg(`Purchased ${purchased.phone_number}. Carrier may need a few minutes to activate it.`);
-      // Remove from available list, refresh owned
-      setAvailable((p) => p.filter((x) => x.number !== n.number));
-      reloadOwned();
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.message || 'Buy failed';
-      setSearchError(msg);
-    } finally {
-      setBuying(null);
-    }
+    setPurchaseTarget(n);
+  };
+
+  const onReserved = (session: KycSession) => {
+    // Move from intro modal → 6-step wizard
+    setPurchaseTarget(null);
+    setKycSession(session);
+  };
+
+  const onWizardCompleted = (rec: PhoneNumberRecord) => {
+    const number = rec.phone_number;
+    setBuyMsg(`Purchased ${number}. KYC verified — carrier may take a few minutes to activate the number.`);
+    setAvailable((p) => p.filter((x) => x.number !== number && '+' + x.number.replace(/^\+/, '') !== number));
+    setKycSession(null);
+    reloadOwned();
   };
 
   const submitImport = async () => {
@@ -282,6 +299,12 @@ export function PhoneNumbersPage() {
                 <AlertCircle className="h-4 w-4" /> {searchError}
               </div>
             )}
+            {searchInfo && (
+              <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800 mb-4">
+                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>{searchInfo}</span>
+              </div>
+            )}
 
             {hasSearched && !searching && available.length === 0 && !searchError && (
               <div className="text-center py-8 text-sm text-gray-500">
@@ -311,7 +334,12 @@ export function PhoneNumbersPage() {
                   <tbody>
                     {available.map((n) => (
                       <tr key={n.number} className="border-t border-gray-100">
-                        <td className="px-4 py-2 font-mono font-medium text-gray-900">{n.number}</td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-medium text-gray-900">{n.number}</span>
+                            {n.synthetic && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold uppercase tracking-wider">Sandbox</span>}
+                          </div>
+                        </td>
                         <td className="px-4 py-2 text-xs text-gray-500">{n.region || n.country || '—'}</td>
                         <td className="px-4 py-2">
                           <div className="flex gap-1">
@@ -330,7 +358,7 @@ export function PhoneNumbersPage() {
                             onClick={() => buy(n)}
                           >
                             {buying === n.number ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                            Buy
+                            Buy with KYC
                           </Button>
                         </td>
                       </tr>
@@ -346,6 +374,24 @@ export function PhoneNumbersPage() {
             </p>
           </Card>
       </div>
+
+      {/* ── Stage 1: Purchase intro modal ───────────────────────────── */}
+      <PurchaseNumberModal
+        open={purchaseTarget !== null}
+        number={purchaseTarget}
+        provider={provider}
+        capabilities={['voice']}
+        onClose={() => setPurchaseTarget(null)}
+        onReserved={onReserved}
+      />
+
+      {/* ── Stage 2: 6-step Instant KYC Verification wizard ─────────── */}
+      <InstantKycWizard
+        open={kycSession !== null}
+        session={kycSession}
+        onClose={() => setKycSession(null)}
+        onCompleted={onWizardCompleted}
+      />
 
       {/* ── Import existing number modal ─────────────────────────────── */}
       {importOpen && (
