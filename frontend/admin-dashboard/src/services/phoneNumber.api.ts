@@ -53,6 +53,23 @@ export const phoneNumberApi = {
     };
   },
 
+  /** Unified catalog across all configured carriers. Each row carries its own
+   * `provider` field so the buy step knows which carrier API to call. */
+  listAvailableAll: async (params: {
+    country?: string;
+    capabilities?: ('voice' | 'sms')[];
+  } = {}): Promise<{ data: AvailableNumber[]; message?: string; sandbox?: boolean }> => {
+    const qs = new URLSearchParams();
+    qs.set('country', params.country || 'US');
+    if (params.capabilities?.length) qs.set('capabilities', params.capabilities.join(','));
+    const r = await api.get(`/phone-numbers/available-all?${qs.toString()}`);
+    return {
+      data: r.data?.data ?? [],
+      message: r.data?.message,
+      sandbox: r.data?.sandbox === true,
+    };
+  },
+
   /** Buy a specific number from the provider's catalog. */
   buy: async (params: {
     provider?: 'plivo' | 'twilio' | 'exotel';
@@ -167,6 +184,10 @@ export interface AvailableNumber {
   monthlyRate?: number;
   region?: string;
   country?: string;
+  /** Which carrier this row came from (plivo / twilio / exotel / sandbox).
+   * Set when the row comes from the unified /available-all endpoint so the
+   * buy step knows which carrier API to call. */
+  provider?: 'plivo' | 'twilio' | 'exotel' | 'sandbox';
   /** True when the catalog entry came from the synthetic sandbox fallback,
    * not the real carrier. Sandbox numbers buy instantly with no carrier call
    * and only work for in-app testing — not real PSTN calls. */

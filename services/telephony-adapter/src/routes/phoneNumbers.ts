@@ -110,6 +110,55 @@ phoneNumberRouter.get('/available', async (req: Request, res: Response, next: Ne
   } catch (err) { next(err); }
 });
 
+// GET /phone-numbers/available-all — unified inventory across all carriers.
+// Fetches plivo + twilio + exotel in parallel, tags each row with its source
+// provider, and returns the merged list. If all carriers return zero numbers,
+// falls back to the synthetic sandbox catalog so the UI can still demo flows.
+phoneNumberRouter.get('/available-all', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!getTenantId(req, res)) return;
+    const country = ((req.query.country as string) || 'US').toUpperCase();
+    const caps = ((req.query.capabilities as string) || 'voice').split(',').map((s) => s.trim()) as ('voice' | 'sms')[];
+
+    const carriers = ['plivo', 'twilio', 'exotel'] as const;
+    const results = await Promise.allSettled(
+      carriers.map(async (name) => {
+        const p = getProvider(name);
+        const rows = await p.listAvailableNumbers(country, caps);
+        return { name, rows };
+      }),
+    );
+
+    const merged: any[] = [];
+    const errors: { provider: string; error: string }[] = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const carrierName = carriers[i];
+      if (r.status === 'fulfilled') {
+        for (const row of r.value.rows) {
+          merged.push({ ...row, provider: carrierName });
+        }
+      } else {
+        errors.push({ provider: carrierName, error: r.reason?.message || String(r.reason) });
+      }
+    }
+
+    if (merged.length > 0) {
+      res.json({ data: merged, country, errors: errors.length > 0 ? errors : undefined });
+      return;
+    }
+
+    // All carriers empty — fall back to sandbox using plivo's prefix table for India,
+    // generic prefixes elsewhere. The UI shows synthetic:true so they're clearly test rows.
+    const sandbox = generateSandboxNumbers({ provider: 'plivo', country, capabilities: caps });
+    const tagged = sandbox.map((row) => ({ ...row, provider: 'sandbox' }));
+    const msg = errors.length > 0
+      ? `No real inventory available in ${country} from any carrier (${errors.map((e) => e.provider).join(', ')} all returned errors or empty). Showing test (sandbox) numbers.`
+      : `No real inventory available in ${country} from any carrier. Showing test (sandbox) numbers.`;
+    res.json({ data: tagged, country, sandbox: true, message: msg, errors: errors.length > 0 ? errors : undefined });
+  } catch (err) { next(err); }
+});
+
 // POST /phone-numbers/buy — purchase a specific number from the provider's
 // catalog and persist it to phone_numbers. Used by the "Buy" button in the UI.
 phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFunction) => {
@@ -144,7 +193,7 @@ phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFun
 
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-       VALUES ($1, $2, $3, $4, $5, TRUE)
+       VALUES ($1, $2, $3, $4, $5, FALSE)
        RETURNING *`,
       [
         tenantId,
@@ -364,7 +413,7 @@ phoneNumberRouter.post('/buy-with-kyc', async (req: Request, res: Response, next
 
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-       VALUES ($1, $2, $3, $4, $5, TRUE)
+       VALUES ($1, $2, $3, $4, $5, FALSE)
        RETURNING *`,
       [
         tenantId,
@@ -416,7 +465,7 @@ phoneNumberRouter.post('/import', async (req: Request, res: Response, next: Next
 
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-       VALUES ($1, $2, $3, $4, $5, TRUE)
+       VALUES ($1, $2, $3, $4, $5, FALSE)
        RETURNING *`,
       [
         tenantId,
@@ -469,7 +518,7 @@ phoneNumberRouter.post('/provision', async (req: Request, res: Response, next: N
 
     const result = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-       VALUES ($1, $2, $3, $4, $5, TRUE)
+       VALUES ($1, $2, $3, $4, $5, FALSE)
        RETURNING *`,
       [
         tenantId,
@@ -488,6 +537,83 @@ phoneNumberRouter.post('/provision', async (req: Request, res: Response, next: N
     }
     next(err);
   }
+});
+
+// GET /phone-numbers/:id/carrier-status — live compliance/active state from the carrier.
+// For Plivo: hits GET /v1/Account/<id>/Number/<number>/. For sandbox/exotel/twilio
+// without a status API, returns a synthesized response so the UI can render uniformly.
+phoneNumberRouter.get('/:id/carrier-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+
+    const { id } = req.params;
+    const r = await pool.query(
+      'SELECT id, phone_number, provider, provider_sid FROM phone_numbers WHERE id = $1 AND tenant_id = $2',
+      [id, tenantId],
+    );
+    if (r.rows.length === 0) {
+      res.status(404).json({ error: 'Not Found', message: 'Phone number not found' });
+      return;
+    }
+    const phone = r.rows[0];
+
+    if (phone.provider === 'sandbox') {
+      res.json({
+        carrier_active: true,
+        compliance_status: 'sandbox',
+        message: 'Sandbox number — no carrier review required, in-app testing only.',
+      });
+      return;
+    }
+
+    if (phone.provider === 'plivo') {
+      const authId = process.env.PLIVO_AUTH_ID;
+      const authToken = process.env.PLIVO_AUTH_TOKEN;
+      if (!authId || !authToken) {
+        res.json({ carrier_active: null, compliance_status: 'unknown', message: 'Plivo credentials not configured.' });
+        return;
+      }
+      const num = String(phone.phone_number).replace(/[^\d]/g, '');
+      const url = `https://api.plivo.com/v1/Account/${authId}/Number/${num}/`;
+      const auth = Buffer.from(`${authId}:${authToken}`).toString('base64');
+      try {
+        const resp = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+        if (!resp.ok) {
+          res.json({
+            carrier_active: null,
+            compliance_status: resp.status === 404 ? 'not_found' : 'error',
+            message: `Plivo returned ${resp.status}.`,
+          });
+          return;
+        }
+        const data: any = await resp.json();
+        res.json({
+          carrier_active: data.active === true,
+          compliance_status: data.active === true ? 'active' : 'pending',
+          renewal_date: data.renewal_date ?? null,
+          monthly_rental_rate: data.monthly_rental_rate ?? null,
+          region: data.region ?? null,
+          voice_enabled: data.voice_enabled ?? null,
+          sms_enabled: data.sms_enabled ?? null,
+          message: data.active === true
+            ? 'Number is active at the carrier and ready for live calls.'
+            : 'Number rented but carrier compliance is pending. Upload PAN/Aadhaar/address proof at console.plivo.com → Compliance to activate.',
+        });
+        return;
+      } catch (err: any) {
+        res.json({ carrier_active: null, compliance_status: 'unreachable', message: `Could not reach Plivo: ${err.message}` });
+        return;
+      }
+    }
+
+    // Twilio / Exotel: we don't have a unified status fetch — assume active if it's in our DB.
+    res.json({
+      carrier_active: true,
+      compliance_status: 'unknown',
+      message: `Live compliance check not implemented for provider "${phone.provider}".`,
+    });
+  } catch (err) { next(err); }
 });
 
 // PUT /phone-numbers/:id

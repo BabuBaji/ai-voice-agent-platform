@@ -586,7 +586,7 @@ kycWizardRouter.post('/:id/complete', async (req, res, next) => {
       const caps = (ses.capabilities || ['voice']) as string[];
       const ins = await pool.query(
         `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-         VALUES ($1, $2, 'sandbox', $3, $4, TRUE) RETURNING *`,
+         VALUES ($1, $2, 'sandbox', $3, $4, FALSE) RETURNING *`,
         [
           t, ses.number, `sb_${ses.id}`,
           JSON.stringify({ voice: caps.includes('voice'), sms: caps.includes('sms'), sandbox: true }),
@@ -671,7 +671,7 @@ kycWizardRouter.post('/:id/complete', async (req, res, next) => {
     const caps = (ses.capabilities || ['voice']) as string[];
     const ins = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
-       VALUES ($1, $2, $3, $4, $5, TRUE) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, FALSE) RETURNING *`,
       [
         t, purchased.number, ses.provider, purchased.providerNumberId,
         JSON.stringify({ voice: caps.includes('voice'), sms: caps.includes('sms') }),
