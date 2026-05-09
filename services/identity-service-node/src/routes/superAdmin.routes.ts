@@ -2077,5 +2077,126 @@ export function superAdminRouter(): Router {
     } catch (err) { next(err); }
   });
 
+  // ── System monitor — live health of every microservice ─────────────────
+  // Probes each service's /health in parallel + reports DB row counts. Used
+  // by the /super-admin/monitor page; cheap enough to poll every 5s.
+  router.get('/system/monitor', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pool: Pool = (req as any).pool;
+
+      const services: Array<{ name: string; url: string; kind: 'node' | 'python' | 'frontend' }> = [
+        { name: 'identity-service',     url: 'http://localhost:8080/health', kind: 'node' },
+        { name: 'api-gateway',          url: 'http://localhost:3000/health', kind: 'node' },
+        { name: 'agent-service',        url: 'http://localhost:3001/health', kind: 'node' },
+        { name: 'telephony-adapter',    url: 'http://localhost:3002/health', kind: 'node' },
+        { name: 'conversation-service', url: 'http://localhost:3003/health', kind: 'node' },
+        { name: 'notification-service', url: 'http://localhost:3004/health', kind: 'node' },
+        { name: 'crm-service',          url: 'http://localhost:8081/health', kind: 'node' },
+        { name: 'workflow-service',     url: 'http://localhost:8082/health', kind: 'node' },
+        { name: 'ai-runtime',           url: 'http://localhost:8000/health', kind: 'python' },
+        { name: 'voice-service',        url: 'http://localhost:8001/health', kind: 'python' },
+        { name: 'analytics-service',    url: 'http://localhost:8002/health', kind: 'python' },
+        { name: 'knowledge-service',    url: 'http://localhost:8003/health', kind: 'python' },
+        { name: 'frontend',             url: 'http://localhost:5173/',       kind: 'frontend' },
+      ];
+
+      const probes = await Promise.all(services.map(async (s) => {
+        const t0 = Date.now();
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 2500);
+          const r = await fetch(s.url, { signal: ctrl.signal });
+          clearTimeout(timer);
+          const latency_ms = Date.now() - t0;
+          return {
+            name: s.name,
+            kind: s.kind,
+            status: r.ok ? 'up' : 'degraded',
+            http_status: r.status,
+            latency_ms,
+          };
+        } catch (err: any) {
+          return {
+            name: s.name,
+            kind: s.kind,
+            status: 'down',
+            error: err?.name === 'AbortError' ? 'timeout (2.5s)' : (err?.message || 'unreachable'),
+            latency_ms: Date.now() - t0,
+          };
+        }
+      }));
+
+      const convPool = conversationPool();
+      const agPool = agentPool();
+
+      const since30m = new Date(Date.now() - 30 * 60_000).toISOString();
+      const since24h = new Date(Date.now() - 24 * 3600_000).toISOString();
+
+      // DB-level signals — fail-soft so a transient DB hiccup doesn't break
+      // the monitor page itself.
+      const safe = async <T,>(fn: () => Promise<T>, fallback: T): Promise<T> => {
+        try { return await fn(); } catch { return fallback; }
+      };
+
+      const [
+        tenants, agents, phoneNumbers, callsAll, callsLast30m, callsLast24h, failedLast24h, deployedNumbers,
+      ] = await Promise.all([
+        safe(() => pool.query(`SELECT COUNT(*)::int AS c FROM tenants`), { rows: [{ c: 0 }] }),
+        safe(() => agPool.query(`SELECT COUNT(*)::int AS c FROM agents`), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM phone_numbers`), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM calls`), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM calls WHERE COALESCE(started_at, created_at) > $1`, [since30m]), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM calls WHERE COALESCE(started_at, created_at) > $1`, [since24h]), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM calls WHERE COALESCE(started_at, created_at) > $1 AND status IN ('FAILED','CANCELLED')`, [since24h]), { rows: [{ c: 0 }] }),
+        safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM phone_numbers WHERE deployment_status = 'deployed'`), { rows: [{ c: 0 }] }),
+      ]);
+
+      // Recent activity feed — last 10 calls + recent number-audit events.
+      const [recentCalls, recentAudit] = await Promise.all([
+        safe(() => convPool.query(
+          `SELECT id, tenant_id, agent_id, direction, status, caller_number, called_number, provider,
+                  COALESCE(started_at, created_at) AS at, duration_seconds
+             FROM calls ORDER BY COALESCE(started_at, created_at) DESC LIMIT 10`,
+        ), { rows: [] }),
+        safe(() => convPool.query(
+          `SELECT id, tenant_id, number_id, event_type, actor_email, created_at
+             FROM number_audit_log ORDER BY created_at DESC LIMIT 10`,
+        ), { rows: [] }),
+      ]);
+
+      // Per-provider call counts in last 24h (helps spot a single carrier failing)
+      const providerSplit = await safe(() => convPool.query(
+        `SELECT provider, COUNT(*)::int AS calls,
+                SUM(CASE WHEN status IN ('FAILED','CANCELLED') THEN 1 ELSE 0 END)::int AS failed
+           FROM calls WHERE COALESCE(started_at, created_at) > $1 GROUP BY provider`,
+        [since24h],
+      ), { rows: [] });
+
+      const upCount = probes.filter((p) => p.status === 'up').length;
+      const overall: 'healthy' | 'degraded' | 'down' =
+        upCount === probes.length ? 'healthy' :
+        upCount >= probes.length - 2 ? 'degraded' : 'down';
+
+      res.json({
+        generated_at: new Date().toISOString(),
+        overall,
+        services: probes,
+        counts: {
+          tenants: tenants.rows[0]?.c || 0,
+          agents: agents.rows[0]?.c || 0,
+          phone_numbers: phoneNumbers.rows[0]?.c || 0,
+          deployed_numbers: deployedNumbers.rows[0]?.c || 0,
+          calls_total: callsAll.rows[0]?.c || 0,
+          calls_last_30m: callsLast30m.rows[0]?.c || 0,
+          calls_last_24h: callsLast24h.rows[0]?.c || 0,
+          failed_last_24h: failedLast24h.rows[0]?.c || 0,
+        },
+        provider_split_24h: providerSplit.rows,
+        recent_calls: recentCalls.rows,
+        recent_audit: recentAudit.rows,
+      });
+    } catch (err) { next(err); }
+  });
+
   return router;
 }

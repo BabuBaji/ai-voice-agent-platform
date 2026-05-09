@@ -104,10 +104,20 @@ export async function listAgents(req: Request, res: Response, next: NextFunction
   }
 }
 
+// Match canonical UUID format. Used to short-circuit invalid ids ("null",
+// "undefined", empty strings) so Postgres doesn't throw "invalid input syntax
+// for type uuid" 500s when the frontend accidentally passes a stale ref.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getAgent(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.headers['x-tenant-id'] as string;
     const { id } = req.params;
+
+    if (!id || !UUID_RE.test(String(id))) {
+      res.status(400).json({ error: 'Bad Request', message: 'Invalid agent id (must be a UUID)' });
+      return;
+    }
 
     const result = await pool.query(
       'SELECT * FROM agents WHERE id = $1 AND tenant_id = $2',

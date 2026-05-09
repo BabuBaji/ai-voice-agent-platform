@@ -15,6 +15,45 @@ const logger = pino({
 });
 
 /**
+ * Extract a human-readable error message out of a Plivo error response.
+ *
+ * Plivo's 4xx body is sometimes a top-level string ("error: ...") and
+ * sometimes a nested object — e.g. `{ "error": { "message": "...", "code": ... } }`
+ * or `{ "error": { "destination": ["This field is required"] } }`. Doing
+ * `String(detail.error)` on the latter produces "[object Object]" which is
+ * useless to the user. This walks the common shapes and produces a sentence.
+ */
+function extractPlivoErrorMessage(detail: any, rawText: string): string {
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (!detail || typeof detail !== 'object') return rawText.slice(0, 200) || 'Plivo error';
+
+  const e = detail.error;
+  if (typeof e === 'string' && e.trim()) return e;
+
+  if (e && typeof e === 'object') {
+    if (typeof e.message === 'string' && e.message) return e.message;
+    // Plivo field-validation shape: { error: { destination: ["msg"], ... } }
+    const fieldMessages: string[] = [];
+    for (const [key, val] of Object.entries(e)) {
+      if (key === 'message' || key === 'code') continue;
+      if (Array.isArray(val) && val.length > 0) {
+        fieldMessages.push(`${key}: ${val.join(', ')}`);
+      } else if (typeof val === 'string' && val) {
+        fieldMessages.push(`${key}: ${val}`);
+      }
+    }
+    if (fieldMessages.length > 0) return fieldMessages.join('; ');
+    // Last resort — JSON-encode the inner error object so the operator can
+    // see the raw shape instead of "[object Object]".
+    try { return JSON.stringify(e).slice(0, 300); } catch { /* fall through */ }
+  }
+
+  if (typeof detail.message === 'string' && detail.message) return detail.message;
+  if (detail.api_id) return `request ${detail.api_id}`;
+  return rawText.slice(0, 200) || 'Plivo error';
+}
+
+/**
  * Plivo provider. Uses Plivo's REST API via the official Node SDK.
  *
  * Plivo requires:
@@ -90,7 +129,7 @@ export class PlivoProvider implements TelephonyProvider {
         logger.error({ status: resp.status, body: text.slice(0, 400) }, 'Plivo call create failed');
         let detail: any = text;
         try { detail = JSON.parse(text); } catch {}
-        throw new Error(`Plivo ${resp.status}: ${(detail?.error || String(text)).slice(0, 200)}`);
+        throw new Error(`Plivo ${resp.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
       }
       const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
       // Plivo returns { request_uuid, message, api_id }
@@ -164,13 +203,9 @@ export class PlivoProvider implements TelephonyProvider {
       if (r.status !== 201 && r.status !== 200) {
         const txt = await r.text().catch(() => '');
         logger.error({ status: r.status, body: txt.slice(0, 300), exactNumber }, 'Plivo buy failed');
-        // Try to surface a clean error message
-        let detail = txt;
-        try {
-          const j = JSON.parse(txt);
-          detail = j?.error || j?.api_id || txt;
-        } catch { /* ignore */ }
-        throw new Error(`Plivo ${r.status}: ${String(detail).slice(0, 160)}`);
+        let detail: any = txt;
+        try { detail = JSON.parse(txt); } catch { /* ignore */ }
+        throw new Error(`Plivo ${r.status}: ${extractPlivoErrorMessage(detail, txt).slice(0, 300)}`);
       }
       // Successful body: { status:'fulfilled', numbers:[{number, status:'pending'|...}] }
       const data: any = await r.json().catch(() => ({}));
@@ -194,11 +229,59 @@ export class PlivoProvider implements TelephonyProvider {
    * trail links the number to a verified business identity.
    * Plivo API: POST /v1/Account/{auth_id}/EndUser/
    */
+  /**
+   * Fetch the Plivo account's current cash balance + auto-recharge state.
+   * Returns null on credential / network errors so callers can degrade
+   * gracefully (skip pre-check when the carrier is unreachable).
+   */
+  async getAccountBalance(): Promise<{ cashCredits: number; accountType: string; state: string; autoRecharge: boolean } | null> {
+    if (!config.plivo.authId || !config.plivo.authToken) return null;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return null;
+      const d: any = await r.json();
+      return {
+        cashCredits: parseFloat(d.cash_credits) || 0,
+        accountType: d.account_type || 'unknown',
+        state: d.state || '',
+        autoRecharge: d.auto_recharge === true || d.auto_recharge === 'True',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * List EndUsers, optionally filtered by name. Plivo supports filtering via
+   * `?name=` query param.
+   */
+  async listEndUsers(filter?: { name?: string; lastName?: string }): Promise<Array<{ end_user_id: string; name: string; last_name: string; end_user_type: string }>> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const qs = new URLSearchParams();
+    if (filter?.name) qs.set('name', filter.name);
+    if (filter?.lastName) qs.set('last_name', filter.lastName);
+    qs.set('limit', '20');
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/EndUser/?${qs.toString()}`;
+    const r = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+    if (!r.ok) return [];
+    const j: any = await r.json().catch(() => ({}));
+    return Array.isArray(j.objects) ? j.objects : [];
+  }
+
+  /**
+   * Register an EndUser at Plivo, idempotently. If Plivo returns
+   * "already exists" we look up the existing record and return its ID
+   * instead of failing — keeps the wizard re-runnable when a previous
+   * attempt half-succeeded (e.g. number-rent failed AFTER end-user create).
+   */
   async registerEndUser(input: {
     name: string;
     last_name?: string;
     end_user_type?: 'individual' | 'business';
-  }): Promise<{ endUserId: string }> {
+  }): Promise<{ endUserId: string; reused?: boolean }> {
     const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/EndUser/`;
     const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
     const body = {
@@ -212,17 +295,40 @@ export class PlivoProvider implements TelephonyProvider {
       body: JSON.stringify(body),
     });
     const text = await r.text();
-    if (r.status !== 201 && r.status !== 200) {
-      let detail: any = text;
-      try { detail = JSON.parse(text); } catch {}
-      const msg = detail?.error || detail?.api_id || text;
-      logger.error({ status: r.status, body: text.slice(0, 300) }, 'Plivo EndUser create failed');
-      throw new Error(`Plivo EndUser ${r.status}: ${String(msg).slice(0, 200)}`);
+    if (r.status === 201 || r.status === 200) {
+      const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+      const endUserId = data.end_user_id || data.api_id || '';
+      if (!endUserId) throw new Error('Plivo did not return an end_user_id');
+      return { endUserId };
     }
-    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
-    const endUserId = data.end_user_id || data.api_id || '';
-    if (!endUserId) throw new Error('Plivo did not return an end_user_id');
-    return { endUserId };
+
+    // Non-2xx — extract message and check for the "already exists" case.
+    let detail: any = text;
+    try { detail = JSON.parse(text); } catch {}
+    const msg = extractPlivoErrorMessage(detail, text);
+    const lower = msg.toLowerCase();
+    const isDuplicate = /already\s*exist|duplicate|already\s*registered/i.test(msg);
+
+    if (isDuplicate) {
+      // Look up the existing record by name. Plivo's "name" field is the
+      // first name; "last_name" is the surname. We try matching both.
+      try {
+        const matches = await this.listEndUsers({ name: input.name });
+        const exact = matches.find(
+          (m) => (m.name || '').toLowerCase() === input.name.toLowerCase()
+            && (m.last_name || '').toLowerCase() === (input.last_name || '').toLowerCase(),
+        ) || matches[0];
+        if (exact?.end_user_id) {
+          logger.info({ name: input.name, end_user_id: exact.end_user_id }, 'Plivo EndUser reused (already existed)');
+          return { endUserId: exact.end_user_id, reused: true };
+        }
+      } catch (lookupErr: any) {
+        logger.warn({ err: lookupErr.message }, 'Plivo EndUser lookup after duplicate failed');
+      }
+    }
+
+    logger.error({ status: r.status, body: text.slice(0, 300) }, 'Plivo EndUser create failed');
+    throw new Error(`Plivo EndUser ${r.status}: ${msg.slice(0, 300)}`);
   }
 
   /**
@@ -253,9 +359,9 @@ export class PlivoProvider implements TelephonyProvider {
     if (r.status !== 201 && r.status !== 200) {
       let detail: any = text;
       try { detail = JSON.parse(text); } catch {}
-      const errStr = String(detail?.error || detail?.api_id || text).slice(0, 200);
+      const errStr = extractPlivoErrorMessage(detail, text);
       logger.error({ status: r.status, body: text.slice(0, 300), exact, endUserId: opts.endUserId }, 'Plivo buy w/ end-user failed');
-      throw new Error(`Plivo ${r.status}: ${errStr}`);
+      throw new Error(`Plivo ${r.status}: ${errStr.slice(0, 300)}`);
     }
     const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
     const purchased = data?.numbers?.[0]?.number || exact;

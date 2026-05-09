@@ -78,8 +78,20 @@ export function TestCallModal({ open, phone, onClose }: Props) {
     } catch (e: any) {
       const status = e?.response?.status;
       const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message;
-      if (status === 400) {
+      if (status === 402) {
+        // Carrier wallet empty. Honest message + actionable next step.
+        // Inbound still works — calling INTO this number from your phone
+        // doesn't consume your carrier balance (caller's network pays).
+        setError(
+          (msg || 'Carrier balance is zero.') +
+          ' Test inbound instead: call this number from your phone to hear the agent — that path doesn\'t need balance.',
+        );
+      } else if (status === 400) {
         setError(`Carrier rejected the call request: ${msg || 'invalid payload'}. This often happens when the FROM number isn't yet active at the carrier (compliance pending).`);
+      } else if (status === 401) {
+        setError(`Carrier rejected your credentials: ${msg}. Check the API key in Settings → Integrations.`);
+      } else if (status === 422) {
+        setError(`Carrier compliance not cleared: ${msg}.`);
       } else if (status === 502) {
         setError(`Provider error: ${msg}. Check the carrier dashboard for the FROM number's status.`);
       } else {

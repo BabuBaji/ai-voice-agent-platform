@@ -8,6 +8,8 @@ import { executePostCallActions, PostCallContext } from '../services/postCallExe
 import { updateTargetFromCallEnd } from './campaigns';
 import { maybeAugmentSystemPromptForBooking, maybeExecuteBooking } from '../integrations/calcom';
 import { buildVoiceAgentPrompt } from '../prompts/voiceAgent';
+import { resolveDeployedAgent } from '../services/deployedAgentResolver';
+import { decideInboundRoute } from '../services/callRouting';
 
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
@@ -317,17 +319,31 @@ function isAgentLive(agent: any): boolean {
   return s !== 'DRAFT' && s !== 'ARCHIVED';
 }
 
-async function loadAgent(agentId: string, tenantId: string): Promise<any | null> {
+async function loadAgent(
+  agentId: string,
+  tenantId: string,
+  opts?: { numberId?: string | null },
+): Promise<any | null> {
+  // Prefer the deployed snapshot when present so live calls never see
+  // half-edited Agent Builder state. resolveDeployedAgent falls back to a
+  // live agent-service fetch when no snapshot exists, preserving the
+  // pre-deploy-flow behaviour.
   try {
-    // AGENT_SERVICE_URL is expected to already include the `/api/v1` prefix
-    // (see calls.ts + memory); we append only `/agents/:id`. Tolerate either
-    // convention by stripping a trailing `/api/v1` and re-adding it.
+    const resolved = await resolveDeployedAgent(pool, {
+      agentId,
+      tenantId,
+      numberId: opts?.numberId || null,
+    });
+    if (resolved) return resolved;
+  } catch (err: any) {
+    logger.warn({ err: err.message, agentId }, 'resolveDeployedAgent threw — falling through to direct fetch');
+  }
+  // Last-resort direct fetch in case resolver returned null on a transient.
+  try {
     const raw = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
     const base = raw.replace(/\/+$/, '').replace(/\/api\/v1$/, '');
     const url = `${base}/api/v1/agents/${agentId}`;
-    const resp = await fetch(url, {
-      headers: { 'x-tenant-id': tenantId },
-    });
+    const resp = await fetch(url, { headers: { 'x-tenant-id': tenantId } });
     if (!resp.ok) {
       logger.warn({ status: resp.status, agentId, url }, 'Agent-service returned non-OK for loadAgent');
       return null;
@@ -560,10 +576,12 @@ webhookRouter.post('/twilio/voice', async (req: Request, res: Response, next: Ne
     let agentId = (req.query.agentId as string) || '';
     let tenantId = (req.query.tenantId as string) || '';
 
-    // Inbound: look up by called number
+    // Inbound: look up by called number (also fetches lifecycle hints for snapshot)
+    let twilioNumberId: string | null = null;
+    let twilioDeployStatus: string | null = null;
     if (!agentId || !tenantId) {
       const phoneResult = await pool.query(
-        `SELECT agent_id, tenant_id FROM phone_numbers
+        `SELECT id, agent_id, tenant_id, deployment_status FROM phone_numbers
          WHERE phone_number = $1 AND is_active = TRUE LIMIT 1`,
         [To]
       );
@@ -578,9 +596,17 @@ webhookRouter.post('/twilio/voice', async (req: Request, res: Response, next: Ne
       }
       agentId = phoneResult.rows[0].agent_id;
       tenantId = phoneResult.rows[0].tenant_id;
+      twilioNumberId = phoneResult.rows[0].id;
+      twilioDeployStatus = phoneResult.rows[0].deployment_status;
     }
 
-    const agent = await loadAgent(agentId, tenantId);
+    if (twilioDeployStatus === 'paused') {
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Say>This number is temporarily paused. Please try again later.</Say><Hangup/></Response>`);
+      return;
+    }
+
+    const agent = await loadAgent(agentId, tenantId, { numberId: twilioNumberId });
     if (!agent) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1063,10 +1089,14 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
     let agentId = (req.query.agentId as string) || '';
     let tenantId = (req.query.tenantId as string) || '';
 
-    // Inbound: look up by called number
+    // Inbound: look up by called number. We also pull the row's id +
+    // deployment_status so the deploy-gate uses the number's lifecycle state
+    // (paused vs deployed) instead of just is_active.
+    let numberId: string | null = null;
+    let deploymentStatus: string | null = null;
     if (!agentId || !tenantId) {
       const phoneResult = await pool.query(
-        `SELECT agent_id, tenant_id FROM phone_numbers
+        `SELECT id, agent_id, tenant_id, deployment_status FROM phone_numbers
          WHERE phone_number = $1 AND is_active = TRUE LIMIT 1`,
         [To]
       );
@@ -1077,9 +1107,104 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
       }
       agentId = phoneResult.rows[0].agent_id;
       tenantId = phoneResult.rows[0].tenant_id;
+      numberId = phoneResult.rows[0].id;
+      deploymentStatus = phoneResult.rows[0].deployment_status;
+    } else {
+      // Outbound (we already know agent + tenant from query). Best-effort
+      // lookup of a deployed number for this agent so the snapshot path can
+      // resolve the right snapshot.
+      const phoneRow = await pool.query(
+        `SELECT id, deployment_status FROM phone_numbers
+          WHERE tenant_id = $1 AND agent_id = $2 AND is_active = TRUE
+          ORDER BY deployed_at DESC NULLS LAST LIMIT 1`,
+        [tenantId, agentId],
+      );
+      numberId = phoneRow.rows[0]?.id || null;
+      deploymentStatus = phoneRow.rows[0]?.deployment_status || null;
     }
 
-    const agent = await loadAgent(agentId, tenantId);
+    // Mark any active inbound-probe as satisfied — runs BEFORE the pause
+    // gate so a paused number's probe still completes (lets users verify
+    // before deploying).
+    if (numberId) {
+      try {
+        const probe = await pool.query(
+          `SELECT id, run_id FROM number_verifications
+            WHERE number_id = $1 AND test_type = 'inbound_call_probe' AND status = 'pending'
+              AND started_at > NOW() - INTERVAL '60 seconds'
+            ORDER BY started_at DESC LIMIT 1`,
+          [numberId],
+        );
+        if (probe.rows.length > 0) {
+          await pool.query(
+            `UPDATE number_verifications
+                SET status = 'pass',
+                    completed_at = NOW(),
+                    log = COALESCE(log, '{}'::jsonb) || $2::jsonb
+              WHERE id = $1`,
+            [probe.rows[0].id, JSON.stringify({ caller: From, at: new Date().toISOString() })],
+          );
+          logger.info({ numberId, probeId: probe.rows[0].run_id, From }, 'inbound_call_probe satisfied');
+        }
+      } catch (e: any) {
+        logger.warn({ err: e.message }, 'inbound_call_probe lookup failed');
+      }
+    }
+
+    if (deploymentStatus === 'paused') {
+      logger.warn({ numberId, deploymentStatus }, 'Inbound call rejected — number paused');
+      res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Speak>This number is temporarily paused. Please try again later.</Speak><Hangup/></Response>`);
+      return;
+    }
+
+    // Routing rules: spam/DND, geo, business hours, failover. Skip for outbound
+    // (numberId only set on inbound lookups).
+    if (numberId) {
+      const decision = await decideInboundRoute(pool, { tenantId, numberId, callerNumber: From });
+      if (decision.action === 'reject') {
+        logger.info({ numberId, reason: decision.reason }, 'Inbound call rejected by route policy');
+        const safe = escapeXml(decision.message || 'Sorry, this call cannot be accepted.');
+        res.type('text/xml').send(
+          `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Speak>${safe}</Speak><Hangup/></Response>`,
+        );
+        return;
+      }
+      if (decision.action === 'failover' && decision.failover_agent_id) {
+        logger.info({ numberId, failoverAgentId: decision.failover_agent_id }, 'Routing to failover agent');
+        agentId = decision.failover_agent_id;
+      }
+      // IVR runtime: render a Plivo <GetInput> with the configured greeting +
+      // numeric menu. Caller's DTMF reply hits /webhooks/plivo/ivr where it's
+      // sub-routed (route_to_agent / transfer_to_number / hangup).
+      // Skip IVR rendering when redirected from /ivr (avoids infinite loop).
+      const ivrFallback = req.query.ivrFallback === '1';
+      if (!ivrFallback && decision.action === 'ivr' && decision.ivr) {
+        const ivr = decision.ivr;
+        const lang = 'en-US';
+        const { plivoVoice, plivoLang } = plivoVoiceFor(lang);
+        const greeting = String(ivr.greeting || 'Welcome. Please make a selection.');
+        const menuLines: string[] = (Array.isArray(ivr.menu) ? ivr.menu : [])
+          .map((m: any) => `Press ${m.digit} for ${m.label}.`);
+        const fullPrompt = [greeting, ...menuLines].join(' ');
+        const ivrAction = `${config.publicBaseUrl}/webhooks/plivo/ivr?numberId=${encodeURIComponent(numberId)}&tenantId=${encodeURIComponent(tenantId)}&originalAgentId=${encodeURIComponent(agentId)}&from=${encodeURIComponent(From || '')}&to=${encodeURIComponent(To || '')}`;
+        const safe = escapeXml(fullPrompt);
+        const timeout = Math.max(3, Math.min(60, parseInt(ivr.timeout_seconds || 8)));
+        res.type('text/xml').send(
+          `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <GetInput action="${escapeXml(ivrAction)}" method="POST" inputType="dtmf" digitEndTimeout="${timeout}" finishOnKey="#" numDigits="1">
+    <Speak voice="${plivoVoice}" language="${plivoLang}">${safe}</Speak>
+  </GetInput>
+  <Speak voice="${plivoVoice}" language="${plivoLang}">No selection made. Connecting you to an agent.</Speak>
+  <Redirect method="POST">${escapeXml(`${config.publicBaseUrl}/webhooks/plivo/voice?agentId=${agentId}&tenantId=${tenantId}&ivrFallback=1`)}</Redirect>
+</Response>`,
+        );
+        return;
+      }
+    }
+
+    const agent = await loadAgent(agentId, tenantId, { numberId });
     if (!agent) {
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response><Speak>I could not load the assistant configuration. Goodbye.</Speak><Hangup/></Response>`);
@@ -1322,6 +1447,83 @@ webhookRouter.post('/plivo/gather', async (req: Request, res: Response, next: Ne
 
     const gatherUrl = `${config.publicBaseUrl}/webhooks/plivo/gather?conversationId=${conversationId}&agentId=${agentId}&tenantId=${tenantId}`;
     res.type('text/xml').send(await buildPlivoGatherXml(reply, plivoVoice, plivoLang, gatherUrl, voiceIdPref));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /webhooks/plivo/ivr — DTMF response from the IVR menu rendered in the
+ * inbound voice handler. Routes the caller based on the configured menu:
+ *   - route_to_agent → redirect to /plivo/voice with the chosen agentId
+ *   - transfer_to_number → <Dial> to the configured PSTN number
+ *   - hangup → end the call
+ *
+ * If the caller pressed an unmapped digit (or timed out), we fall back to the
+ * original agent that was attached to the number.
+ */
+webhookRouter.post('/plivo/ivr', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { Digits } = req.body;
+    const numberId = (req.query.numberId as string) || '';
+    const tenantId = (req.query.tenantId as string) || '';
+    const originalAgentId = (req.query.originalAgentId as string) || '';
+    const From = (req.query.from as string) || '';
+    const To = (req.query.to as string) || '';
+
+    let cfg: any = {};
+    try {
+      const r = await pool.query(
+        `SELECT route_config FROM call_routes WHERE tenant_id = $1 AND number_id = $2`,
+        [tenantId, numberId],
+      );
+      cfg = r.rows[0]?.route_config || {};
+    } catch { /* fall through */ }
+
+    const menu: any[] = Array.isArray(cfg?.ivr?.menu) ? cfg.ivr.menu : [];
+    const choice = menu.find((m) => String(m.digit) === String(Digits || '').trim());
+
+    const lang = 'en-US';
+    const { plivoVoice, plivoLang } = plivoVoiceFor(lang);
+
+    if (!choice) {
+      logger.info({ numberId, digits: Digits }, 'IVR no-match — falling back to original agent');
+      // Redirect back to /plivo/voice with the original agent and ivrFallback flag
+      // so we don't re-render the menu.
+      res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Redirect method="POST">${escapeXml(`${config.publicBaseUrl}/webhooks/plivo/voice?agentId=${originalAgentId}&tenantId=${tenantId}&ivrFallback=1`)}</Redirect></Response>`,
+      );
+      return;
+    }
+
+    if (choice.action === 'hangup') {
+      res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Speak voice="${plivoVoice}" language="${plivoLang}">Thank you. Goodbye.</Speak><Hangup/></Response>`,
+      );
+      return;
+    }
+
+    if (choice.action === 'transfer_to_number' && choice.transfer_to) {
+      const target = String(choice.transfer_to);
+      res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Speak voice="${plivoVoice}" language="${plivoLang}">Connecting you now.</Speak><Dial timeout="30"><Number>${escapeXml(target)}</Number></Dial></Response>`,
+      );
+      return;
+    }
+
+    if (choice.action === 'route_to_agent' && choice.agent_id) {
+      // Redirect to /plivo/voice with the chosen agent. Pass ivrFallback=1 so
+      // the inbound handler doesn't re-render the IVR (would loop forever).
+      res.type('text/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Redirect method="POST">${escapeXml(`${config.publicBaseUrl}/webhooks/plivo/voice?agentId=${choice.agent_id}&tenantId=${tenantId}&from=${encodeURIComponent(From)}&to=${encodeURIComponent(To)}&ivrFallback=1`)}</Redirect></Response>`,
+      );
+      return;
+    }
+
+    // Unrecognized action shape — fall back to original agent.
+    res.type('text/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Redirect method="POST">${escapeXml(`${config.publicBaseUrl}/webhooks/plivo/voice?agentId=${originalAgentId}&tenantId=${tenantId}&ivrFallback=1`)}</Redirect></Response>`,
+    );
   } catch (err) {
     next(err);
   }

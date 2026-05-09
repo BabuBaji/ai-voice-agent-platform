@@ -34,6 +34,7 @@ import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, SarvamSttHandle } from '../providers/sarvamSpeech';
 import { plivoProvider } from '../providers/plivo.provider';
+import { resolveDeployedAgent } from '../services/deployedAgentResolver';
 
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
@@ -48,7 +49,17 @@ function firstNonEmpty(...vals: (string | null | undefined)[]): string {
   return '';
 }
 
-async function loadAgent(agentId: string, tenantId: string): Promise<any | null> {
+async function loadAgent(
+  agentId: string,
+  tenantId: string,
+  numberId?: string | null,
+): Promise<any | null> {
+  try {
+    const resolved = await resolveDeployedAgent(pool, { agentId, tenantId, numberId: numberId || null });
+    if (resolved) return resolved;
+  } catch {
+    /* fall through to direct fetch */
+  }
   try {
     const raw = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
     const base = raw.replace(/\/+$/, '').replace(/\/api\/v1$/, '');
@@ -698,8 +709,32 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
 // ---- event handlers --------------------------------------------------------
 
 async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void> {
-  // Load agent (the query params carry agentId/tenantId from the XML we emitted)
-  session.agent = await loadAgent(session.agentId, session.tenantId);
+  // Resolve number_id (if any) so the deployed snapshot is keyed correctly.
+  // Inbound: look up by the called number; outbound: by agent_id.
+  let numberId: string | null = null;
+  try {
+    if (session.calledNumber) {
+      const r = await pool.query(
+        `SELECT id FROM phone_numbers
+          WHERE phone_number = $1 AND tenant_id = $2 AND is_active = TRUE LIMIT 1`,
+        [session.calledNumber, session.tenantId],
+      );
+      numberId = r.rows[0]?.id || null;
+    }
+    if (!numberId) {
+      const r = await pool.query(
+        `SELECT id FROM phone_numbers
+          WHERE tenant_id = $1 AND agent_id = $2 AND is_active = TRUE
+          ORDER BY deployed_at DESC NULLS LAST LIMIT 1`,
+        [session.tenantId, session.agentId],
+      );
+      numberId = r.rows[0]?.id || null;
+    }
+  } catch {
+    /* non-fatal */
+  }
+  // Load agent (snapshot first via resolver, then live fetch).
+  session.agent = await loadAgent(session.agentId, session.tenantId, numberId);
   if (!session.agent) {
     logger.warn({ agentId: session.agentId }, 'Stream handler: agent load failed');
     // Play a short error + hang up the stream (Plivo will end the call)

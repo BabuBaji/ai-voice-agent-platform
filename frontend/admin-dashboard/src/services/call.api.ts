@@ -53,4 +53,22 @@ export const callApi = {
     const response = await api.get(`/calls/${id}/recording`);
     return response.data;
   },
+
+  /** Trigger Twilio's caller-ID verification flow for a destination number.
+   * Twilio places a call to the number; the answerer enters the returned
+   * validation_code on the keypad. Once accepted, outbound dials to the
+   * number stop returning the trial-account "unverified" error.
+   * No-op for non-Twilio carriers. */
+  verifyDestination: async (
+    phoneNumber: string,
+  ): Promise<{
+    already_verified: boolean;
+    phone_number: string;
+    validation_code?: string;
+    friendly_name?: string;
+    message: string;
+  }> => {
+    const r = await api.post('/calls/verify-destination', { phone_number: phoneNumber });
+    return r.data;
+  },
 };

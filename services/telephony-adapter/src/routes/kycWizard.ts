@@ -602,16 +602,56 @@ kycWizardRouter.post('/:id/complete', async (req, res, next) => {
       return;
     }
 
-    // 1. Register Plivo End User
+    // 0. Pre-flight balance check — fail fast (and clearly) BEFORE we make
+    //    Plivo calls if the carrier wallet can't cover this number's first
+    //    month's rent. Saves the user from going through KYC just to hit
+    //    "Credit is too low" at the last step.
+    try {
+      const monthlyRate = parseFloat(String(ses.monthly_rate || 0)) || 0;
+      const required = monthlyRate > 0 ? monthlyRate : 1.0;
+      const bal = await plivoProvider.getAccountBalance();
+      if (bal && bal.cashCredits < required) {
+        res.status(402).json({
+          error: 'Insufficient Carrier Balance',
+          carrier: 'plivo',
+          balance: bal.cashCredits,
+          required,
+          shortfall: +(required - bal.cashCredits).toFixed(3),
+          top_up_url: 'https://console.plivo.com/account/billing/',
+          message: `Your Plivo wallet has $${bal.cashCredits.toFixed(2)} but this number costs $${required.toFixed(2)}/mo. Top up at console.plivo.com/account/billing and click Complete Purchase again — your KYC is saved.`,
+        });
+        return;
+      }
+    } catch { /* non-fatal — proceed and let Plivo's own error handling fire */ }
+
+    // 1. Register Plivo End User — but first reuse a prior end_user_id from
+    //    a previous KYC submission for this tenant+provider so we don't
+    //    duplicate-create at the carrier (Plivo rejects duplicate names with
+    //    "Business user: X already exists"). registerEndUser is also itself
+    //    idempotent — if a duplicate slips through, it looks up the existing
+    //    one and returns its ID. Belt-and-braces.
     let endUserId: string;
     try {
-      const parts = (ses.full_name || '').trim().split(/\s+/);
-      const r = await plivoProvider.registerEndUser({
-        name: parts[0] || ses.full_name,
-        last_name: parts.slice(1).join(' '),
-        end_user_type: 'business',
-      });
-      endUserId = r.endUserId;
+      const prior = await pool.query(
+        `SELECT provider_end_user_id FROM kyc_submissions
+          WHERE tenant_id = $1 AND provider = $2 AND provider_end_user_id IS NOT NULL`,
+        [t, ses.provider],
+      );
+      const cached = prior.rows[0]?.provider_end_user_id || null;
+      if (cached) {
+        endUserId = cached;
+      } else if (ses.provider_end_user_id) {
+        // Already attached to THIS session from an earlier complete attempt.
+        endUserId = ses.provider_end_user_id;
+      } else {
+        const parts = (ses.full_name || '').trim().split(/\s+/);
+        const r = await plivoProvider.registerEndUser({
+          name: parts[0] || ses.full_name,
+          last_name: parts.slice(1).join(' '),
+          end_user_type: 'business',
+        });
+        endUserId = r.endUserId;
+      }
     } catch (err: any) {
       res.status(502).json({ error: 'Carrier Rejection', message: `Plivo rejected the End-User registration: ${err.message}` });
       return;
@@ -657,7 +697,21 @@ kycWizardRouter.post('/:id/complete', async (req, res, next) => {
       });
     } catch (err: any) {
       const lower = (err.message || '').toLowerCase();
-      const isCompliance = lower.includes('complian') || lower.includes('kyc') || lower.includes('document');
+      const isInsufficient = lower.includes('credit is too low') || lower.includes('insufficient') || lower.includes('not enough');
+      const isCompliance = !isInsufficient && (lower.includes('complian') || lower.includes('kyc') || lower.includes('document'));
+      if (isInsufficient) {
+        const monthlyRate = parseFloat(String(ses.monthly_rate || 0)) || 0;
+        const bal = await plivoProvider.getAccountBalance().catch(() => null);
+        res.status(402).json({
+          error: 'Insufficient Carrier Balance',
+          carrier: 'plivo',
+          balance: bal?.cashCredits ?? null,
+          required: monthlyRate || null,
+          top_up_url: 'https://console.plivo.com/account/billing/',
+          message: `Your Plivo wallet doesn't have enough credit to rent ${ses.number}${monthlyRate ? ` ($${monthlyRate.toFixed(2)}/mo)` : ''}. Top up at console.plivo.com/account/billing and click Complete Purchase again — your KYC is saved.`,
+        });
+        return;
+      }
       res.status(isCompliance ? 422 : 502).json({
         error: isCompliance ? 'Compliance Required' : 'Provider Error',
         message: isCompliance
@@ -685,6 +739,33 @@ kycWizardRouter.post('/:id/complete', async (req, res, next) => {
     );
     const updated = await loadSession(ses.id, t);
     res.status(201).json({ data: phone, session: publicSession(updated) });
+  } catch (e) { next(e); }
+});
+
+// ─── GET /:id/balance-check ────────────────────────────────────────────
+// Lightweight live balance probe used by the wizard's "waiting for top-up"
+// panel. Polled every few seconds while the user is on Plivo's billing tab;
+// when balance >= required, the UI auto-retries /complete.
+kycWizardRouter.get('/:id/balance-check', async (req, res, next) => {
+  try {
+    const t = tenantId(req, res); if (!t) return;
+    const ses = await loadSession(req.params.id, t);
+    if (!ses) { res.status(404).json({ error: 'Not Found' }); return; }
+    const monthlyRate = parseFloat(String(ses.monthly_rate || 0)) || 0;
+    const required = monthlyRate > 0 ? monthlyRate : 1.0;
+    const bal = await plivoProvider.getAccountBalance();
+    if (!bal) {
+      res.json({ ok: false, balance: null, required, sufficient: false, reason: 'unavailable' });
+      return;
+    }
+    res.json({
+      ok: true,
+      balance: bal.cashCredits,
+      required,
+      sufficient: bal.cashCredits >= required,
+      account_type: bal.accountType,
+      auto_recharge: bal.autoRecharge,
+    });
   } catch (e) { next(e); }
 });
 

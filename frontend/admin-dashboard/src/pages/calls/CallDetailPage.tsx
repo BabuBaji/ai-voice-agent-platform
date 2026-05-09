@@ -145,14 +145,14 @@ export function CallDetailPage() {
 
   if (error || !conversation) {
     return (
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/calls')} className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
-            <ArrowLeft className="h-5 w-5" />
+      <div className="max-w-7xl mx-auto space-y-3">
+        <div className="flex items-center gap-2">
+          <button onClick={() => navigate('/calls')} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
+            <ArrowLeft className="h-4 w-4" />
           </button>
-          <h1 className="text-2xl font-bold text-gray-900">Call Not Found</h1>
+          <h1 className="text-base font-semibold text-gray-900">Call Not Found</h1>
         </div>
-        <Card>
+        <Card padding={false} className="p-3">
           <p className="text-sm text-gray-500">{error || 'This call could not be loaded.'}</p>
         </Card>
       </div>
@@ -170,16 +170,29 @@ export function CallDetailPage() {
   const summary = conversation.summary || conversation.analysis?.summary || 'No summary available yet.';
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex items-center gap-4">
-        <button onClick={() => navigate('/calls')} className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
-          <ArrowLeft className="h-5 w-5" />
+    <div className="max-w-7xl mx-auto space-y-3">
+      {/* Hero strip — compact header with status, duration, channel, timestamp inline */}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm px-3 py-2 flex items-center gap-3">
+        <button onClick={() => navigate('/calls')} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors flex-shrink-0">
+          <ArrowLeft className="h-4 w-4" />
         </button>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold text-gray-900">Call Detail</h1>
-          <p className="text-sm text-gray-500 font-mono">Call ID: {conversation.id}</p>
+        <div className="flex-1 min-w-0 flex items-center gap-3 flex-wrap">
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold text-gray-900 leading-tight flex items-center gap-2">
+              Call Detail
+              <StatusBadge status={(conversation.status || 'completed').toLowerCase()} />
+            </h1>
+            <p className="text-[11px] text-gray-400 font-mono truncate">{conversation.id}</p>
+          </div>
+          <div className="flex items-center gap-3 text-xs text-gray-600 ml-auto sm:ml-0">
+            <span className="inline-flex items-center gap-1"><Clock className="h-3 w-3 text-gray-400" />{formatDuration(duration)}</span>
+            <span className="text-gray-300">·</span>
+            <Badge variant="outline-primary">{conversation.channel}</Badge>
+            <span className="text-gray-300">·</span>
+            <span className="tabular-nums">{formatDate(conversation.started_at)}</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           <Button
             size="sm"
             variant="outline"
@@ -190,10 +203,10 @@ export function CallDetailPage() {
                 const a = document.createElement('a');
                 a.href = url; a.download = `conversation-${conversation.id}.json`; a.click();
                 URL.revokeObjectURL(url);
-              } catch { /* swallow — could surface a toast */ }
+              } catch { /* swallow */ }
             }}
           >
-            <Download className="h-4 w-4" /> Export JSON
+            <Download className="h-3.5 w-3.5" /> JSON
           </Button>
           <Button
             size="sm"
@@ -208,32 +221,73 @@ export function CallDetailPage() {
               } catch { /* swallow */ }
             }}
           >
-            <Download className="h-4 w-4" /> Export CSV
+            <Download className="h-3.5 w-3.5" /> CSV
           </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-4">
-          <Card>
-            <CardHeader title="Recording" subtitle={conversation.language ? `Language: ${conversation.language}` : undefined} />
+      {/* Stat strip — at-a-glance metrics above the grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="bg-white rounded-lg border border-gray-100 px-3 py-2">
+          <div className="text-[10px] uppercase text-gray-500 tracking-wide flex items-center gap-1">
+            {sentiment === 'positive' && <ThumbsUp className="h-3 w-3 text-success-500" />}
+            {sentiment === 'negative' && <ThumbsDown className="h-3 w-3 text-danger-500" />}
+            {sentiment === 'neutral' && <Minus className="h-3 w-3 text-gray-400" />}
+            {sentiment === 'mixed' && <Sparkles className="h-3 w-3 text-warning-500" />}
+            Sentiment
+          </div>
+          <div className="text-sm font-semibold text-gray-900 mt-0.5 capitalize">{sentiment || '—'}</div>
+        </div>
+        <div className="bg-white rounded-lg border border-gray-100 px-3 py-2">
+          <div className="text-[10px] uppercase text-gray-500 tracking-wide flex items-center gap-1">
+            <TrendingUp className="h-3 w-3" /> Interest
+          </div>
+          <div className="text-sm font-semibold text-gray-900 mt-0.5 tabular-nums">{interest}%</div>
+          <div className="w-full bg-gray-100 rounded-full h-1 mt-1">
+            <div
+              className={`h-1 rounded-full transition-all ${interest >= 70 ? 'bg-success-500' : interest >= 40 ? 'bg-warning-500' : 'bg-gray-400'}`}
+              style={{ width: `${interest}%` }}
+            />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg border border-gray-100 px-3 py-2">
+          <div className="text-[10px] uppercase text-gray-500 tracking-wide flex items-center gap-1">
+            <CheckCircle2 className="h-3 w-3 text-success-500" /> Outcome
+          </div>
+          <div className="text-sm font-semibold text-gray-900 mt-0.5 truncate" title={outcome}>{outcome}</div>
+        </div>
+        <div className="bg-white rounded-lg border border-gray-100 px-3 py-2">
+          <div className="text-[10px] uppercase text-gray-500 tracking-wide flex items-center gap-1">
+            <Tag className="h-3 w-3 text-primary-500" /> Topics
+          </div>
+          <div className="text-sm font-semibold text-gray-900 mt-0.5 tabular-nums">
+            {topics.length} <span className="text-gray-400 font-normal text-xs">discussed</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div className="lg:col-span-2 space-y-3">
+          <Card padding={false} className="p-3">
+            <CardHeader className="mb-2" title="Recording" subtitle={conversation.language ? `Language: ${conversation.language}` : undefined} />
             <CallPlayer recordingUrl={audioBlobUrl} duration={duration} />
           </Card>
-          <Card>
-            <CardHeader title="Transcript" subtitle={`${transcript.length} messages (live)`} />
-            <div className="max-h-[500px] overflow-y-auto scrollbar-thin">
+          <Card padding={false} className="p-3">
+            <CardHeader className="mb-2" title="Transcript" subtitle={`${transcript.length} messages (live)`} />
+            <div className="max-h-[400px] overflow-y-auto scrollbar-thin">
               {transcript.length > 0 ? (
                 <TranscriptViewer messages={transcript} />
               ) : (
-                <p className="text-sm text-gray-400 text-center py-8">No messages recorded during the call.</p>
+                <p className="text-sm text-gray-400 text-center py-4">No messages recorded during the call.</p>
               )}
             </div>
           </Card>
 
           <TranslationCard conversationId={conversation.id} hasTranscript={transcript.length > 0} />
 
-          <Card>
+          <Card padding={false} className="p-3">
             <CardHeader
+              className="mb-2"
               title="Whisper Transcript"
               subtitle={
                 whisper
@@ -257,7 +311,7 @@ export function CallDetailPage() {
             />
 
             {!audioBlobUrl && (
-              <p className="text-sm text-gray-400 py-4">
+              <p className="text-sm text-gray-400 py-2">
                 No recording file is available for this call — nothing to transcribe.
               </p>
             )}
@@ -273,8 +327,8 @@ export function CallDetailPage() {
             )}
 
             {whisper && (
-              <div className="space-y-4">
-                <div className="max-h-[420px] overflow-y-auto scrollbar-thin space-y-1.5 bg-gray-50 rounded-lg p-3">
+              <div className="space-y-2">
+                <div className="max-h-[360px] overflow-y-auto scrollbar-thin space-y-1 bg-gray-50 rounded-lg p-2.5">
                   {whisper.segments.length > 0 ? (
                     whisper.segments.map((seg, i) => (
                       <div key={i} className="flex gap-3 text-sm">
@@ -298,76 +352,38 @@ export function CallDetailPage() {
           </Card>
         </div>
 
-        <div className="space-y-4">
-          <Card>
-            <CardHeader title="Call Information" />
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Status</span>
-                <StatusBadge status={(conversation.status || 'completed').toLowerCase()} />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Duration</span>
-                <span className="text-sm font-medium text-gray-900 flex items-center gap-1">
-                  <Clock className="h-3.5 w-3.5 text-gray-400" />{formatDuration(duration)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Date</span>
-                <span className="text-sm text-gray-700">{formatDate(conversation.started_at)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Channel</span>
-                <Badge variant="outline-primary">{conversation.channel}</Badge>
-              </div>
-            </div>
-          </Card>
-
-          <Card>
-            <CardHeader title="AI Analysis" subtitle="Automated call insights" />
-            <div className="space-y-5">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Sentiment</span>
-                <div className="flex items-center gap-1.5">
-                  {sentiment === 'positive' && <ThumbsUp className="h-4 w-4 text-success-500" />}
-                  {sentiment === 'negative' && <ThumbsDown className="h-4 w-4 text-danger-500" />}
-                  {sentiment === 'neutral' && <Minus className="h-4 w-4 text-gray-400" />}
-                  {sentiment === 'mixed' && <Sparkles className="h-4 w-4 text-warning-500" />}
-                  <StatusBadge status={sentiment} />
+        <div className="space-y-3">
+          {/* Combined Agent + Caller card — less wasted space than 2 separate */}
+          <Card padding={false} className="p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center flex-shrink-0">
+                  <Bot className="h-4 w-4 text-primary-600" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[10px] uppercase text-gray-400 tracking-wide">Agent</p>
+                  <p className="text-sm font-medium text-gray-900 truncate">{agentName || 'Agent'}</p>
+                  {agentVoice && <p className="text-[11px] text-gray-500 truncate">{agentVoice}</p>}
                 </div>
               </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-500 flex items-center gap-1">
-                    <TrendingUp className="h-3.5 w-3.5" /> Interest Level
-                  </span>
-                  <span className="text-sm font-semibold text-gray-900">{interest}%</span>
+              {conversation.caller_number && (
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center flex-shrink-0">
+                    <User className="h-4 w-4 text-primary-500" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[10px] uppercase text-gray-400 tracking-wide">Caller</p>
+                    <p className="text-sm font-medium text-gray-900 font-mono truncate">{conversation.caller_number}</p>
+                  </div>
                 </div>
-                <div className="w-full bg-gray-200 rounded-full h-2.5">
-                  <div
-                    className={`h-2.5 rounded-full transition-all duration-500 ${
-                      interest >= 70 ? 'bg-success-500' : interest >= 40 ? 'bg-warning-500' : 'bg-gray-400'
-                    }`}
-                    style={{ width: `${interest}%` }}
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-500">Outcome</span>
-                <Badge variant="success" dot>
-                  <CheckCircle2 className="h-3 w-3 mr-1" />
-                  {outcome}
-                </Badge>
-              </div>
+              )}
             </div>
           </Card>
 
           {topics.length > 0 && (
-            <Card>
-              <CardHeader title="Key Topics" />
-              <div className="flex flex-wrap gap-2">
+            <Card padding={false} className="p-3">
+              <CardHeader className="mb-2" title="Key Topics" />
+              <div className="flex flex-wrap gap-1.5">
                 {topics.map((topic) => (
                   <Badge key={topic} variant="outline-primary">
                     <Tag className="h-3 w-3 mr-1" />
@@ -378,42 +394,15 @@ export function CallDetailPage() {
             </Card>
           )}
 
-          <Card>
-            <CardHeader title="Agent" />
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center">
-                <Bot className="h-5 w-5 text-primary-600" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-gray-900">{agentName || 'Agent'}</p>
-                {agentVoice && <p className="text-xs text-gray-500">{agentVoice}</p>}
-              </div>
-            </div>
-          </Card>
-
-          {conversation.caller_number && (
-            <Card>
-              <CardHeader title="Caller" />
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center">
-                  <User className="h-5 w-5 text-primary-500" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-gray-900">{conversation.caller_number}</p>
-                </div>
-              </div>
-            </Card>
-          )}
-
-          <Card>
-            <CardHeader title="Summary" />
+          <Card padding={false} className="p-3">
+            <CardHeader className="mb-2" title="Summary" />
             <p className="text-sm text-gray-600 leading-relaxed">{summary}</p>
           </Card>
 
           {keyPoints.length > 0 && (
-            <Card>
-              <CardHeader title="Key Points" />
-              <ul className="space-y-2">
+            <Card padding={false} className="p-3">
+              <CardHeader className="mb-2" title="Key Points" />
+              <ul className="space-y-1.5">
                 {keyPoints.map((pt, i) => (
                   <li key={i} className="flex gap-2 text-sm text-gray-700">
                     <span className="text-primary-500">•</span>
@@ -425,9 +414,9 @@ export function CallDetailPage() {
           )}
 
           {followUps.length > 0 && (
-            <Card>
-              <CardHeader title="Recommended Follow-ups" subtitle="AI-suggested next steps" />
-              <ul className="space-y-3">
+            <Card padding={false} className="p-3">
+              <CardHeader className="mb-2" title="Recommended Follow-ups" subtitle="AI-suggested next steps" />
+              <ul className="space-y-2">
                 {followUps.map((rec, i) => (
                   <li key={i} className="flex gap-2.5 text-sm">
                     <Lightbulb className="h-4 w-4 text-warning-500 flex-shrink-0 mt-0.5" />

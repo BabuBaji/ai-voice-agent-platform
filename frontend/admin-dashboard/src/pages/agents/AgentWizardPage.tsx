@@ -211,6 +211,10 @@ export function AgentWizardPage() {
   const [countryCode, setCountryCode] = useState('+91');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [callSubmitting, setCallSubmitting] = useState(false);
+  // Twilio caller-ID verification state — surfaced when the trial-account
+  // "destination unverified" error comes back from /calls/initiate.
+  const [verifying, setVerifying] = useState(false);
+  const [verifyInfo, setVerifyInfo] = useState<{ phone_number: string; validation_code?: string; already_verified: boolean; message: string } | null>(null);
 
   const primaryLanguage = languages[0] || 'en-US';
 
@@ -444,6 +448,26 @@ export function AgentWizardPage() {
       navigate(`/agents/${createdAgentId}/call`);
     } finally {
       setCallSubmitting(false);
+    }
+  };
+
+  // Detect the "trial — destination unverified" error string from Twilio so we
+  // can offer the in-app verification button.
+  const errorIsUnverified = !!error && /unverified|trial accounts may only|verified caller/i.test(error);
+
+  const handleVerifyDestination = async () => {
+    setVerifying(true);
+    setVerifyInfo(null);
+    try {
+      const fullNumber = `${countryCode}${phoneNumber.replace(/\s+/g, '')}`;
+      const r = await callApi.verifyDestination(fullNumber);
+      setVerifyInfo(r);
+      // If already verified, clear the prior error so the user can retry without confusion.
+      if (r.already_verified) setError(null);
+    } catch (e: any) {
+      setError(e?.response?.data?.message || e?.message || 'Could not start verification');
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -885,9 +909,50 @@ export function AgentWizardPage() {
           </div>
 
           {error && (
-            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 text-red-700 border border-red-200 text-sm">
-              <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
-              <span>{error}</span>
+            <div className="flex flex-col gap-2 p-3 rounded-xl bg-red-50 text-red-700 border border-red-200 text-sm">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+              {errorIsUnverified && (
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-red-200">
+                  <span className="text-xs text-red-700">
+                    Twilio trial accounts can only call verified numbers. Verify it now without leaving this page →
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleVerifyDestination}
+                    loading={verifying}
+                    className="rounded-lg whitespace-nowrap"
+                  >
+                    {verifying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PhoneCall className="h-3.5 w-3.5" />}
+                    Verify with Twilio
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {verifyInfo && (
+            <div className="flex items-start gap-2 p-3 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200 text-sm">
+              <Check className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <div className="font-medium">{verifyInfo.message}</div>
+                {!verifyInfo.already_verified && verifyInfo.validation_code && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-xs">Code to enter on your phone keypad:</span>
+                    <span className="inline-block px-3 py-1 rounded-lg bg-white border border-emerald-300 font-mono text-lg font-bold tracking-widest text-emerald-900">
+                      {verifyInfo.validation_code}
+                    </span>
+                  </div>
+                )}
+                {!verifyInfo.already_verified && (
+                  <p className="text-xs mt-2 text-emerald-700">
+                    Once you've entered the code, click <strong>Start Phone Call</strong> again — your test will go through.
+                  </p>
+                )}
+              </div>
             </div>
           )}
 

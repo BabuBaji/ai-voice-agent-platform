@@ -426,6 +426,47 @@ function CompleteStep({ session, onAdvance, onCompleted }: { session: KycSession
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  // Detailed failure context — populated when the carrier returns a structured
+  // 402 (insufficient balance) so we can render an inline "Top up" CTA.
+  const [carrierFailure, setCarrierFailure] = useState<{
+    error: string;
+    balance?: number | null;
+    required?: number | null;
+    shortfall?: number | null;
+    top_up_url?: string;
+    message?: string;
+  } | null>(null);
+  // Live-balance polling state — kicks in after the user opens Plivo's
+  // billing page so we can auto-retry the moment the wallet is funded.
+  const [polling, setPolling] = useState(false);
+  const [liveBalance, setLiveBalance] = useState<number | null>(null);
+  const [pollTick, setPollTick] = useState(0);
+  const [autoRetried, setAutoRetried] = useState(false);
+
+  // Poll Plivo's account balance every 8s while we're in the failure state
+  // and the user has clicked "Top up" (which sets `polling=true`). Auto-fires
+  // /complete the moment balance >= required.
+  useEffect(() => {
+    if (!polling || !carrierFailure) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (cancelled) return;
+      setPollTick((t) => t + 1);
+      try {
+        const r = await phoneNumberApi.wizard.balanceCheck(session.id);
+        if (cancelled) return;
+        setLiveBalance(r.balance);
+        if (r.sufficient && !autoRetried) {
+          setAutoRetried(true);
+          setPolling(false);
+          // Auto-retry the purchase since the wallet is now funded.
+          submit();
+        }
+      } catch { /* keep polling */ }
+    }, 8000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polling, carrierFailure?.required, autoRetried, session.id]);
 
   const done_already = session.status === 'completed';
   const summary = useMemo(() => ([
@@ -439,6 +480,7 @@ function CompleteStep({ session, onAdvance, onCompleted }: { session: KycSession
 
   const submit = async () => {
     setErr(null);
+    setCarrierFailure(null);
     setSubmitting(true);
     try {
       const r = await phoneNumberApi.wizard.complete(session.id);
@@ -446,7 +488,20 @@ function CompleteStep({ session, onAdvance, onCompleted }: { session: KycSession
       setDone(true);
       setTimeout(() => onCompleted(r.data), 1500);
     } catch (e: any) {
-      setErr(e?.response?.data?.message || e?.message || 'Failed to complete purchase');
+      const data = e?.response?.data;
+      // Structured 402 (insufficient carrier balance) → render a top-up CTA.
+      if (e?.response?.status === 402 && data?.error === 'Insufficient Carrier Balance') {
+        setCarrierFailure({
+          error: data.error,
+          balance: data.balance,
+          required: data.required,
+          shortfall: data.shortfall,
+          top_up_url: data.top_up_url,
+          message: data.message,
+        });
+      } else {
+        setErr(data?.message || e?.message || 'Failed to complete purchase');
+      }
     } finally { setSubmitting(false); }
   };
 
@@ -486,8 +541,124 @@ function CompleteStep({ session, onAdvance, onCompleted }: { session: KycSession
           </div>
         )}
       </div>
+      {carrierFailure && (() => {
+        const required = carrierFailure.required ?? 0;
+        const balance = liveBalance ?? carrierFailure.balance ?? 0;
+        const shortfall = Math.max(0, required - balance);
+        const sufficient = balance >= required && required > 0;
+        // Recommended top-up tiers: barely-cover, comfortable for testing,
+        // production-ish. Costs in USD with the current number's monthly rate.
+        const tiers = [
+          { amount: Math.max(5, Math.ceil(required) + 2), label: 'Just this number', minutes: 0 },
+          { amount: 10, label: '+ ~10 min testing', minutes: 10 },
+          { amount: 25, label: '+ ~80 min calls', minutes: 80 },
+        ];
+        return (
+          <div className="rounded-2xl overflow-hidden border-2 border-amber-300 shadow-sm">
+            {/* Header strip */}
+            <div className="bg-gradient-to-r from-amber-500 to-orange-500 px-5 py-3 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center flex-shrink-0">
+                <AlertCircle className="h-5 w-5 text-white" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-white font-semibold text-sm">
+                  {sufficient ? 'Wallet ready — retrying purchase…' : 'Plivo wallet needs a top-up'}
+                </div>
+                <div className="text-amber-50 text-xs mt-0.5">
+                  {sufficient
+                    ? `Balance is now $${balance.toFixed(2)}, enough for $${required.toFixed(2)}/mo.`
+                    : `Add at least $${shortfall.toFixed(2)} so we can rent ${session.number}.`}
+                </div>
+              </div>
+              {polling && !sufficient && (
+                <div className="hidden sm:flex items-center gap-1.5 text-xs text-white/90 flex-shrink-0">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Watching balance…
+                </div>
+              )}
+            </div>
+
+            <div className="p-5 space-y-4 bg-amber-50/50">
+              {/* Live balance strip */}
+              <div className="grid grid-cols-3 gap-2 bg-white rounded-xl p-3 border border-amber-200">
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">Balance{liveBalance != null ? ' (live)' : ''}</div>
+                  <div className={`font-mono font-bold text-base mt-0.5 tabular-nums ${sufficient ? 'text-emerald-700' : 'text-gray-900'}`}>
+                    ${balance.toFixed(2)}
+                    {polling && pollTick > 0 && !sufficient && <span className="ml-1 text-[10px] text-gray-400 font-normal">·{pollTick}</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">Required</div>
+                  <div className="font-mono font-bold text-base text-gray-900 mt-0.5 tabular-nums">${required.toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">{sufficient ? 'Buffer' : 'Short by'}</div>
+                  <div className={`font-mono font-bold text-base mt-0.5 tabular-nums ${sufficient ? 'text-emerald-700' : 'text-amber-700'}`}>
+                    {sufficient ? '+' : ''}${Math.abs(balance - required).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Suggested top-up tiers */}
+              {!sufficient && (
+                <div>
+                  <div className="text-[11px] text-amber-900 font-medium uppercase tracking-wide mb-1.5">Suggested top-up</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {tiers.map((t) => (
+                      <a
+                        key={t.amount}
+                        href={`${carrierFailure.top_up_url || 'https://console.plivo.com/account/billing/'}?amount=${t.amount}`}
+                        target="_blank" rel="noopener"
+                        onClick={() => setPolling(true)}
+                        className="block rounded-lg border-2 border-amber-200 bg-white hover:border-amber-500 hover:bg-amber-50 p-2.5 text-center transition"
+                      >
+                        <div className="text-base font-bold text-gray-900 tabular-nums">${t.amount}</div>
+                        <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">{t.label}</div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Primary action row */}
+              <div className="flex items-center gap-2">
+                <a
+                  href={carrierFailure.top_up_url || 'https://console.plivo.com/account/billing/'}
+                  target="_blank" rel="noopener"
+                  onClick={() => setPolling(true)}
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold shadow-sm transition"
+                >
+                  <ShieldCheck className="h-4 w-4" />
+                  {polling ? 'Top-up tab open — auto-retrying when funded' : 'Open Plivo Billing'}
+                </a>
+                <button
+                  onClick={submit}
+                  disabled={submitting}
+                  className="px-4 py-2.5 rounded-xl border-2 border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-sm font-medium inline-flex items-center gap-1.5"
+                >
+                  {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                  {submitting ? 'Retrying' : 'Retry now'}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-amber-800/80">
+                <span>KYC progress saved · re-using EndUser at carrier</span>
+                <button
+                  onClick={() => { setCarrierFailure(null); setPolling(false); setLiveBalance(null); setAutoRetried(false); }}
+                  className="underline hover:text-amber-900"
+                >
+                  Dismiss & cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {err && <ErrorBanner>{err}</ErrorBanner>}
-      <ContinueBtn onClick={submit} disabled={submitting} label="Complete Purchase" icon={<ShieldCheck className="h-4 w-4" />} />
+      {!carrierFailure && (
+        <ContinueBtn onClick={submit} disabled={submitting} label="Complete Purchase" icon={<ShieldCheck className="h-4 w-4" />} />
+      )}
     </Panel>
   );
 }

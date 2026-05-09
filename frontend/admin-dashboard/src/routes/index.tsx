@@ -105,6 +105,7 @@ import { SuperAdminBroadcastsPage } from '@/pages/superAdmin/BroadcastsPage';
 import { SuperAdminCostAnalysisPage } from '@/pages/superAdmin/CostAnalysisPage';
 import { SuperAdmin2FAPage } from '@/pages/superAdmin/TwoFactorPage';
 import { SuperAdminSubscriptionsPage } from '@/pages/superAdmin/SubscriptionsPage';
+import { MonitorPage as SuperAdminMonitorPage } from '@/pages/superAdmin/MonitorPage';
 
 export const routes: RouteObject[] = [
   // Public landing page
@@ -153,6 +154,7 @@ export const routes: RouteObject[] = [
       { path: '/super-admin/cost', element: <SuperAdminCostAnalysisPage /> },
       { path: '/super-admin/subscriptions', element: <SuperAdminSubscriptionsPage /> },
       { path: '/super-admin/2fa', element: <SuperAdmin2FAPage /> },
+      { path: '/super-admin/monitor', element: <SuperAdminMonitorPage /> },
     ],
   },
   // Public docs hub (dedicated dark layout, no auth required)

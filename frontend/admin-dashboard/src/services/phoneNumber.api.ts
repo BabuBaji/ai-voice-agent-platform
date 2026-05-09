@@ -10,6 +10,65 @@ export interface PhoneNumberRecord {
   capabilities: { voice: boolean; sms: boolean };
   is_active: boolean;
   created_at: string;
+  deployment_status?: 'draft' | 'testing' | 'deployed' | 'paused';
+  last_verified_at?: string | null;
+  deployed_at?: string | null;
+  deployed_config_id?: string | null;
+}
+
+export interface VerificationTestResult {
+  test: string;
+  status: 'pass' | 'fail' | 'skip';
+  log?: any;
+  error?: string;
+}
+
+export interface VerificationRunSummary {
+  run_id: string;
+  aggregate: 'verified' | 'partial' | 'failed';
+  results: VerificationTestResult[];
+  summary: { total: number; passed: number; failed: number; skipped: number };
+}
+
+export interface RouteConfig {
+  business_hours?: {
+    enabled: boolean;
+    timezone: string;
+    days: Record<string, { open: string; close: string } | null>;
+    after_hours_message?: string;
+  };
+  failover?: {
+    enabled: boolean;
+    failover_agent_id?: string | null;
+    failover_number_id?: string | null;
+    failover_provider?: 'plivo' | 'twilio' | 'exotel' | null;
+  };
+  ivr?: {
+    enabled: boolean;
+    greeting?: string;
+    menu: { digit: string; label: string; action: 'route_to_agent' | 'transfer_to_number' | 'hangup'; agent_id?: string | null; transfer_to?: string | null }[];
+    timeout_seconds: number;
+  };
+  geo?: {
+    enabled: boolean;
+    allowed_country_codes: string[];
+    blocked_country_codes: string[];
+  };
+  spam_dnd?: {
+    enabled: boolean;
+    blocked_numbers: string[];
+  };
+}
+
+export interface AuditEntry {
+  id: string;
+  event_type: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  before_state: any;
+  after_state: any;
+  metadata: any;
+  created_at: string;
 }
 
 export const phoneNumberApi = {
@@ -141,6 +200,18 @@ export const phoneNumberApi = {
     cancel: async (id: string) => {
       await api.delete(`/phone-numbers/kyc-wizard/${id}`);
     },
+    balanceCheck: async (id: string): Promise<{
+      ok: boolean;
+      balance: number | null;
+      required: number;
+      sufficient: boolean;
+      reason?: string;
+      account_type?: string;
+      auto_recharge?: boolean;
+    }> => {
+      const r = await api.get(`/phone-numbers/kyc-wizard/${id}/balance-check`);
+      return r.data;
+    },
   },
 
   /** KYC-gated buy: validates KYC, registers a Plivo End User, then rents the number. */
@@ -166,14 +237,106 @@ export const phoneNumberApi = {
     phone_number: string;
     provider_sid?: string;
     capabilities?: ('voice' | 'sms')[];
+    twilio_account_sid?: string;
+    twilio_auth_token?: string;
+    exotel_api_key?: string;
+    exotel_api_token?: string;
+    exotel_subdomain?: string;
+    exotel_account_sid?: string;
+    sip_uri?: string;
+    sip_username?: string;
+    sip_password?: string;
   }): Promise<PhoneNumberRecord> => {
     const r = await api.post('/phone-numbers/import', {
       provider: params.provider,
       phone_number: params.phone_number,
       provider_sid: params.provider_sid,
       capabilities: params.capabilities || ['voice'],
+      twilio_account_sid: params.twilio_account_sid,
+      twilio_auth_token: params.twilio_auth_token,
+      exotel_api_key: params.exotel_api_key,
+      exotel_api_token: params.exotel_api_token,
+      exotel_subdomain: params.exotel_subdomain,
+      exotel_account_sid: params.exotel_account_sid,
+      sip_uri: params.sip_uri,
+      sip_username: params.sip_username,
+      sip_password: params.sip_password,
     });
     return r.data;
+  },
+
+  // ── Lifecycle: verify → assign → deploy → route → audit ──
+  verify: async (id: string): Promise<VerificationRunSummary> => {
+    const r = await api.post(`/phone-numbers/${id}/verify`);
+    return r.data;
+  },
+
+  listVerifications: async (id: string): Promise<any[]> => {
+    const r = await api.get(`/phone-numbers/${id}/verifications`);
+    return r.data?.data ?? [];
+  },
+
+  startInboundProbe: async (id: string): Promise<{ probe_id: string; expires_at: string; message: string }> => {
+    const r = await api.post(`/phone-numbers/${id}/verify-inbound/start`);
+    return r.data;
+  },
+
+  checkInboundProbe: async (id: string, probe_id: string): Promise<{ status: 'pending' | 'pass' | 'fail'; log?: any; error?: string; expired?: boolean }> => {
+    const r = await api.get(`/phone-numbers/${id}/verify-inbound/check`, { params: { probe_id } });
+    return r.data;
+  },
+
+  assignAgent: async (id: string, agent_id: string, opts?: { bypass_verification?: boolean }): Promise<PhoneNumberRecord> => {
+    const r = await api.post(`/phone-numbers/${id}/assign-agent`, {
+      agent_id,
+      bypass_verification: opts?.bypass_verification === true,
+    });
+    return r.data?.data ?? r.data;
+  },
+
+  deploy: async (id: string, opts?: { agent_id?: string; bypass_verification?: boolean }): Promise<{
+    ok: boolean;
+    number_id: string;
+    agent_id: string;
+    deployment_status: string;
+    deployed_config_id: string;
+    version: number;
+  }> => {
+    const r = await api.post(`/phone-numbers/${id}/deploy`, {
+      agent_id: opts?.agent_id,
+      bypass_verification: opts?.bypass_verification === true,
+    });
+    return r.data;
+  },
+
+  pause: async (id: string): Promise<{ ok: boolean; deployment_status: string }> => {
+    const r = await api.post(`/phone-numbers/${id}/pause`);
+    return r.data;
+  },
+
+  resume: async (id: string): Promise<{ ok: boolean; deployment_status: string }> => {
+    const r = await api.post(`/phone-numbers/${id}/resume`);
+    return r.data;
+  },
+
+  getRoute: async (id: string): Promise<RouteConfig> => {
+    const r = await api.get(`/phone-numbers/${id}/route`);
+    return (r.data?.data?.route_config ?? {}) as RouteConfig;
+  },
+
+  putRoute: async (id: string, config: RouteConfig): Promise<RouteConfig> => {
+    const r = await api.put(`/phone-numbers/${id}/route`, config);
+    return r.data?.data?.route_config ?? config;
+  },
+
+  getAudit: async (id: string): Promise<AuditEntry[]> => {
+    const r = await api.get(`/phone-numbers/${id}/audit`);
+    return r.data?.data ?? [];
+  },
+
+  getDeploymentHistory: async (id: string): Promise<any[]> => {
+    const r = await api.get(`/phone-numbers/${id}/deployment`);
+    return r.data?.data ?? [];
   },
 };
 

@@ -180,6 +180,83 @@ export async function initDatabase(pool: Pool): Promise<void> {
       ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS aadhaar_otp_plain VARCHAR(8);
       ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS mobile_call_uuid VARCHAR(64);
       ALTER TABLE kyc_sessions ADD COLUMN IF NOT EXISTS aadhaar_call_uuid VARCHAR(64);
+
+      -- =====================================================================
+      -- Phone-number lifecycle (verify → assign → deploy → route → audit)
+      -- =====================================================================
+      -- Deployment status on phone_numbers itself: draft → testing → deployed
+      -- → paused. is_active is the legacy flag (kept for backward compat with
+      -- the inbound webhook lookup); deployment_status is the richer state.
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS deployment_status VARCHAR(20) NOT NULL DEFAULT 'draft';
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ;
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS deployed_at TIMESTAMPTZ;
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS deployed_config_id UUID;
+
+      -- Each verify run aggregates 5 sub-tests. We persist every test row so
+      -- the UI can show a granular history; aggregate status = worst child.
+      CREATE TABLE IF NOT EXISTS number_verifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        number_id UUID NOT NULL,
+        tenant_id UUID NOT NULL,
+        run_id UUID NOT NULL,
+        test_type VARCHAR(40) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        log JSONB DEFAULT '{}',
+        started_at TIMESTAMPTZ DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_nv_number ON number_verifications(number_id, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_nv_run ON number_verifications(run_id);
+
+      -- Frozen snapshot of the agent at deploy time. Live calls read from the
+      -- snapshot (when present) so in-progress edits to the agent never leak
+      -- into a running deployment. Re-deploy creates a new active row and
+      -- flips the prior one to is_active=false (audit trail kept).
+      CREATE TABLE IF NOT EXISTS deployed_agent_configs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        agent_id UUID NOT NULL,
+        number_id UUID NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        snapshot JSONB NOT NULL,
+        deployed_by UUID,
+        deployed_at TIMESTAMPTZ DEFAULT NOW(),
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        retired_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_dac_number_active ON deployed_agent_configs(number_id) WHERE is_active = TRUE;
+      CREATE INDEX IF NOT EXISTS idx_dac_agent ON deployed_agent_configs(agent_id);
+
+      -- Routing config per number: business hours, failover agent, IVR menu,
+      -- geo restrictions. Stored as a single JSONB blob so adding fields
+      -- doesn't require a migration. One active row per number_id.
+      CREATE TABLE IF NOT EXISTS call_routes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        number_id UUID NOT NULL UNIQUE,
+        route_config JSONB NOT NULL DEFAULT '{}',
+        updated_by UUID,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- Append-only lifecycle log. One row per: assign, unassign, deploy,
+      -- pause, resume, verify-passed, verify-failed, route-changed, release.
+      CREATE TABLE IF NOT EXISTS number_audit_log (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        number_id UUID NOT NULL,
+        event_type VARCHAR(40) NOT NULL,
+        actor_user_id UUID,
+        actor_email VARCHAR(255),
+        before_state JSONB,
+        after_state JSONB,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_nal_number ON number_audit_log(number_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_nal_tenant ON number_audit_log(tenant_id, created_at DESC);
     `);
     logger.info('Telephony adapter database tables initialized');
   } finally {

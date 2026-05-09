@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Loader2, Phone, Rocket, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Loader2, Phone, Rocket, ShieldCheck, X } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { phoneNumberApi, type PhoneNumberRecord } from '@/services/phoneNumber.api';
 import { agentApi } from '@/services/agent.api';
-import api from '@/services/api';
 
 interface AgentLite {
   id: string;
@@ -56,8 +55,9 @@ export function AssignDeployModal({ open, phone, onClose, onDeployed }: Props) {
   const [agentId, setAgentId] = useState<string>('');
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [step, setStep] = useState<'idle' | 'publishing' | 'attaching' | 'done'>('idle');
+  const [step, setStep] = useState<'idle' | 'verifying' | 'publishing' | 'attaching' | 'deploying' | 'done'>('idle');
   const [overrideBlocks, setOverrideBlocks] = useState(false);
+  const [skipVerify, setSkipVerify] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -95,6 +95,7 @@ export function AssignDeployModal({ open, phone, onClose, onDeployed }: Props) {
   const canDeploy = !!agentId && (blockingIssues.length === 0 || overrideBlocks);
 
   const deploy = async () => {
+    if (!phone) return;
     if (!agentId) {
       setError('Pick an agent to attach this number to.');
       return;
@@ -106,22 +107,59 @@ export function AssignDeployModal({ open, phone, onClose, onDeployed }: Props) {
     setDeploying(true);
     setError(null);
     try {
+      // 1. Run verification (best-effort) so the deploy gate is satisfied.
+      //    User can opt out with "Skip verification" — useful in dev where
+      //    PUBLIC_BASE_URL isn't a public tunnel.
+      if (!skipVerify) {
+        setStep('verifying');
+        try {
+          await phoneNumberApi.verify(phone.id);
+        } catch {
+          // Non-fatal: deploy step uses bypass flag if verify fails.
+        }
+      }
+
+      // 2. Publish agent if it's still draft (existing behaviour preserved).
       if (isDraft) {
         setStep('publishing');
         try {
           await agentApi.publish(agentId);
         } catch (e: any) {
-          // Treat 'already published' as success
           const msg = e?.response?.data?.message || '';
           if (!/already.*publish|published/i.test(msg)) throw e;
         }
       }
+
+      // 3. Assign-agent (enforces verification gate; bypass when override on).
       setStep('attaching');
-      const res = await api.put(`/phone-numbers/${phone.id}`, {
+      try {
+        await phoneNumberApi.assignAgent(phone.id, agentId, { bypass_verification: skipVerify || overrideBlocks });
+      } catch (e: any) {
+        // 412 from the backend means verification missing — surface it cleanly.
+        const status = e?.response?.status;
+        if (status === 412) {
+          setError(e?.response?.data?.message || 'Verification needed before assigning. Tick "Skip verification" or run Verify first.');
+          setStep('idle');
+          return;
+        }
+        throw e;
+      }
+
+      // 4. Deploy: snapshot config + activate routing.
+      setStep('deploying');
+      await phoneNumberApi.deploy(phone.id, {
+        agent_id: agentId,
+        bypass_verification: skipVerify || overrideBlocks,
+      });
+
+      // Reflect new state locally so the parent reload picks up deployment_status=deployed.
+      const rec: PhoneNumberRecord = {
+        ...phone,
         agent_id: agentId,
         is_active: true,
-      });
-      const rec = res.data?.data ?? res.data;
+        deployment_status: 'deployed',
+        deployed_at: new Date().toISOString(),
+      };
       setStep('done');
       onDeployed(rec);
     } catch (e: any) {
@@ -238,10 +276,23 @@ export function AssignDeployModal({ open, phone, onClose, onDeployed }: Props) {
           )}
 
           <ol className="text-xs text-gray-500 space-y-1 pl-4 list-decimal">
+            <li className={step === 'verifying' ? 'text-primary-700 font-medium' : ''}>Verify number (carrier, webhook, audio path)</li>
             <li className={step === 'publishing' ? 'text-primary-700 font-medium' : ''}>Publish agent (if draft)</li>
-            <li className={step === 'attaching' ? 'text-primary-700 font-medium' : ''}>Attach number to agent + activate for live calls</li>
+            <li className={step === 'attaching' ? 'text-primary-700 font-medium' : ''}>Attach number to agent</li>
+            <li className={step === 'deploying' ? 'text-primary-700 font-medium' : ''}>Snapshot agent config &amp; activate live routing</li>
             <li className={step === 'done' ? 'text-emerald-700 font-medium' : ''}>Number routes inbound calls to this agent</li>
           </ol>
+
+          <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={skipVerify}
+              onChange={(e) => setSkipVerify(e.target.checked)}
+              className="accent-primary-600"
+            />
+            <ShieldCheck className="h-3.5 w-3.5 text-gray-400" />
+            Skip verification (use when PUBLIC_BASE_URL isn't a public tunnel — dev only)
+          </label>
         </div>
 
         <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between gap-2 bg-gray-50/60 rounded-b-2xl">
@@ -260,7 +311,11 @@ export function AssignDeployModal({ open, phone, onClose, onDeployed }: Props) {
               className="rounded-lg"
             >
               {deploying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : step === 'done' ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Rocket className="h-3.5 w-3.5" />}
-              {step === 'publishing' ? 'Publishing…' : step === 'attaching' ? 'Attaching…' : step === 'done' ? 'Deployed' : 'Deploy'}
+              {step === 'verifying' ? 'Verifying…'
+                : step === 'publishing' ? 'Publishing…'
+                : step === 'attaching' ? 'Attaching…'
+                : step === 'deploying' ? 'Deploying…'
+                : step === 'done' ? 'Deployed' : 'Deploy'}
             </Button>
           </div>
         </div>

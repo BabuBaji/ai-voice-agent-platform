@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { healthRouter } from './routes/health';
 import { callRouter } from './routes/calls';
 import { phoneNumberRouter } from './routes/phoneNumbers';
+import { numberLifecycleRouter } from './routes/numberLifecycle';
 import { kycWizardRouter } from './routes/kycWizard';
 import { kycVoiceWebhookRouter } from './routes/kycVoiceWebhook';
 import { webhookRouter } from './routes/webhooks';
@@ -12,6 +13,7 @@ import { recordingsRouter } from './routes/recordings';
 import { campaignRouter } from './routes/campaigns';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
+import { verifyTwilioSignature, verifyPlivoSignature } from './middleware/webhookSignature';
 
 const app = express();
 
@@ -32,9 +34,13 @@ app.use(requestLogger);
 // Health check
 app.use('/health', healthRouter);
 
-// Webhook routes (no auth - verified by provider signature)
+// Webhook routes (no auth — instead, verified by provider signature when
+// VERIFY_WEBHOOK_SIGNATURES=true; gated open in dev so synthetic curl probes
+// keep working).
 // Mount KYC voice-OTP first so its /kyc-otp-call/* paths take precedence over
 // any catch-alls in the larger webhookRouter.
+app.use('/webhooks/twilio', verifyTwilioSignature);
+app.use('/webhooks/plivo', verifyPlivoSignature);
 app.use('/webhooks', kycVoiceWebhookRouter);
 app.use('/webhooks', webhookRouter);
 
@@ -46,6 +52,10 @@ app.use('/recordings', recordingsRouter);
 // API routes
 app.use('/api/v1/calls', callRouter);
 app.use('/api/v1/phone-numbers/kyc-wizard', kycWizardRouter);
+// Lifecycle (verify/assign/deploy/route/audit) mounted BEFORE the legacy
+// phoneNumberRouter so the new POST /:id/* routes win over any catch-alls
+// in the older router.
+app.use('/api/v1/phone-numbers', numberLifecycleRouter);
 app.use('/api/v1/phone-numbers', phoneNumberRouter);
 app.use('/api/v1/campaigns', campaignRouter);
 

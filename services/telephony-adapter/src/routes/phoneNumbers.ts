@@ -7,6 +7,7 @@ import { plivoProvider } from '../providers/plivo.provider';
 import { getProvider } from '../providers';
 import { validateKyc, aadhaarLast4 } from '../utils/kyc';
 import { generateSandboxNumbers } from '../providers/sandbox.catalog';
+import { debitForRental } from '../services/walletClient';
 
 export const phoneNumberRouter = Router();
 
@@ -40,6 +41,19 @@ const importSchema = z.object({
   phone_number: z.string().min(5).max(20),
   provider_sid: z.string().optional(),
   capabilities: z.array(z.enum(['voice', 'sms'])).default(['voice']),
+  // Per-carrier credentials. When present, we validate them with the carrier
+  // BEFORE storing the row. Without credentials we fall through to env-var
+  // creds (legacy trust-based flow) so existing imports keep working.
+  twilio_account_sid: z.string().optional(),
+  twilio_auth_token: z.string().optional(),
+  exotel_api_key: z.string().optional(),
+  exotel_api_token: z.string().optional(),
+  exotel_subdomain: z.string().optional(),
+  exotel_account_sid: z.string().optional(),
+  // SIP — informational only, stored as metadata; no carrier-side validation.
+  sip_uri: z.string().optional(),
+  sip_username: z.string().optional(),
+  sip_password: z.string().optional(),
 });
 
 const updatePhoneNumberSchema = z.object({
@@ -191,6 +205,31 @@ phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFun
       return;
     }
 
+    // Wallet debit (best-effort) — refuse purchase if balance insufficient.
+    // Identity-service /billing/phone-numbers POST does the balance check +
+    // debit + invoice atomically on its side. We forward the caller's
+    // Authorization so the request is properly attributed.
+    const debit = await debitForRental({
+      authHeader: req.headers.authorization,
+      tenantId,
+      number: purchased.number,
+      provider: parsed.provider,
+      monthlyCost: undefined,
+    });
+    if (!debit.ok && debit.status === 402) {
+      // Best-effort release at carrier so we don't keep a number we couldn't pay for.
+      try { await provider.releaseNumber(purchased.providerNumberId); } catch { /* swallow */ }
+      res.status(402).json({
+        error: 'Insufficient Wallet Balance',
+        message: debit.body?.message || 'Top up the wallet and retry the purchase.',
+        required: debit.body?.required,
+        available: debit.body?.available,
+      });
+      return;
+    }
+    // Non-fatal: if identity-service is unreachable, log it and continue —
+    // we'll insert the number row but billing will be reconciled later.
+
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
        VALUES ($1, $2, $3, $4, $5, FALSE)
@@ -203,6 +242,7 @@ phoneNumberRouter.post('/buy', async (req: Request, res: Response, next: NextFun
         JSON.stringify({
           voice: parsed.capabilities.includes('voice'),
           sms: parsed.capabilities.includes('sms'),
+          billing_debit_status: debit.ok ? 'debited' : 'pending',
         }),
       ],
     );
@@ -411,6 +451,25 @@ phoneNumberRouter.post('/buy-with-kyc', async (req: Request, res: Response, next
       return;
     }
 
+    // Wallet debit — same pattern as /buy. Roll back at carrier on insufficient balance.
+    const debit = await debitForRental({
+      authHeader: req.headers.authorization,
+      tenantId,
+      number: purchased.number,
+      provider: parsed.provider,
+    });
+    if (!debit.ok && debit.status === 402) {
+      try { await plivoProvider.releaseNumber(purchased.providerNumberId); } catch { /* swallow */ }
+      res.status(402).json({
+        error: 'Insufficient Wallet Balance',
+        message: debit.body?.message || 'Top up the wallet and retry the purchase.',
+        required: debit.body?.required,
+        available: debit.body?.available,
+        kyc_id: kycId,
+      });
+      return;
+    }
+
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
        VALUES ($1, $2, $3, $4, $5, FALSE)
@@ -463,6 +522,83 @@ phoneNumberRouter.post('/import', async (req: Request, res: Response, next: Next
       return;
     }
 
+    // ─── Carrier-side credential validation ───
+    // If the user supplied per-import credentials, verify them with the
+    // carrier BEFORE inserting the row. Returns 422 on failure with the
+    // exact carrier error so the UI shows actionable feedback.
+    let carrierMeta: Record<string, any> = {};
+    if (parsed.provider === 'twilio' && parsed.twilio_account_sid && parsed.twilio_auth_token) {
+      const auth = Buffer.from(`${parsed.twilio_account_sid}:${parsed.twilio_auth_token}`).toString('base64');
+      try {
+        const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${parsed.twilio_account_sid}.json`, {
+          headers: { Authorization: `Basic ${auth}` },
+        });
+        if (!r.ok) {
+          res.status(422).json({
+            error: 'Twilio Credentials Invalid',
+            message: `Twilio rejected those credentials (${r.status}). Verify the Account SID and Auth Token.`,
+          });
+          return;
+        }
+        // Also confirm the number actually exists on this Twilio account.
+        const numCleaned = encodeURIComponent(normalized);
+        const own = await fetch(
+          `https://api.twilio.com/2010-04-01/Accounts/${parsed.twilio_account_sid}/IncomingPhoneNumbers.json?PhoneNumber=${numCleaned}`,
+          { headers: { Authorization: `Basic ${auth}` } },
+        );
+        if (own.ok) {
+          const j: any = await own.json();
+          const list = j.incoming_phone_numbers || [];
+          if (list.length === 0) {
+            res.status(422).json({
+              error: 'Number Not On Twilio Account',
+              message: `${normalized} doesn't exist on Twilio account ${parsed.twilio_account_sid}. Buy it at console.twilio.com first, or use the correct Account SID.`,
+            });
+            return;
+          }
+          carrierMeta.twilio_number_sid = list[0].sid;
+          carrierMeta.twilio_voice_url = list[0].voice_url;
+          carrierMeta.twilio_validated_at = new Date().toISOString();
+        }
+      } catch (err: any) {
+        res.status(502).json({ error: 'Twilio Unreachable', message: err.message });
+        return;
+      }
+    }
+    if (parsed.provider === 'exotel' && parsed.exotel_api_key && parsed.exotel_api_token && parsed.exotel_account_sid) {
+      const subdomain = (parsed.exotel_subdomain || 'api.exotel.com').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      const auth = Buffer.from(`${parsed.exotel_api_key}:${parsed.exotel_api_token}`).toString('base64');
+      try {
+        // Exotel doesn't have a clean account-info endpoint; hit /Calls.json
+        // with limit=1 — returns 200 if creds are valid even with empty list.
+        const r = await fetch(`https://${subdomain}/v1/Accounts/${parsed.exotel_account_sid}/Calls.json?PageSize=1`, {
+          headers: { Authorization: `Basic ${auth}` },
+        });
+        if (!r.ok) {
+          res.status(422).json({
+            error: 'Exotel Credentials Invalid',
+            message: `Exotel returned ${r.status}. Check API Key, Token, Subdomain, and Account SID at my.exotel.com → Settings → API.`,
+          });
+          return;
+        }
+        carrierMeta.exotel_validated_at = new Date().toISOString();
+        carrierMeta.exotel_subdomain = subdomain;
+        carrierMeta.exotel_account_sid = parsed.exotel_account_sid;
+      } catch (err: any) {
+        res.status(502).json({ error: 'Exotel Unreachable', message: err.message });
+        return;
+      }
+    }
+    if (parsed.sip_uri) {
+      // SIP creds aren't carrier-validated (no universal SIP REGISTER probe
+      // server-side); we just stash them for later trunk routing.
+      carrierMeta.sip_uri = parsed.sip_uri;
+      if (parsed.sip_username) carrierMeta.sip_username = parsed.sip_username;
+      // NOTE: store password as-is for now; integration-level encryption is
+      // applied by `INTEGRATION_ENCRYPTION_KEY` flow in identity-service.
+      if (parsed.sip_password) carrierMeta.sip_password_present = true;
+    }
+
     const inserted = await pool.query(
       `INSERT INTO phone_numbers (tenant_id, phone_number, provider, provider_sid, capabilities, is_active)
        VALUES ($1, $2, $3, $4, $5, FALSE)
@@ -471,10 +607,11 @@ phoneNumberRouter.post('/import', async (req: Request, res: Response, next: Next
         tenantId,
         normalized,
         parsed.provider,
-        parsed.provider_sid || null,
+        parsed.provider_sid || carrierMeta.twilio_number_sid || null,
         JSON.stringify({
           voice: parsed.capabilities.includes('voice'),
           sms: parsed.capabilities.includes('sms'),
+          carrier_meta: carrierMeta,
         }),
       ],
     );

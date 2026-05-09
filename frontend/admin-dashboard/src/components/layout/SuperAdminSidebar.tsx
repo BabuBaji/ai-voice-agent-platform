@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import {
   Shield, LayoutDashboard, Building2, PhoneCall, Bot, CreditCard,
   ScrollText, Plug, LogOut, Activity, AlertTriangle, TrendingDown,
-  Webhook, Megaphone, Lock, Crown, MessageSquare,
+  Webhook, Megaphone, Lock, Crown, MessageSquare, Server,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -10,6 +10,7 @@ type Item = { label: string; path: string; icon: any; end?: boolean };
 const sections: Array<{ title?: string; items: Item[] }> = [
   { items: [
     { label: 'Overview',     path: '/super-admin',              icon: LayoutDashboard, end: true },
+    { label: 'Live monitor', path: '/super-admin/monitor',      icon: Server },
     { label: 'Activity',     path: '/super-admin/activity',     icon: Activity },
     { label: 'Alerts',       path: '/super-admin/alerts',       icon: AlertTriangle },
   ]},
