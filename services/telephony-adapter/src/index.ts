@@ -5,6 +5,7 @@ import { config } from './config';
 import { initDatabase } from './db/init';
 import { setupWebSocketServer } from './ws/mediaStream';
 import { setupPlivoAudioStream } from './ws/plivoAudioStream';
+import { startCampaignScheduler } from './routes/campaigns';
 import pino from 'pino';
 
 const logger = pino({
@@ -53,6 +54,10 @@ async function start(): Promise<void> {
       logger.info(`Telephony Adapter started on port ${config.port}`);
       logger.info(`Environment: ${config.nodeEnv}`);
     });
+
+    // Campaign auto-start poller: flips SCHEDULED → RUNNING when
+    // schedule_start_at passes. Without this, the schedule field is cosmetic.
+    startCampaignScheduler();
 
     const shutdown = async () => {
       logger.info('Shutting down...');

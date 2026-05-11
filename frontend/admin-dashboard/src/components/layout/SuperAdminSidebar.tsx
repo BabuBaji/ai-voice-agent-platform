@@ -56,7 +56,7 @@ export function SuperAdminSidebar() {
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-4 space-y-3 overflow-y-auto">
+      <nav className="flex-1 px-3 py-4 space-y-3 overflow-y-auto scrollbar-hide">
         {sections.map((s, i) => (
           <div key={i}>
             {s.title && <p className="px-3 mb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{s.title}</p>}

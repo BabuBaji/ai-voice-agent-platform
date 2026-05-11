@@ -11,8 +11,11 @@ export interface Campaign {
   concurrency: number;
   max_attempts: number;
   retry_delay_seconds: number;
-  status: 'DRAFT' | 'RUNNING' | 'PAUSED' | 'COMPLETED';
+  status: 'DRAFT' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'WAITING' | 'FAILED';
   schedule_start_at: string | null;
+  timezone: string;
+  call_window_start: string | null;
+  call_window_end: string | null;
   last_run_at: string | null;
   total_targets: number;
   completed_targets: number;
@@ -61,6 +64,11 @@ export const campaignApi = {
 
   delete: async (id: string): Promise<void> => {
     await api.delete(`/campaigns/${id}`);
+  },
+
+  update: async (id: string, patch: Partial<Pick<Campaign, 'concurrency' | 'max_attempts' | 'retry_delay_seconds' | 'timezone' | 'call_window_start' | 'call_window_end'>>): Promise<Campaign> => {
+    const res = await api.patch(`/campaigns/${id}`, patch);
+    return res.data;
   },
 
   start: async (id: string): Promise<Campaign> => {

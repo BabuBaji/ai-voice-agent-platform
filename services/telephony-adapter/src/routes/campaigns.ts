@@ -19,6 +19,62 @@ function getTenantId(req: Request, res: Response): string | null {
   return t;
 }
 
+// Validate IANA timezone via the runtime's Intl tz database. Returns the
+// canonical id on success, null if the runtime rejects it.
+function sanitizeTimezone(tz: any): string | null {
+  if (!tz || typeof tz !== 'string') return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return tz;
+  } catch { return null; }
+}
+
+function sanitizeHHMM(s: any): string | null {
+  if (!s || typeof s !== 'string') return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(s.trim());
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
+// Returns { open, msUntilOpen } for the campaign's window evaluated *now*.
+// open=true → dial freely. open=false → msUntilOpen tells the runner when to
+// re-check. If no window is configured, always open. Crosses midnight handled
+// (e.g. 22:00–06:00 night window).
+function evaluateCallWindow(campaign: any): { open: boolean; msUntilOpen: number } {
+  const start = campaign.call_window_start as string | null;
+  const end = campaign.call_window_end as string | null;
+  if (!start || !end) return { open: true, msUntilOpen: 0 };
+  const tz = campaign.timezone || 'Asia/Kolkata';
+
+  // Get the current HH:MM in the campaign's timezone.
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const hh = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10);
+  const mm = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
+  const nowMin = hh * 60 + mm;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  const startMin = sh * 60 + sm;
+  const endMin = eh * 60 + em;
+
+  const inWindow = startMin <= endMin
+    ? (nowMin >= startMin && nowMin < endMin)
+    : (nowMin >= startMin || nowMin < endMin); // crosses midnight
+
+  if (inWindow) return { open: true, msUntilOpen: 0 };
+
+  // Outside window — compute minutes until next open.
+  let waitMin: number;
+  if (startMin <= endMin) {
+    waitMin = nowMin < startMin ? startMin - nowMin : (1440 - nowMin) + startMin;
+  } else {
+    waitMin = (1440 - nowMin) + startMin; // we're in the daytime gap of a night window
+  }
+  // Add a tiny buffer so we don't fire exactly on the boundary.
+  return { open: false, msUntilOpen: (waitMin * 60 + 5) * 1000 };
+}
+
 // ---------- Campaigns CRUD ----------
 
 /**
@@ -56,6 +112,7 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       name, description, agent_id, from_number,
       provider = 'plivo', concurrency = 1, max_attempts = 1,
       retry_delay_seconds = 900, schedule_start_at,
+      timezone, call_window_start, call_window_end,
     } = req.body || {};
 
     if (!name || !agent_id || !from_number) {
@@ -63,16 +120,34 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       return;
     }
 
+    const tz = sanitizeTimezone(timezone);
+    if (timezone && !tz) {
+      res.status(400).json({ error: 'Bad Request', message: `Unknown timezone "${timezone}"` });
+      return;
+    }
+    const winStart = sanitizeHHMM(call_window_start);
+    const winEnd = sanitizeHHMM(call_window_end);
+    if ((call_window_start && !winStart) || (call_window_end && !winEnd)) {
+      res.status(400).json({ error: 'Bad Request', message: 'call_window_start/end must be HH:MM (24h)' });
+      return;
+    }
+    if ((winStart && !winEnd) || (winEnd && !winStart)) {
+      res.status(400).json({ error: 'Bad Request', message: 'Both call_window_start and call_window_end must be set together' });
+      return;
+    }
+
     const inserted = await pool.query(
       `INSERT INTO campaigns (tenant_id, agent_id, name, description, from_number, provider,
-                              concurrency, max_attempts, retry_delay_seconds, schedule_start_at, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT')
+                              concurrency, max_attempts, retry_delay_seconds, schedule_start_at,
+                              timezone, call_window_start, call_window_end, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'DRAFT')
        RETURNING *`,
       [tenantId, agent_id, name, description || null, from_number, provider,
        Math.max(1, Math.min(10, concurrency)),
        Math.max(1, Math.min(5, max_attempts)),
        Math.max(60, Math.min(86400, retry_delay_seconds)),
-       schedule_start_at || null]
+       schedule_start_at || null,
+       tz || 'Asia/Kolkata', winStart, winEnd]
     );
     res.status(201).json(inserted.rows[0]);
   } catch (err) { next(err); }
@@ -98,6 +173,64 @@ campaignRouter.get('/:id', async (req: Request, res: Response, next: NextFunctio
     );
     if (!r.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
     res.json(r.rows[0]);
+  } catch (err) { next(err); }
+});
+
+/**
+ * PATCH /api/v1/campaigns/:id — tweak runtime knobs on an existing campaign.
+ * Allowed fields: concurrency, max_attempts, retry_delay_seconds,
+ * timezone, call_window_start, call_window_end.
+ *
+ * Refused while RUNNING — tuning concurrency mid-dial would race with the
+ * in-flight processCampaign tick. Pause first, then PATCH, then resume.
+ */
+campaignRouter.patch('/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+
+    const cur = await pool.query(
+      `SELECT status FROM campaigns WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, tenantId]
+    );
+    if (!cur.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
+    if (cur.rows[0].status === 'RUNNING') {
+      res.status(409).json({ error: 'Conflict', message: 'Pause the campaign before editing concurrency / retry rules.' });
+      return;
+    }
+
+    const sets: string[] = [];
+    const vals: any[] = [];
+    const push = (col: string, val: any) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
+
+    const { concurrency, max_attempts, retry_delay_seconds, timezone, call_window_start, call_window_end } = req.body || {};
+    if (concurrency !== undefined)         push('concurrency',         Math.max(1, Math.min(10, parseInt(concurrency, 10) || 1)));
+    if (max_attempts !== undefined)        push('max_attempts',        Math.max(1, Math.min(5,  parseInt(max_attempts, 10) || 1)));
+    if (retry_delay_seconds !== undefined) push('retry_delay_seconds', Math.max(60, Math.min(86400, parseInt(retry_delay_seconds, 10) || 900)));
+    if (timezone !== undefined) {
+      const tz = sanitizeTimezone(timezone);
+      if (!tz) { res.status(400).json({ error: 'Bad Request', message: `Unknown timezone "${timezone}"` }); return; }
+      push('timezone', tz);
+    }
+    if (call_window_start !== undefined) {
+      const v = call_window_start === null ? null : sanitizeHHMM(call_window_start);
+      if (call_window_start && !v) { res.status(400).json({ error: 'Bad Request', message: 'call_window_start must be HH:MM' }); return; }
+      push('call_window_start', v);
+    }
+    if (call_window_end !== undefined) {
+      const v = call_window_end === null ? null : sanitizeHHMM(call_window_end);
+      if (call_window_end && !v) { res.status(400).json({ error: 'Bad Request', message: 'call_window_end must be HH:MM' }); return; }
+      push('call_window_end', v);
+    }
+
+    if (!sets.length) { res.status(400).json({ error: 'Bad Request', message: 'No editable fields supplied' }); return; }
+    sets.push(`updated_at = NOW()`);
+    vals.push(req.params.id, tenantId);
+    const upd = await pool.query(
+      `UPDATE campaigns SET ${sets.join(', ')} WHERE id = $${vals.length - 1} AND tenant_id = $${vals.length} RETURNING *`,
+      vals
+    );
+    res.json(upd.rows[0]);
   } catch (err) { next(err); }
 });
 
@@ -269,7 +402,47 @@ async function processCampaign(campaignId: string): Promise<void> {
   const c = await pool.query(`SELECT * FROM campaigns WHERE id = $1`, [campaignId]);
   if (!c.rows.length) return;
   const campaign = c.rows[0];
-  if (campaign.status !== 'RUNNING') return;
+  if (campaign.status !== 'RUNNING' && campaign.status !== 'WAITING') return;
+
+  // If nothing left to dial or wait on, finalize before checking the window —
+  // we don't want to park a finished campaign in WAITING overnight.
+  const remaining = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM campaign_targets
+     WHERE campaign_id = $1 AND status IN ('PENDING','IN_PROGRESS')`,
+    [campaignId]
+  );
+  if (remaining.rows[0].n === 0) {
+    await pool.query(
+      `UPDATE campaigns
+       SET status = 'COMPLETED',
+           completed_targets = (SELECT COUNT(*)::int FROM campaign_targets WHERE campaign_id = $1 AND status = 'COMPLETED'),
+           failed_targets = (SELECT COUNT(*)::int FROM campaign_targets WHERE campaign_id = $1 AND status = 'FAILED'),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [campaignId]
+    );
+    logger.info({ campaignId }, 'campaign completed');
+    return;
+  }
+
+  // Calling-hours gate. Outside the configured window we don't dial — we
+  // flip to WAITING and schedule a wake-up at the window-open boundary. When
+  // back inside the window we restore RUNNING and dial normally.
+  const win = evaluateCallWindow(campaign);
+  if (!win.open) {
+    if (campaign.status !== 'WAITING') {
+      await pool.query(`UPDATE campaigns SET status='WAITING', updated_at=NOW() WHERE id=$1`, [campaignId]);
+    }
+    // Cap the sleep so a runtime restart can't strand a long-window campaign:
+    // if window re-opens >10min from now, recheck after 10min to pick up edits.
+    const wait = Math.min(win.msUntilOpen, 10 * 60 * 1000);
+    setTimeout(() => void processCampaign(campaignId), wait);
+    return;
+  }
+  if (campaign.status === 'WAITING') {
+    await pool.query(`UPDATE campaigns SET status='RUNNING', updated_at=NOW() WHERE id=$1`, [campaignId]);
+    campaign.status = 'RUNNING';
+  }
 
   // How many in-progress right now?
   const inFlight = await pool.query(
@@ -451,11 +624,65 @@ export async function updateTargetFromCallEnd(
       }
     }
 
-    // Kick the runner to dial the next one if the campaign is still running
-    if (camp.status === 'RUNNING') {
+    // Kick the runner to dial the next one if the campaign is still active.
+    // WAITING means outside the calling-hours window — runner will gate again
+    // and reschedule, but recomputing now also lets it finalize if this was
+    // the last target.
+    if (camp.status === 'RUNNING' || camp.status === 'WAITING') {
       void processCampaign(target.campaign_id).catch(() => {});
     }
   } catch (err: any) {
     logger.warn({ err: err.message, providerCallSid }, 'updateTargetFromCallEnd failed');
   }
+}
+
+// ---------- Schedule auto-start ----------
+
+/**
+ * Periodic poller: any campaign whose schedule_start_at has passed but is
+ * still DRAFT or SCHEDULED gets auto-flipped to RUNNING and kicked. Without
+ * this, schedule_start_at would be purely cosmetic — the user would have to
+ * manually click Start at the scheduled time.
+ *
+ * Tick interval is 15s — close enough to honour minute-precision schedules
+ * without hammering the DB. On a missed-tick (process restart), the next tick
+ * still picks up overdue rows.
+ */
+async function scheduleTick(): Promise<void> {
+  try {
+    const r = await pool.query(
+      `SELECT id FROM campaigns
+       WHERE status IN ('DRAFT','SCHEDULED')
+         AND schedule_start_at IS NOT NULL
+         AND schedule_start_at <= NOW()`
+    );
+    for (const row of r.rows) {
+      const upd = await pool.query(
+        `UPDATE campaigns
+         SET status='RUNNING', last_run_at=NOW(), updated_at=NOW()
+         WHERE id=$1 AND status IN ('DRAFT','SCHEDULED')
+         RETURNING id`,
+        [row.id]
+      );
+      if (upd.rows.length) {
+        logger.info({ campaignId: row.id }, 'campaign auto-started by schedule');
+        void processCampaign(row.id).catch((e) =>
+          logger.error({ campaignId: row.id, err: e.message }, 'auto-start processCampaign threw')
+        );
+      }
+    }
+  } catch (err: any) {
+    logger.warn({ err: err.message }, 'scheduleTick failed');
+  }
+}
+
+let scheduleTimer: NodeJS.Timeout | null = null;
+export function startCampaignScheduler(): void {
+  if (scheduleTimer) return;
+  // First tick after 2s so logs settle on boot, then every 15s.
+  setTimeout(() => {
+    void scheduleTick();
+    scheduleTimer = setInterval(() => void scheduleTick(), 15000);
+  }, 2000);
+  logger.info('campaign scheduler started (15s tick)');
 }

@@ -81,6 +81,12 @@ export async function initDatabase(pool: Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id);
       CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
 
+      -- Calling-hours window. Outbound runner skips dial ticks outside the window.
+      -- NULL window = no restriction (24x7). timezone is IANA, default Asia/Kolkata.
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Kolkata';
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS call_window_start VARCHAR(5);
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS call_window_end VARCHAR(5);
+
       CREATE TABLE IF NOT EXISTS campaign_targets (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

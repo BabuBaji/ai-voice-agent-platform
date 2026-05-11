@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2, Eye } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
@@ -9,6 +9,7 @@ import { agentApi } from '@/services/agent.api';
 import { phoneNumberApi, type PhoneNumberRecord } from '@/services/phoneNumber.api';
 import { formatDate } from '@/utils/formatters';
 import { UpgradeBanner } from '@/components/billing/UpgradeBanner';
+import { CampaignFlowCard } from '@/components/campaigns/CampaignFlowCard';
 import { useFeature } from '@/stores/features.context';
 
 // OmniDim-style status labels mapped to our internal statuses. We display the
@@ -146,6 +147,8 @@ export function CampaignsPage() {
         </div>
       </div>
 
+      <CampaignFlowCard />
+
       {/* ─── Filters ─── */}
       <div>
         <p className="text-xs font-medium text-gray-500 mb-2">Filter by</p>
@@ -204,18 +207,19 @@ export function CampaignsPage() {
               <th className="text-left px-4 py-3 font-medium">Progress</th>
               <th className="text-left px-4 py-3 font-medium">Concurrent Calls</th>
               <th className="text-left px-4 py-3 font-medium">Created Date</th>
+              <th className="text-right px-4 py-3 font-medium w-20">View</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="text-center py-12">
+                <td colSpan={9} className="text-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-primary-600 mx-auto" />
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={8} className="text-center py-12">
+                <td colSpan={9} className="text-center py-12">
                   <Inbox className="h-10 w-10 text-gray-300 mx-auto mb-3" />
                   <p className="text-sm font-medium text-gray-700">No bulk call campaigns found.</p>
                   <p className="text-xs text-gray-400 mt-1">Try creating a new campaign to get started.</p>
@@ -263,6 +267,15 @@ export function CampaignsPage() {
                     <span className="text-xs text-gray-400"> / {c.concurrency}</span>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{formatDate(c.created_at)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); navigate(`/campaigns/${c.id}`); }}
+                      title="View contacts, recordings & transcripts"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary-50 text-primary-700 hover:bg-primary-100 text-xs font-medium transition-colors"
+                    >
+                      <Eye className="h-3.5 w-3.5" /> View
+                    </button>
+                  </td>
                 </tr>
               );
             })}

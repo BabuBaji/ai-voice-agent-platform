@@ -2,8 +2,43 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Check, ChevronRight, ChevronLeft, Phone, AlertCircle, Upload, FileText,
-  Calendar, RefreshCw, Loader2, CheckCircle2, Trash2,
+  Calendar, Clock, RefreshCw, Loader2, CheckCircle2, Trash2,
 } from 'lucide-react';
+
+// datetime-local values are naive ("2026-05-11T16:10" with no offset). Server
+// stores them as UTC by default — so 16:10 in the user's head becomes 16:10
+// UTC, off by the tz offset. Convert to an ISO string anchored to the chosen
+// timezone so "4:10 PM Asia/Kolkata" really means 4:10 PM IST (10:40 UTC).
+function localToTzIso(localDt: string, tz: string): string {
+  const [datePart, timePart] = localDt.split('T');
+  const [Y, M, D] = datePart.split('-').map(Number);
+  const [h, m] = (timePart || '00:00').split(':').map(Number);
+  const utcMs = Date.UTC(Y, M - 1, D, h, m, 0);
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date(utcMs));
+  const g = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || '0', 10);
+  const tzMs = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+  const offsetMs = tzMs - utcMs;
+  return new Date(utcMs - offsetMs).toISOString();
+}
+
+const TIMEZONE_OPTIONS = [
+  'Asia/Kolkata',
+  'Asia/Dubai',
+  'Asia/Singapore',
+  'Asia/Hong_Kong',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Chicago',
+  'America/Los_Angeles',
+  'UTC',
+];
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { campaignApi } from '@/services/campaign.api';
@@ -34,7 +69,7 @@ export function CampaignWizardPage() {
   const [phoneNumberId, setPhoneNumberId] = useState('');
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumberRecord[]>([]);
   const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
-  const [concurrency, setConcurrency] = useState(1);
+  const [concurrency, setConcurrency] = useState(3);
 
   // Step 2
   const [csvText, setCsvText] = useState('');
@@ -47,6 +82,10 @@ export function CampaignWizardPage() {
   const [retryDelay, setRetryDelay] = useState(900);
   const [scheduleStartAt, setScheduleStartAt] = useState('');
   const [provider, setProvider] = useState<'plivo' | 'twilio' | 'exotel'>('plivo');
+  const [timezone, setTimezone] = useState('Asia/Kolkata');
+  const [callWindowStart, setCallWindowStart] = useState('09:00');
+  const [callWindowEnd, setCallWindowEnd] = useState('21:00');
+  const [enforceWindow, setEnforceWindow] = useState(true);
 
   useEffect(() => {
     phoneNumberApi.list()
@@ -124,6 +163,9 @@ export function CampaignWizardPage() {
     if (s === 2) {
       if (targets.length === 0) return 'Upload or paste at least one contact';
     }
+    if (s === 3) {
+      if (enforceWindow && callWindowStart === callWindowEnd) return 'Calling-hours start and end cannot be the same';
+    }
     return null;
   };
 
@@ -149,7 +191,10 @@ export function CampaignWizardPage() {
         concurrency,
         max_attempts: maxAttempts,
         retry_delay_seconds: retryDelay,
-        schedule_start_at: scheduleStartAt || undefined,
+        schedule_start_at: scheduleStartAt ? localToTzIso(scheduleStartAt, enforceWindow ? timezone : 'Asia/Kolkata') : undefined,
+        timezone: enforceWindow ? timezone : undefined,
+        call_window_start: enforceWindow ? callWindowStart : undefined,
+        call_window_end: enforceWindow ? callWindowEnd : undefined,
       } as any);
 
       // Upload contacts
@@ -274,17 +319,34 @@ export function CampaignWizardPage() {
 
           <Card>
             <h3 className="text-base font-semibold text-gray-900">Concurrent Call Settings</h3>
-            <p className="text-sm text-gray-500 mb-4">Set how many calls can run simultaneously (max: 10)</p>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">Concurrent Call Limit</label>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={concurrency}
-              onChange={(e) => setConcurrency(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
-              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-primary-100"
-            />
-            <p className="text-xs text-gray-500 mt-2">Controls how many calls will be active at the same time</p>
+            <p className="text-sm text-gray-500 mb-4">
+              How many contacts the dialer will call in parallel. <strong>1 = one-by-one</strong> (sequential).
+              <strong> 3–5 = parallel</strong> (most common). <strong>10 = blast.</strong>
+            </p>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">Concurrent calls</label>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={concurrency}
+                onChange={(e) => setConcurrency(parseInt(e.target.value) || 1)}
+                className="flex-1 accent-primary-600"
+              />
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={concurrency}
+                onChange={(e) => setConcurrency(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+                className="w-20 text-sm border border-gray-200 rounded-lg px-3 py-2.5 text-center focus:outline-none focus:ring-2 focus:ring-primary-100"
+              />
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              {concurrency === 1
+                ? 'Sequential — one call at a time (each contact waits for the previous to finish).'
+                : `Up to ${concurrency} calls will ring at the same time. The dialer refills the slot as soon as a call ends.`}
+            </p>
           </Card>
         </div>
       )}
@@ -409,6 +471,57 @@ export function CampaignWizardPage() {
 
           <Card>
             <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <Clock className="h-4 w-4 text-primary-500" /> Calling Hours
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Outbound calls only fire inside this window. Outside it, the campaign sleeps as <code className="text-[11px] bg-gray-100 px-1 rounded">WAITING</code> and resumes automatically when the window re-opens.
+            </p>
+            <label className="inline-flex items-center gap-2 text-sm text-gray-700 mb-3">
+              <input
+                type="checkbox"
+                checked={enforceWindow}
+                onChange={(e) => setEnforceWindow(e.target.checked)}
+                className="rounded"
+              />
+              Restrict to calling hours (recommended for compliance)
+            </label>
+            <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 ${enforceWindow ? '' : 'opacity-50 pointer-events-none'}`}>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Timezone</label>
+                <select
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 bg-white"
+                >
+                  {TIMEZONE_OPTIONS.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Start (24h)</label>
+                <input
+                  type="time"
+                  value={callWindowStart}
+                  onChange={(e) => setCallWindowStart(e.target.value)}
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">End (24h)</label>
+                <input
+                  type="time"
+                  value={callWindowEnd}
+                  onChange={(e) => setCallWindowEnd(e.target.value)}
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5"
+                />
+              </div>
+            </div>
+            {enforceWindow && callWindowStart === callWindowEnd && (
+              <p className="text-xs text-danger-600 mt-2">Start and end cannot be the same.</p>
+            )}
+          </Card>
+
+          <Card>
+            <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
               <Calendar className="h-4 w-4 text-primary-500" /> Schedule (optional)
             </h3>
             <p className="text-sm text-gray-500 mb-4">Leave blank to start the campaign immediately when you click "Create" on the next step.</p>
@@ -418,6 +531,9 @@ export function CampaignWizardPage() {
               onChange={(e) => setScheduleStartAt(e.target.value)}
               className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5"
             />
+            <p className="text-[11px] text-gray-400 mt-1.5">
+              Interpreted in <span className="font-medium text-gray-600">{enforceWindow ? timezone : 'Asia/Kolkata'}</span> — so 16:10 means 4:10 PM in that timezone, not UTC.
+            </p>
           </Card>
 
           <Card>
@@ -450,6 +566,7 @@ export function CampaignWizardPage() {
             <Row label="Retry delay" value={`${Math.round(retryDelay / 60)} min`} />
             <Row label="Provider" value={provider} />
             <Row label="Scheduled start" value={scheduleStartAt ? new Date(scheduleStartAt).toLocaleString() : 'Immediately'} />
+            <Row label="Calling hours" value={enforceWindow ? `${callWindowStart}–${callWindowEnd} ${timezone}` : '24×7 (no window)'} />
           </dl>
 
           <div className="mt-6 p-3 rounded-lg bg-primary-50 border border-primary-100 text-xs text-primary-800 flex items-start gap-2">

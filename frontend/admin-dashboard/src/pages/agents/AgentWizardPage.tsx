@@ -31,6 +31,7 @@ import { callApi } from '@/services/call.api';
 import { formatCallError } from '@/services/callError';
 import { generateConversationFlow } from '@/utils/conversationFlow';
 import { MyAssistantsSection } from '@/components/agent-builder/MyAssistantsSection';
+import { ArchitectureFlowCard } from '@/components/agent-builder/ArchitectureFlowCard';
 import {
   USE_CASE_TABS,
   AGENT_TEMPLATES,
@@ -512,6 +513,8 @@ export function AgentWizardPage() {
           </p>
         </div>
       </div>
+
+      <ArchitectureFlowCard />
 
       <StepIndicator step={step} />
 
