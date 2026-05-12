@@ -16,6 +16,8 @@ export interface Campaign {
   timezone: string;
   call_window_start: string | null;
   call_window_end: string | null;
+  campaign_instruction: string | null;
+  deployed_agent_config_id: string | null;
   last_run_at: string | null;
   total_targets: number;
   completed_targets: number;
@@ -27,6 +29,38 @@ export interface Campaign {
   in_progress_count?: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface CampaignAnalytics {
+  rollup: {
+    total: number;
+    pending: number;
+    in_progress: number;
+    completed: number;
+    failed: number;
+    answered: number;
+    no_answer: number;
+    busy: number;
+    dial_failed: number;
+    cancelled: number;
+    dnc: number;
+    total_attempts: number;
+  };
+  answer_rate: number;
+  conversion_rate: number;
+  avg_duration_seconds: number | null;
+  total_dials: number;
+  throughput: Array<{ hour_utc: string; dials: number; completed: number }>;
+  sentiment: Array<{ label: string; count: number }>;
+  interest_level: Array<{ label: string; count: number }>;
+  lead_score: {
+    b_0_20: number;
+    b_20_40: number;
+    b_40_60: number;
+    b_60_80: number;
+    b_80_100: number;
+    avg: number | null;
+  } | null;
 }
 
 export interface CampaignTarget {
@@ -66,8 +100,13 @@ export const campaignApi = {
     await api.delete(`/campaigns/${id}`);
   },
 
-  update: async (id: string, patch: Partial<Pick<Campaign, 'concurrency' | 'max_attempts' | 'retry_delay_seconds' | 'timezone' | 'call_window_start' | 'call_window_end'>>): Promise<Campaign> => {
+  update: async (id: string, patch: Partial<Pick<Campaign, 'concurrency' | 'max_attempts' | 'retry_delay_seconds' | 'timezone' | 'call_window_start' | 'call_window_end' | 'campaign_instruction' | 'schedule_start_at'>>): Promise<Campaign> => {
     const res = await api.patch(`/campaigns/${id}`, patch);
+    return res.data;
+  },
+
+  analytics: async (id: string): Promise<CampaignAnalytics> => {
+    const res = await api.get(`/campaigns/${id}/analytics`);
     return res.data;
   },
 

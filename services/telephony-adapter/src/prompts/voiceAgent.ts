@@ -116,6 +116,37 @@ function toolsBlock(agent: AgentLike): string {
   return lines.join('\n');
 }
 
+function renderCampaignBlock(
+  instruction: string | null | undefined,
+  vars: Record<string, any> | null | undefined,
+  customerName: string | null | undefined,
+): string {
+  const sections: string[] = [];
+  if (instruction && instruction.trim()) {
+    sections.push(`## CAMPAIGN_CONTEXT (temporary, applies to this call only)
+${instruction.trim()}`);
+  }
+  // Build CONTACT_CONTEXT from name + variables. Skip empty.
+  const contactPairs: string[] = [];
+  if (customerName && customerName.trim()) {
+    contactPairs.push(`- name: ${customerName.trim()}`);
+  }
+  if (vars && typeof vars === 'object') {
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === null || v === undefined) continue;
+      const sv = String(v).trim();
+      if (!sv) continue;
+      if (k === 'name' && customerName) continue; // already rendered
+      contactPairs.push(`- ${k}: ${sv}`);
+    }
+  }
+  if (contactPairs.length > 0) {
+    sections.push(`## CONTACT_CONTEXT (the person you're speaking with — use naturally, don't list back)
+${contactPairs.join('\n')}`);
+  }
+  return sections.length > 0 ? '\n\n' + sections.join('\n\n') : '';
+}
+
 export function buildVoiceAgentPrompt(
   basePrompt: string,
   agent: AgentLike,
@@ -123,6 +154,8 @@ export function buildVoiceAgentPrompt(
     callType?: string | null;
     customerName?: string | null;
     language?: string | null;
+    campaignInstruction?: string | null;
+    contactVariables?: Record<string, any> | null;
   }
 ): string {
   const businessType = deriveBusinessType(agent);
@@ -141,6 +174,11 @@ export function buildVoiceAgentPrompt(
   const voiceStyle = voiceStyleHint(agent);
   const businessContext =
     firstNonEmpty(basePrompt) || `helpful ${businessType} conversations`;
+  const campaignBlock = renderCampaignBlock(
+    opts?.campaignInstruction,
+    opts?.contactVariables,
+    opts?.customerName,
+  );
   const tools = toolsBlock(agent);
   const callCfg = agent.call_config || {};
   const recordingEnabled = callCfg.recording_enabled !== false;
@@ -161,7 +199,7 @@ You are not a general chatbot. You are the voice of a specific business, represe
 ## BUSINESS_CONTEXT
 ${businessContext}
 
-(Business type: ${businessType})
+(Business type: ${businessType})${campaignBlock}
 
 ## CURRENT_CALL_CONTEXT
 - Call type: ${renderedCallType}
@@ -227,7 +265,13 @@ When the caller objects: acknowledge → respond briefly → move forward. Do no
 - "Not the decision maker" → ask who is, offer to speak with them.
 
 ## DATA TO CAPTURE (the system extracts these automatically — don't read them as a list)
-customer_name, language, city, requirement, interest_level, budget, timeline, objections, callback_time, appointment_needed, lead_status, sentiment.
+customer_name, language, city, requirement, interest_level, budget, timeline, objections, callback_time, appointment_needed, lead_status, sentiment, email, alt_phone, company.
+
+When the caller shows real interest — they're asking detailed questions, considering buying / enrolling / booking — gently confirm the contact details you'd need to follow up:
+- First name (and last name if natural)
+- Email address (ask once: "what's the best email to send the details to?")
+- Best phone number to reach them, plus any alternate (e.g. parent's phone for student leads)
+Do this conversationally, one item per turn. Never demand. If they decline, accept gracefully and continue.
 
 ## SILENCE & INTERRUPTIONS
 - Silence: wait a beat, then gently re-engage with a short confirmation question.

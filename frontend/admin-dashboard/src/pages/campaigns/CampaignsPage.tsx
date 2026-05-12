@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2, Eye } from 'lucide-react';
+import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2, Eye, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
@@ -58,6 +58,26 @@ export function CampaignsPage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [botFilter, setBotFilter] = useState('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = async (c: Campaign) => {
+    const targets = c.target_count ?? 0;
+    const msg = `Delete campaign "${c.name}"?\n\nThis removes the campaign and all ${targets} target row${targets === 1 ? '' : 's'}.\nCalls and recordings stay (they live on the conversations table).\n\nThis cannot be undone.`;
+    if (!confirm(msg)) return;
+    setDeletingId(c.id);
+    try {
+      await campaignApi.delete(c.id);
+      setCampaigns((prev) => prev.filter((x) => x.id !== c.id));
+      setSelected((prev) => {
+        if (!prev.has(c.id)) return prev;
+        const next = new Set(prev); next.delete(c.id); return next;
+      });
+    } catch (e: any) {
+      setError(e?.response?.data?.message || e?.message || 'Failed to delete campaign');
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const reload = async () => {
     setLoading(true);
@@ -268,13 +288,25 @@ export function CampaignsPage() {
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{formatDate(c.created_at)}</td>
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); navigate(`/campaigns/${c.id}`); }}
-                      title="View contacts, recordings & transcripts"
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary-50 text-primary-700 hover:bg-primary-100 text-xs font-medium transition-colors"
-                    >
-                      <Eye className="h-3.5 w-3.5" /> View
-                    </button>
+                    <div className="inline-flex items-center gap-1.5 justify-end">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); navigate(`/campaigns/${c.id}`); }}
+                        title="View contacts, recordings & transcripts"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary-50 text-primary-700 hover:bg-primary-100 text-xs font-medium transition-colors"
+                      >
+                        <Eye className="h-3.5 w-3.5" /> View
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDelete(c); }}
+                        disabled={deletingId === c.id}
+                        title="Delete campaign"
+                        className="inline-flex items-center justify-center w-7 h-7 rounded-md text-gray-400 hover:text-danger-600 hover:bg-danger-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {deletingId === c.id
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Trash2 className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );

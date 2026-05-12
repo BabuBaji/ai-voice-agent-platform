@@ -26,6 +26,11 @@ export interface AnalysisResult {
     product_interest?: string;
     appointment_time?: string;
     customer_name?: string;
+    // Added so post-call auto-lead creation can fill the CRM row when the
+    // caller volunteered these during the conversation.
+    email?: string;
+    alt_phone?: string;
+    company?: string;
   };
   lead_score?: string;
   conversion_probability?: string;
@@ -218,7 +223,10 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "city": "" | extracted,
     "product_interest": "" | extracted,
     "appointment_time": "" | extracted ISO or natural-language,
-    "customer_name": "" | extracted
+    "customer_name": "" | extracted,
+    "email": "" | extracted (only if explicitly stated, must contain @),
+    "alt_phone": "" | extracted (E.164 if possible, only if explicitly stated as alternate/secondary contact),
+    "company": "" | extracted (employer or organization name only if stated)
   },
   "lead_score": "HOT" | "WARM" | "COLD" | "UNQUALIFIED",
   "conversion_probability": "HIGH" | "MEDIUM" | "LOW",
@@ -353,13 +361,236 @@ Rules:
   }
 }
 
+/**
+ * Parse "within 24h" / "next Monday 10am" / "tomorrow afternoon" / ISO date
+ * into an absolute Date. Best-effort — falls back to (now + 24h) when the
+ * string is ambiguous. We avoid pulling in a heavy parser; the analyzer's
+ * `recommended_follow_up_time` is short and from a finite set of phrasings.
+ */
+function parseFollowUpTime(raw: string | null | undefined): Date | null {
+  if (!raw || !raw.trim()) return null;
+  const s = raw.trim().toLowerCase();
+  // ISO date / RFC3339
+  const isoTry = new Date(raw);
+  if (!isNaN(isoTry.getTime()) && /\d{4}-\d{2}-\d{2}/.test(raw)) return isoTry;
+  const now = new Date();
+  // "within N hours" / "in N hours" / "Nh"
+  const m1 = s.match(/(?:within|in)\s+(\d+)\s*(h|hr|hours?|m|min|minutes?|d|days?)/);
+  if (m1) {
+    const n = parseInt(m1[1], 10);
+    const unit = m1[2][0];
+    const ms = unit === 'd' ? n * 86400000 : unit === 'h' ? n * 3600000 : n * 60000;
+    return new Date(now.getTime() + ms);
+  }
+  // "tomorrow", "next week"
+  if (s.includes('tomorrow')) {
+    const d = new Date(now); d.setDate(d.getDate() + 1); d.setHours(10, 0, 0, 0);
+    if (s.includes('afternoon')) d.setHours(15, 0, 0, 0);
+    else if (s.includes('evening')) d.setHours(18, 0, 0, 0);
+    return d;
+  }
+  if (s.includes('next week')) {
+    const d = new Date(now); d.setDate(d.getDate() + 7); d.setHours(10, 0, 0, 0);
+    return d;
+  }
+  // Default: +24h
+  return new Date(now.getTime() + 24 * 3600000);
+}
+
+/**
+ * Map LLM-emitted lead_score string to a 0-100 numeric score for the CRM
+ * leads table. Falls back to interest_level if lead_score isn't set.
+ */
+function leadScoreToInt(leadScore: string | undefined, interestLevel: number): number {
+  const ls = String(leadScore || '').toUpperCase();
+  if (ls === 'HOT') return 85;
+  if (ls === 'WARM') return 65;
+  if (ls === 'COLD') return 35;
+  if (ls === 'UNQUALIFIED') return 10;
+  return Math.min(100, Math.max(0, Math.round(interestLevel) || 30));
+}
+
+/**
+ * Map analyzer outcome → CRM lead status. Keeps the status meaningful for the
+ * sales team's filtering (NEW → CONTACTED → QUALIFIED / UNQUALIFIED → WON / LOST).
+ */
+function outcomeToStatus(outcome: string | undefined): string {
+  const o = String(outcome || '').toLowerCase();
+  if (o.includes('not interested') || o.includes('wrong number')) return 'UNQUALIFIED';
+  if (o.includes('voicemail')) return 'NEW';
+  if (o.includes('callback')) return 'CONTACTED';
+  if (o.includes('demo') || o.includes('appointment') || o.includes('booked')) return 'QUALIFIED';
+  if (o.includes('qualified')) return 'QUALIFIED';
+  if (o.includes('transferred')) return 'CONTACTED';
+  if (o.includes('escalation')) return 'CONTACTED';
+  return 'NEW';
+}
+
+/**
+ * Auto-create a CRM Lead row from the analyzer's extracted key_entities. We
+ * skip flat-out misfires (wrong-number / voicemail with no useful content)
+ * and we link the call back via custom_fields.conversation_id. If the
+ * analyzer also signalled follow_up_required, we schedule an Appointment
+ * row in the CRM at recommended_follow_up_time so the team has a calendar
+ * trigger instead of relying on someone to read the analysis.
+ *
+ * Best-effort — errors are logged but never propagate up. The analyzer
+ * must continue to succeed even when CRM is down.
+ */
+async function createLeadFromAnalysis(
+  conversationId: string,
+  tenantId: string,
+  conv: { agent_id?: string | null; channel?: string | null; direction?: string | null },
+  result: AnalysisResult,
+): Promise<void> {
+  try {
+    // Idempotency: if this conversation already has a CRM lead recorded on
+    // its analysis blob, don't create a duplicate. The user can still
+    // re-analyze to refresh the analysis JSON without spawning new leads.
+    const existing = await pool.query(
+      `SELECT analysis->>'crm_lead_id' AS lead_id FROM conversations WHERE id = $1`,
+      [conversationId],
+    );
+    if (existing.rows[0]?.lead_id) return;
+
+    // Skip leads with no extractable signal — wrong number, voicemail with empty transcript.
+    const outcome = String(result.call_outcome || result.outcome || '').toLowerCase();
+    if (outcome.includes('wrong number')) return;
+
+    // Pull the prospect's phone number. For outbound, that's called_number;
+    // for inbound, caller_number. We try both and prefer the non-business one.
+    const phoneRes = await pool.query(
+      `SELECT caller_number, called_number FROM conversations WHERE id = $1 LIMIT 1`,
+      [conversationId],
+    );
+    const phones = phoneRes.rows[0] || {};
+    const isOutbound = String(conv.direction || '').toUpperCase() === 'OUTBOUND';
+    const prospectPhone = (isOutbound ? phones.called_number : phones.caller_number)
+      || phones.called_number
+      || phones.caller_number
+      || null;
+
+    const ke = result.key_entities || {};
+    // Best-effort name split. Falls back to "Caller (last 4 digits of phone)"
+    // so the CRM row still has identifying info when the agent couldn't get a name.
+    const rawName = (ke.customer_name || '').trim();
+    let first_name = '', last_name = '';
+    if (rawName) {
+      const parts = rawName.split(/\s+/);
+      first_name = parts[0];
+      last_name = parts.slice(1).join(' ') || '-';
+    } else {
+      first_name = prospectPhone ? `Caller ${String(prospectPhone).slice(-4)}` : 'Caller';
+      last_name = '-';
+    }
+
+    const status = outcomeToStatus(result.call_outcome || result.outcome);
+    const score = leadScoreToInt(result.lead_score, result.interest_level || 0);
+
+    const source = isOutbound
+      ? 'outbound-call'
+      : (String(conv.channel || '').toLowerCase() === 'web' ? 'web-call' : 'inbound-call');
+
+    const tags: string[] = [];
+    if (status === 'QUALIFIED') tags.push('interested');
+    if (status === 'UNQUALIFIED') tags.push('not_interested');
+    if (status === 'CONTACTED' && outcome.includes('callback')) tags.push('callback_requested');
+
+    const leadPayload = {
+      first_name,
+      last_name,
+      email: (ke.email || '').includes('@') ? ke.email : null,
+      phone: prospectPhone,
+      company: ke.company || null,
+      source,
+      status,
+      score,
+      tags,
+      custom_fields: {
+        conversation_id: conversationId,
+        agent_id: conv.agent_id || null,
+        alt_phone: ke.alt_phone || null,
+        city: ke.city || null,
+        budget: ke.budget || null,
+        timeline: ke.timeline || null,
+        product_interest: ke.product_interest || null,
+        appointment_time: ke.appointment_time || null,
+        objections: result.objections || [],
+        call_outcome: result.call_outcome || result.outcome,
+        interest_level: result.interest_level,
+        conversion_probability: result.conversion_probability,
+        next_best_action: result.next_best_action,
+        recommended_follow_up_time: result.recommended_follow_up_time,
+        follow_up_reason: result.follow_up_reason,
+      },
+    };
+
+    const leadRes = await fetch(`${config.crmServiceUrl}/leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+      body: JSON.stringify(leadPayload),
+    });
+    if (!leadRes.ok) {
+      const body = await leadRes.text().catch(() => '');
+      console.warn(`[analyzer] auto-lead POST failed (${leadRes.status}): ${body.slice(0, 200)}`);
+      return;
+    }
+    const lead: any = await leadRes.json();
+    const leadId = lead?.id || lead?.data?.id;
+    if (!leadId) return;
+
+    // Persist the lead id on the analysis JSONB so the next re-analyze
+    // doesn't create a duplicate. Best-effort.
+    try {
+      await pool.query(
+        `UPDATE conversations
+         SET analysis = COALESCE(analysis, '{}'::jsonb) || $1::jsonb
+         WHERE id = $2 AND tenant_id = $3`,
+        [JSON.stringify({ crm_lead_id: leadId }), conversationId, tenantId],
+      );
+    } catch (_e) { /* non-fatal */ }
+
+    // Schedule callback appointment if analyzer flagged follow-up. Tied to
+    // both the lead and the originating conversation for traceability.
+    if (result.follow_up_required) {
+      const when = parseFollowUpTime(result.recommended_follow_up_time || ke.appointment_time);
+      if (when) {
+        try {
+          await fetch(`${config.crmServiceUrl}/appointments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+            body: JSON.stringify({
+              lead_id: leadId,
+              title: 'Callback (auto-scheduled from previous call)',
+              scheduled_at: when.toISOString(),
+              duration_minutes: 15,
+              notes: result.follow_up_reason || result.next_best_action || '',
+              conversation_id: conversationId,
+            }),
+          });
+        } catch (apptErr: any) {
+          console.warn(`[analyzer] appointment POST failed: ${apptErr.message}`);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[analyzer] createLeadFromAnalysis error: ${err.message}`);
+  }
+}
+
 export async function analyzeConversation(conversationId: string, tenantId: string): Promise<AnalysisResult> {
+  // conversations doesn't have a direction column — pull it from the
+  // linked calls row (LEFT JOIN so web/chat conversations still work).
   const convRes = await pool.query(
-    `SELECT id, agent_id, language, channel,
-            COALESCE(duration_seconds,
-                     EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at))::int,
+    `SELECT c.id, c.agent_id, c.language, c.channel,
+            ca.direction,
+            COALESCE(c.duration_seconds,
+                     EXTRACT(EPOCH FROM (COALESCE(c.ended_at, now()) - c.started_at))::int,
                      0) AS duration_sec
-     FROM conversations WHERE id = $1 AND tenant_id = $2`,
+     FROM conversations c
+     LEFT JOIN calls ca ON ca.conversation_id = c.id
+     WHERE c.id = $1 AND c.tenant_id = $2
+     LIMIT 1`,
     [conversationId, tenantId]
   );
   if (convRes.rows.length === 0) {
@@ -383,9 +614,12 @@ export async function analyzeConversation(conversationId: string, tenantId: stri
     result = heuristicAnalyze(transcript, messages);
   }
 
+  // JSONB merge instead of overwrite — preserves keys added by sibling
+  // hooks (crm_lead_id, voice_quality, etc.) across re-analyze runs.
   await pool.query(
     `UPDATE conversations
-     SET analysis = $1, summary = $2, sentiment = $3, interest_level = $4,
+     SET analysis = COALESCE(analysis, '{}'::jsonb) || $1::jsonb,
+         summary = $2, sentiment = $3, interest_level = $4,
          topics = $5, follow_ups = $6, key_points = $7, outcome = $8
      WHERE id = $9 AND tenant_id = $10`,
     [
@@ -422,6 +656,20 @@ export async function analyzeConversation(conversationId: string, tenantId: stri
       channel,
     });
   }
+
+  // Fire-and-forget: convert the analysis into a CRM lead + optional
+  // follow-up appointment. Failure is logged inside the helper so the
+  // analyzer keeps returning to the caller normally.
+  void createLeadFromAnalysis(
+    conversationId,
+    tenantId,
+    {
+      agent_id: conv.agent_id,
+      channel: conv.channel,
+      direction: (conv as any).direction || null,
+    },
+    result,
+  );
 
   return result;
 }

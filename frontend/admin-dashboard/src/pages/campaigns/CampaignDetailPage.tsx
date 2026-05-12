@@ -7,7 +7,7 @@ import {
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/Badge';
-import { campaignApi, type Campaign, type CampaignTarget } from '@/services/campaign.api';
+import { campaignApi, type Campaign, type CampaignTarget, type CampaignAnalytics } from '@/services/campaign.api';
 import { conversationApi, type Conversation, type ConversationMessage } from '@/services/conversation.api';
 import api from '@/services/api';
 
@@ -16,6 +16,7 @@ export function CampaignDetailPage() {
   const navigate = useNavigate();
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [targets, setTargets] = useState<CampaignTarget[]>([]);
+  const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
@@ -28,13 +29,20 @@ export function CampaignDetailPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingConcurrency, setEditingConcurrency] = useState(false);
   const [concurrencyDraft, setConcurrencyDraft] = useState<number>(1);
+  const [editingSchedule, setEditingSchedule] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState<string>(''); // datetime-local format YYYY-MM-DDTHH:MM
 
   const reload = async () => {
     if (!id) return;
     try {
-      const [c, t] = await Promise.all([campaignApi.get(id), campaignApi.listTargets(id)]);
+      const [c, t, a] = await Promise.all([
+        campaignApi.get(id),
+        campaignApi.listTargets(id),
+        campaignApi.analytics(id).catch(() => null),
+      ]);
       setCampaign(c);
       setTargets(t);
+      setAnalytics(a);
       setError(null);
     } catch (e: any) {
       setError(e?.response?.data?.message || e?.message || 'Failed to load');
@@ -61,6 +69,60 @@ export function CampaignDetailPage() {
   const handlePause = async () => {
     if (!id) return;
     try { setCampaign(await campaignApi.pause(id)); } catch (e: any) { setError(e?.message); }
+  };
+
+  // UTC ISO → "YYYY-MM-DDTHH:MM" in the campaign's timezone, ready for the
+  // datetime-local input. Returns empty string when the campaign has no
+  // schedule set (immediate-start campaign).
+  const utcToDatetimeLocal = (utcIso: string | null, tz: string): string => {
+    if (!utcIso) return '';
+    const d = new Date(utcIso);
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, p.value]));
+    const hh = parts.hour === '24' ? '00' : parts.hour;
+    return `${parts.year}-${parts.month}-${parts.day}T${hh}:${parts.minute}`;
+  };
+
+  // Inverse of utcToDatetimeLocal: take "YYYY-MM-DDTHH:MM" anchored to `tz`,
+  // return a real UTC ISO. Mirrors the wizard's localToTzIso helper.
+  const datetimeLocalToUtc = (localDt: string, tz: string): string => {
+    const [datePart, timePart] = localDt.split('T');
+    const [Y, M, D] = datePart.split('-').map(Number);
+    const [h, m] = (timePart || '00:00').split(':').map(Number);
+    const utcMs = Date.UTC(Y, M - 1, D, h, m, 0);
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    const parts = fmt.formatToParts(new Date(utcMs));
+    const g = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || '0', 10);
+    const tzMs = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+    const offsetMs = tzMs - utcMs;
+    return new Date(utcMs - offsetMs).toISOString();
+  };
+
+  const startScheduleEdit = () => {
+    if (!campaign) return;
+    setScheduleDraft(utcToDatetimeLocal(campaign.schedule_start_at, campaign.timezone || 'Asia/Kolkata'));
+    setEditingSchedule(true);
+  };
+  const saveSchedule = async () => {
+    if (!id || !campaign) return;
+    try {
+      const tz = campaign.timezone || 'Asia/Kolkata';
+      const next = scheduleDraft ? datetimeLocalToUtc(scheduleDraft, tz) : null;
+      const updated = await campaignApi.update(id, { schedule_start_at: next });
+      setCampaign({ ...campaign, ...updated });
+      setEditingSchedule(false);
+      setInfo(next
+        ? `Schedule updated to ${scheduleDraft} ${tz}.`
+        : 'Schedule cleared — campaign will start as soon as you click Start.');
+    } catch (e: any) {
+      setError(e?.response?.data?.message || e?.message || 'Failed to update schedule');
+    }
   };
 
   const startConcurrencyEdit = () => {
@@ -184,6 +246,45 @@ export function CampaignDetailPage() {
               ? <>Calling hours: <span className="font-mono text-gray-600">{campaign.call_window_start}–{campaign.call_window_end} {campaign.timezone}</span>{campaign.status === 'WAITING' && <span className="ml-2 text-amber-600 font-medium">(outside window — sleeping)</span>}</>
               : <>Calling hours: <span className="text-gray-500">24×7 (no window set)</span></>}
           </p>
+          {/* Schedule row — inline-editable; the runner only acts on this for
+              DRAFT/SCHEDULED campaigns, so edits while RUNNING are cosmetic. */}
+          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5">
+            Scheduled start:
+            {editingSchedule ? (
+              <span className="inline-flex items-center gap-1.5 ml-1">
+                <input
+                  type="datetime-local"
+                  value={scheduleDraft}
+                  onChange={(e) => setScheduleDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveSchedule(); if (e.key === 'Escape') setEditingSchedule(false); }}
+                  className="text-xs border border-gray-300 rounded px-1.5 py-0.5"
+                  autoFocus
+                />
+                <span className="text-[10px] text-gray-400">{campaign.timezone || 'Asia/Kolkata'}</span>
+                <button onClick={saveSchedule} className="text-xs px-1.5 py-0.5 rounded bg-primary-600 text-white hover:bg-primary-700">Save</button>
+                <button onClick={() => setEditingSchedule(false)} className="text-xs px-1.5 py-0.5 rounded text-gray-500 hover:text-gray-700">Cancel</button>
+                {scheduleDraft && (
+                  <button
+                    onClick={() => setScheduleDraft('')}
+                    title="Clear schedule (immediate start)"
+                    className="text-xs px-1.5 py-0.5 rounded text-gray-400 hover:text-red-600"
+                  >Clear</button>
+                )}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={startScheduleEdit}
+                className="font-mono text-gray-600 hover:text-primary-700 hover:bg-primary-50 rounded px-1 -mx-1 inline-flex items-center gap-1"
+                title="Edit scheduled start"
+              >
+                {campaign.schedule_start_at
+                  ? `${utcToDatetimeLocal(campaign.schedule_start_at, campaign.timezone || 'Asia/Kolkata').replace('T', ' ')} ${campaign.timezone || 'Asia/Kolkata'}`
+                  : <span className="text-gray-500">Not scheduled (starts on demand)</span>}
+                <span className="text-[10px] opacity-60">✏</span>
+              </button>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={reload}><RefreshCw className="h-4 w-4" /></Button>
@@ -228,6 +329,26 @@ export function CampaignDetailPage() {
           </div>
         </div>
       </Card>
+
+      {/* Campaign instruction (read-only badge) — shown only if set */}
+      {campaign.campaign_instruction && (
+        <Card>
+          <div className="flex items-start gap-3">
+            <div className="h-9 w-9 rounded-lg bg-primary-50 flex items-center justify-center text-primary-600 flex-shrink-0">
+              <Sparkles className="h-4 w-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Campaign Instruction (per-dial overlay)</div>
+              <div className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">{campaign.campaign_instruction}</div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Analytics */}
+      {analytics && analytics.rollup && (analytics.rollup.total > 0) && (
+        <AnalyticsPanel a={analytics} />
+      )}
 
       {/* Add targets */}
       <Card>
@@ -535,5 +656,175 @@ function Pill({ label, value }: { label: string; value: string }) {
       <p className="text-[9px] text-gray-500 uppercase">{label}</p>
       <p className="text-[11px] text-gray-800 font-medium truncate">{value}</p>
     </div>
+  );
+}
+
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !isFinite(seconds)) return '—';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+}
+
+function HBar({ label, value, max, tone = 'primary' }: { label: string; value: number; max: number; tone?: 'primary' | 'success' | 'danger' | 'warn' }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const fill = {
+    primary: 'bg-primary-500',
+    success: 'bg-success-500',
+    danger: 'bg-danger-500',
+    warn: 'bg-warning-500',
+  }[tone];
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xs text-gray-600 w-24 truncate">{label}</span>
+      <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div className={`h-full ${fill}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs text-gray-700 w-12 text-right tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function AnalyticsPanel({ a }: { a: CampaignAnalytics }) {
+  const r = a.rollup;
+  const outcomeRows: Array<[string, number, 'success' | 'danger' | 'warn' | 'primary']> = [
+    ['Answered',     r.answered,    'success'],
+    ['No answer',    r.no_answer,   'warn'],
+    ['Busy',         r.busy,        'warn'],
+    ['Dial failed',  r.dial_failed, 'danger'],
+    ['Cancelled',    r.cancelled,   'danger'],
+    ['DNC blocked',  r.dnc,         'danger'],
+  ];
+  const outcomeMax = Math.max(1, ...outcomeRows.map(([, v]) => v));
+
+  const sentimentMax = Math.max(1, ...a.sentiment.map((x) => x.count));
+  const interestMax  = Math.max(1, ...a.interest_level.map((x) => x.count));
+
+  const ls = a.lead_score;
+  const lsMax = ls ? Math.max(1, ls.b_0_20, ls.b_20_40, ls.b_40_60, ls.b_60_80, ls.b_80_100) : 1;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Analytics"
+        subtitle="Real-time campaign performance — refreshes with the rest of the page"
+      />
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPI label="Answer rate"     value={Math.round((a.answer_rate || 0) * 100)}     color="text-success-600" />
+        <KPI label="Conversion rate" value={Math.round((a.conversion_rate || 0) * 100)} color="text-primary-600" />
+        <div className="text-center">
+          <div className="text-2xl font-bold text-gray-900 tabular-nums">{formatDuration(a.avg_duration_seconds)}</div>
+          <div className="text-xs text-gray-500 mt-0.5">Avg duration</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold text-gray-900 tabular-nums">{a.total_dials || 0}</div>
+          <div className="text-xs text-gray-500 mt-0.5">Total dials</div>
+        </div>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Outcome breakdown */}
+        <div>
+          <h4 className="text-sm font-semibold text-gray-800 mb-3">Outcome breakdown</h4>
+          <div className="space-y-2">
+            {outcomeRows.map(([label, value, tone]) => (
+              <HBar key={label} label={label} value={value} max={outcomeMax} tone={tone} />
+            ))}
+          </div>
+        </div>
+
+        {/* Sentiment / interest from post-call analysis */}
+        <div>
+          <h4 className="text-sm font-semibold text-gray-800 mb-3">Sentiment</h4>
+          {a.sentiment.length === 0 ? (
+            <p className="text-xs text-gray-400">No analysis available yet. Sentiment shows up after the first call ends and the analyzer runs.</p>
+          ) : (
+            <div className="space-y-2">
+              {a.sentiment.map((s) => (
+                <HBar
+                  key={s.label}
+                  label={s.label || 'unknown'}
+                  value={s.count}
+                  max={sentimentMax}
+                  tone={s.label === 'positive' ? 'success' : s.label === 'negative' ? 'danger' : 'primary'}
+                />
+              ))}
+            </div>
+          )}
+
+          <h4 className="text-sm font-semibold text-gray-800 mt-5 mb-3">Interest level</h4>
+          {a.interest_level.length === 0 ? (
+            <p className="text-xs text-gray-400">—</p>
+          ) : (
+            <div className="space-y-2">
+              {a.interest_level.map((s) => (
+                <HBar
+                  key={s.label}
+                  label={s.label || 'unknown'}
+                  value={s.count}
+                  max={interestMax}
+                  tone={s.label === 'high' ? 'success' : s.label === 'low' ? 'danger' : 'primary'}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Lead score histogram */}
+      {ls && (
+        <div className="mt-6">
+          <h4 className="text-sm font-semibold text-gray-800 mb-3">
+            Lead score distribution {ls.avg != null && <span className="text-xs font-normal text-gray-500">· avg {Math.round(ls.avg)}</span>}
+          </h4>
+          <div className="grid grid-cols-5 gap-2">
+            {([
+              ['0–20', ls.b_0_20, 'danger'],
+              ['20–40', ls.b_20_40, 'warn'],
+              ['40–60', ls.b_40_60, 'primary'],
+              ['60–80', ls.b_60_80, 'success'],
+              ['80–100', ls.b_80_100, 'success'],
+            ] as Array<[string, number, 'danger' | 'warn' | 'primary' | 'success']>).map(([label, v, tone]) => {
+              const h = lsMax > 0 ? Math.max(4, Math.round((v / lsMax) * 60)) : 4;
+              const fill = { primary: 'bg-primary-500', success: 'bg-success-500', danger: 'bg-danger-500', warn: 'bg-warning-500' }[tone];
+              return (
+                <div key={label} className="flex flex-col items-center">
+                  <div className="text-xs text-gray-700 tabular-nums mb-1">{v}</div>
+                  <div className="w-full bg-gray-100 rounded-md overflow-hidden" style={{ height: 64 }}>
+                    <div className={`w-full ${fill}`} style={{ marginTop: 64 - h, height: h }} />
+                  </div>
+                  <div className="text-[10px] text-gray-500 mt-1">{label}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Throughput sparkline (last 24h) */}
+      {a.throughput && a.throughput.length > 0 && (
+        <div className="mt-6">
+          <h4 className="text-sm font-semibold text-gray-800 mb-2">Throughput · last 24h (hourly dials)</h4>
+          <div className="flex items-end gap-1 h-16">
+            {(() => {
+              const maxDial = Math.max(1, ...a.throughput.map((b) => b.dials));
+              return a.throughput.map((b, i) => {
+                const h = Math.max(2, Math.round((b.dials / maxDial) * 60));
+                return (
+                  <div
+                    key={i}
+                    title={`${new Date(b.hour_utc).toLocaleString()} — ${b.dials} dials, ${b.completed} completed`}
+                    className="flex-1 bg-primary-200 hover:bg-primary-400 rounded-t"
+                    style={{ height: h }}
+                  />
+                );
+              });
+            })()}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

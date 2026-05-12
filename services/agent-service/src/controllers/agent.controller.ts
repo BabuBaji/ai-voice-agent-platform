@@ -539,7 +539,10 @@ export async function testAgent(req: Request, res: Response, next: NextFunction)
       { role: 'user', content: message }
     ];
 
-    // Call ai-runtime simple chat endpoint
+    // Call ai-runtime simple chat endpoint. We forward the agent's attached
+    // knowledge_base_ids so ai-runtime can RAG against them — without this
+    // the in-page test would answer from system_prompt alone and PDF / Q&A
+    // uploads would seem to have no effect.
     const http = await import('http');
     const postData = JSON.stringify({
       system_prompt: agent.system_prompt,
@@ -548,6 +551,7 @@ export async function testAgent(req: Request, res: Response, next: NextFunction)
       model: agent.llm_model || 'gpt-4o',
       temperature: parseFloat(agent.temperature) || 0.7,
       max_tokens: agent.max_tokens || 4096,
+      knowledge_base_ids: Array.isArray(agent.knowledge_base_ids) ? agent.knowledge_base_ids : [],
     });
 
     const response = await new Promise<string>((resolve, reject) => {
@@ -578,6 +582,7 @@ export async function testAgent(req: Request, res: Response, next: NextFunction)
     const parsed = JSON.parse(response);
     res.json({
       reply: parsed.reply,
+      rag_chunks_used: parsed.rag_chunks_used ?? 0,
       agent: { name: agent.name, provider: agent.llm_provider, model: agent.llm_model },
     });
   } catch (err: any) {

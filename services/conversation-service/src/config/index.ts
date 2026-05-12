@@ -14,5 +14,6 @@ export const config = {
   // local file without depending on the public ngrok tunnel being up.
   telephonyRecordingsDir: process.env.TELEPHONY_RECORDINGS_DIR || '../telephony-adapter/logs/recordings',
   identityServiceUrl: process.env.IDENTITY_SERVICE_URL || 'http://localhost:8080',
+  crmServiceUrl: process.env.CRM_SERVICE_URL || 'http://localhost:8081',
   billingInternalToken: process.env.BILLING_INTERNAL_TOKEN || 'dev-billing-internal-token',
 };

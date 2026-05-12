@@ -323,6 +323,12 @@ async def analyze_transcript(request: Request):
 async def simple_chat(request: Request):
     """Non-streaming chat for service-to-service calls.
     Falls back to mock provider if the real provider fails.
+
+    Optional `knowledge_base_ids: [..]` — if present, runs RAG against the
+    last user message and prepends a "## KNOWLEDGE BASE CONTEXT" block to the
+    system prompt. This lets the agent's in-page test surface answers
+    grounded in uploaded PDFs / scraped pages / Q&A pairs, matching the
+    live-call path.
     """
     body = await request.json()
 
@@ -332,6 +338,34 @@ async def simple_chat(request: Request):
     model = body.get("model", "gpt-4o")
     temperature = body.get("temperature", 0.7)
     max_tokens = body.get("max_tokens", 4096)
+    knowledge_base_ids = body.get("knowledge_base_ids") or []
+    rag_chunks_used = 0
+
+    # RAG: best-effort retrieval. Failure (e.g. embeddings provider down) is
+    # non-fatal; we just answer without the grounding block.
+    if knowledge_base_ids:
+        user_query = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_query = msg.get("content", "")
+                break
+        if user_query:
+            try:
+                rag_context = await rag_pipeline.build_context(
+                    query=user_query,
+                    knowledge_base_ids=knowledge_base_ids,
+                    top_k=settings.rag_top_k,
+                )
+                if rag_context:
+                    system_prompt = system_prompt + "\n\n" + rag_context
+                    rag_chunks_used = rag_context.count("---") or rag_context.count("##") or 1
+                    logger.info(
+                        "simple_chat_rag_injected",
+                        query_len=len(user_query),
+                        kb_count=len(knowledge_base_ids),
+                    )
+            except Exception as e:
+                logger.warn("simple_chat_rag_failed", error=str(e))
 
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
@@ -371,4 +405,5 @@ async def simple_chat(request: Request):
         "provider": used_provider,
         "model": model if not used_mock else "mock-v1",
         "mock": used_mock,
+        "rag_chunks_used": rag_chunks_used,
     }

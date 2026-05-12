@@ -87,6 +87,28 @@ export async function initDatabase(pool: Pool): Promise<void> {
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS call_window_start VARCHAR(5);
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS call_window_end VARCHAR(5);
 
+      -- OmniDim-style campaign-level runtime injection. campaign_instruction is
+      -- a short free-form note that gets appended to every dial's system prompt
+      -- (e.g. "This is for MBA admission follow-up — ask about fee or counselling")
+      -- without permanently changing the agent. deployed_agent_config_id is the
+      -- frozen snapshot we bind to at campaign-creation time so mid-campaign
+      -- agent edits don't leak into running dials.
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS campaign_instruction TEXT;
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS deployed_agent_config_id UUID;
+
+      -- Tenant-scoped do-not-call list. Outbound runner skips any target whose
+      -- phone_number matches an entry for the tenant.
+      CREATE TABLE IF NOT EXISTS do_not_call_numbers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        phone_number VARCHAR(20) NOT NULL,
+        reason TEXT,
+        created_by UUID,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (tenant_id, phone_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dnc_tenant ON do_not_call_numbers(tenant_id);
+
       CREATE TABLE IF NOT EXISTS campaign_targets (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

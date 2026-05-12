@@ -113,6 +113,7 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       provider = 'plivo', concurrency = 1, max_attempts = 1,
       retry_delay_seconds = 900, schedule_start_at,
       timezone, call_window_start, call_window_end,
+      campaign_instruction,
     } = req.body || {};
 
     if (!name || !agent_id || !from_number) {
@@ -136,18 +137,52 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       return;
     }
 
+    // Bind a deployed snapshot at creation time so mid-campaign agent edits
+    // don't leak into running dials. Prefer the active snapshot for the
+    // (number, agent) pair; fall back to the agent's most recent active
+    // snapshot on any number. NULL is fine — runner will fall through to
+    // the live agent config (with the deploy-gate still enforced).
+    let snapshotId: string | null = null;
+    try {
+      const snap = await pool.query(
+        `SELECT dac.id FROM deployed_agent_configs dac
+         JOIN phone_numbers pn ON pn.id = dac.number_id
+         WHERE dac.tenant_id = $1 AND dac.agent_id = $2 AND dac.is_active = TRUE
+           AND pn.phone_number = $3
+         ORDER BY dac.deployed_at DESC LIMIT 1`,
+        [tenantId, agent_id, from_number]
+      );
+      snapshotId = snap.rows[0]?.id || null;
+      if (!snapshotId) {
+        const snap2 = await pool.query(
+          `SELECT id FROM deployed_agent_configs
+           WHERE tenant_id = $1 AND agent_id = $2 AND is_active = TRUE
+           ORDER BY deployed_at DESC LIMIT 1`,
+          [tenantId, agent_id]
+        );
+        snapshotId = snap2.rows[0]?.id || null;
+      }
+    } catch { /* non-fatal: snapshot binding is optional */ }
+
+    const instructionTrimmed =
+      typeof campaign_instruction === 'string' && campaign_instruction.trim().length > 0
+        ? campaign_instruction.trim().slice(0, 4000)
+        : null;
+
     const inserted = await pool.query(
       `INSERT INTO campaigns (tenant_id, agent_id, name, description, from_number, provider,
                               concurrency, max_attempts, retry_delay_seconds, schedule_start_at,
-                              timezone, call_window_start, call_window_end, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'DRAFT')
+                              timezone, call_window_start, call_window_end, status,
+                              campaign_instruction, deployed_agent_config_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'DRAFT',$14,$15)
        RETURNING *`,
       [tenantId, agent_id, name, description || null, from_number, provider,
        Math.max(1, Math.min(10, concurrency)),
        Math.max(1, Math.min(5, max_attempts)),
        Math.max(60, Math.min(86400, retry_delay_seconds)),
        schedule_start_at || null,
-       tz || 'Asia/Kolkata', winStart, winEnd]
+       tz || 'Asia/Kolkata', winStart, winEnd,
+       instructionTrimmed, snapshotId]
     );
     res.status(201).json(inserted.rows[0]);
   } catch (err) { next(err); }
@@ -194,7 +229,18 @@ campaignRouter.patch('/:id', async (req: Request, res: Response, next: NextFunct
       [req.params.id, tenantId]
     );
     if (!cur.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
-    if (cur.rows[0].status === 'RUNNING') {
+
+    // schedule_start_at is cosmetic once the campaign is already RUNNING/
+    // COMPLETED (the runner ignores it), so we allow editing it any time.
+    // Other knobs (concurrency, retry rules) must wait for a PAUSE because
+    // the runner reads them on each tick — mutating mid-flight would race.
+    const { concurrency, max_attempts, retry_delay_seconds, timezone, call_window_start, call_window_end, campaign_instruction, schedule_start_at } = req.body || {};
+    const nonScheduleEdit = (
+      concurrency !== undefined || max_attempts !== undefined || retry_delay_seconds !== undefined ||
+      timezone !== undefined || call_window_start !== undefined || call_window_end !== undefined ||
+      campaign_instruction !== undefined
+    );
+    if (cur.rows[0].status === 'RUNNING' && nonScheduleEdit) {
       res.status(409).json({ error: 'Conflict', message: 'Pause the campaign before editing concurrency / retry rules.' });
       return;
     }
@@ -202,11 +248,15 @@ campaignRouter.patch('/:id', async (req: Request, res: Response, next: NextFunct
     const sets: string[] = [];
     const vals: any[] = [];
     const push = (col: string, val: any) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
-
-    const { concurrency, max_attempts, retry_delay_seconds, timezone, call_window_start, call_window_end } = req.body || {};
     if (concurrency !== undefined)         push('concurrency',         Math.max(1, Math.min(10, parseInt(concurrency, 10) || 1)));
     if (max_attempts !== undefined)        push('max_attempts',        Math.max(1, Math.min(5,  parseInt(max_attempts, 10) || 1)));
     if (retry_delay_seconds !== undefined) push('retry_delay_seconds', Math.max(60, Math.min(86400, parseInt(retry_delay_seconds, 10) || 900)));
+    if (campaign_instruction !== undefined) {
+      const v = campaign_instruction === null || campaign_instruction === ''
+        ? null
+        : String(campaign_instruction).trim().slice(0, 4000) || null;
+      push('campaign_instruction', v);
+    }
     if (timezone !== undefined) {
       const tz = sanitizeTimezone(timezone);
       if (!tz) { res.status(400).json({ error: 'Bad Request', message: `Unknown timezone "${timezone}"` }); return; }
@@ -221,6 +271,19 @@ campaignRouter.patch('/:id', async (req: Request, res: Response, next: NextFunct
       const v = call_window_end === null ? null : sanitizeHHMM(call_window_end);
       if (call_window_end && !v) { res.status(400).json({ error: 'Bad Request', message: 'call_window_end must be HH:MM' }); return; }
       push('call_window_end', v);
+    }
+    if (schedule_start_at !== undefined) {
+      // Accept ISO string or null. Reject if it doesn't parse.
+      if (schedule_start_at === null || schedule_start_at === '') {
+        push('schedule_start_at', null);
+      } else {
+        const d = new Date(schedule_start_at);
+        if (isNaN(d.getTime())) {
+          res.status(400).json({ error: 'Bad Request', message: 'schedule_start_at must be an ISO datetime' });
+          return;
+        }
+        push('schedule_start_at', d.toISOString());
+      }
     }
 
     if (!sets.length) { res.status(400).json({ error: 'Bad Request', message: 'No editable fields supplied' }); return; }
@@ -352,6 +415,146 @@ campaignRouter.get('/:id/targets', async (req: Request, res: Response, next: Nex
   } catch (err) { next(err); }
 });
 
+// ---------- Analytics ----------
+
+/**
+ * GET /api/v1/campaigns/:id/analytics — aggregated dashboard metrics:
+ *  - target rollups (status + outcome buckets)
+ *  - answer rate, avg duration on COMPLETED calls
+ *  - per-hour throughput over the last 24h
+ *  - sentiment + lead_score histograms from conversations.analysis
+ *  - top objections + outcomes from analysis JSONB
+ */
+campaignRouter.get('/:id/analytics', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const cid = req.params.id;
+
+    const own = await pool.query(
+      `SELECT id FROM campaigns WHERE id = $1 AND tenant_id = $2`,
+      [cid, tenantId]
+    );
+    if (!own.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
+
+    // Target rollups: every status + every outcome bucket in one trip.
+    const rollup = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status='PENDING')::int     AS pending,
+         COUNT(*) FILTER (WHERE status='IN_PROGRESS')::int AS in_progress,
+         COUNT(*) FILTER (WHERE status='COMPLETED')::int   AS completed,
+         COUNT(*) FILTER (WHERE status='FAILED')::int      AS failed,
+         COUNT(*) FILTER (WHERE outcome='answered')::int   AS answered,
+         COUNT(*) FILTER (WHERE outcome='no_answer')::int  AS no_answer,
+         COUNT(*) FILTER (WHERE outcome='busy')::int       AS busy,
+         COUNT(*) FILTER (WHERE outcome='failed')::int     AS dial_failed,
+         COUNT(*) FILTER (WHERE outcome='cancelled')::int  AS cancelled,
+         COUNT(*) FILTER (WHERE outcome='dnc')::int        AS dnc,
+         SUM(attempts)::int                                AS total_attempts
+       FROM campaign_targets WHERE campaign_id = $1`,
+      [cid]
+    );
+
+    // Call-level metrics: avg duration on completed calls and per-hour
+    // throughput (last 24h, bucketed by truncated hour in campaign tz).
+    const callMetrics = await pool.query(
+      `SELECT
+         AVG(duration_seconds) FILTER (WHERE status='COMPLETED' AND duration_seconds > 0) AS avg_duration_seconds,
+         COUNT(*) FILTER (WHERE status='COMPLETED') AS dialed_completed,
+         COUNT(*) AS total_dials
+       FROM calls
+       WHERE metadata->>'campaign_id' = $1`,
+      [cid]
+    );
+
+    const throughput = await pool.query(
+      `SELECT date_trunc('hour', started_at AT TIME ZONE 'UTC') AS hour_utc,
+              COUNT(*)::int AS dials,
+              COUNT(*) FILTER (WHERE status='COMPLETED')::int AS completed
+       FROM calls
+       WHERE metadata->>'campaign_id' = $1
+         AND started_at >= NOW() - INTERVAL '24 hours'
+       GROUP BY hour_utc
+       ORDER BY hour_utc ASC`,
+      [cid]
+    );
+
+    // Sentiment + lead-score histograms from the post-call analysis JSONB.
+    // Defensive: analysis may not be present on every conversation (failed
+    // analyzer, dial-only call). Skip nulls.
+    const sentiment = await pool.query(
+      `SELECT LOWER(COALESCE(cv.analysis->>'sentiment',''))::text AS sentiment,
+              COUNT(*)::int AS n
+       FROM calls c
+       JOIN conversations cv ON cv.id = c.conversation_id
+       WHERE c.metadata->>'campaign_id' = $1
+         AND cv.analysis IS NOT NULL
+         AND cv.analysis->>'sentiment' IS NOT NULL
+       GROUP BY LOWER(COALESCE(cv.analysis->>'sentiment',''))
+       ORDER BY n DESC`,
+      [cid]
+    );
+
+    const intent = await pool.query(
+      `SELECT LOWER(COALESCE(cv.analysis->>'interest_level',''))::text AS bucket,
+              COUNT(*)::int AS n
+       FROM calls c
+       JOIN conversations cv ON cv.id = c.conversation_id
+       WHERE c.metadata->>'campaign_id' = $1
+         AND cv.analysis IS NOT NULL
+         AND cv.analysis->>'interest_level' IS NOT NULL
+       GROUP BY LOWER(COALESCE(cv.analysis->>'interest_level',''))
+       ORDER BY n DESC`,
+      [cid]
+    );
+
+    // Lead-score histogram: 5 buckets 0-20, 20-40, 40-60, 60-80, 80-100.
+    const leadScore = await pool.query(
+      `WITH parsed AS (
+         SELECT CASE
+                  WHEN cv.analysis->>'lead_score' ~ '^[0-9]+(\\.[0-9]+)?$'
+                  THEN (cv.analysis->>'lead_score')::numeric
+                  ELSE NULL END AS score
+         FROM calls c
+         JOIN conversations cv ON cv.id = c.conversation_id
+         WHERE c.metadata->>'campaign_id' = $1 AND cv.analysis IS NOT NULL
+       )
+       SELECT
+         COUNT(*) FILTER (WHERE score >= 0 AND score < 20)::int  AS b_0_20,
+         COUNT(*) FILTER (WHERE score >= 20 AND score < 40)::int AS b_20_40,
+         COUNT(*) FILTER (WHERE score >= 40 AND score < 60)::int AS b_40_60,
+         COUNT(*) FILTER (WHERE score >= 60 AND score < 80)::int AS b_60_80,
+         COUNT(*) FILTER (WHERE score >= 80 AND score <= 100)::int AS b_80_100,
+         AVG(score)::float AS avg
+       FROM parsed WHERE score IS NOT NULL`,
+      [cid]
+    );
+
+    const r = rollup.rows[0] || {};
+    const cm = callMetrics.rows[0] || {};
+    const closed = (r.completed || 0) + (r.failed || 0);
+    const answer_rate = closed > 0 ? +((r.answered || 0) / closed).toFixed(4) : 0;
+    const conversion_rate = closed > 0 ? +((r.completed || 0) / closed).toFixed(4) : 0;
+
+    res.json({
+      rollup: r,
+      answer_rate,
+      conversion_rate,
+      avg_duration_seconds: cm.avg_duration_seconds != null ? parseFloat(cm.avg_duration_seconds) : null,
+      total_dials: parseInt(cm.total_dials || '0', 10),
+      throughput: throughput.rows.map((x: any) => ({
+        hour_utc: x.hour_utc,
+        dials: x.dials,
+        completed: x.completed,
+      })),
+      sentiment: sentiment.rows.map((x: any) => ({ label: x.sentiment || 'unknown', count: x.n })),
+      interest_level: intent.rows.map((x: any) => ({ label: x.bucket || 'unknown', count: x.n })),
+      lead_score: leadScore.rows[0] || null,
+    });
+  } catch (err) { next(err); }
+});
+
 // ---------- Lifecycle ----------
 
 /**
@@ -455,16 +658,36 @@ async function processCampaign(campaignId: string): Promise<void> {
     return;
   }
 
-  // Pull pending targets (eligible now)
+  // Pull pending targets (eligible now). Exclude any target whose phone is on
+  // the tenant's do-not-call list — those are silently FAILED with reason=dnc.
   const targets = await pool.query(
     `SELECT * FROM campaign_targets
      WHERE campaign_id = $1
        AND status = 'PENDING'
        AND (next_attempt_after IS NULL OR next_attempt_after <= NOW())
+       AND NOT EXISTS (
+         SELECT 1 FROM do_not_call_numbers d
+         WHERE d.tenant_id = $3 AND d.phone_number = campaign_targets.phone_number
+       )
      ORDER BY created_at ASC
      LIMIT $2`,
-    [campaignId, canStart]
+    [campaignId, canStart, campaign.tenant_id]
   );
+
+  // Sweep DND'd targets to FAILED so they don't loop forever in PENDING.
+  // Cheap one-off update; idempotent (only flips matching rows).
+  try {
+    await pool.query(
+      `UPDATE campaign_targets
+       SET status='FAILED', outcome='dnc', last_error='Phone number is on the do-not-call list'
+       WHERE campaign_id = $1 AND status = 'PENDING'
+         AND EXISTS (
+           SELECT 1 FROM do_not_call_numbers d
+           WHERE d.tenant_id = $2 AND d.phone_number = campaign_targets.phone_number
+         )`,
+      [campaignId, campaign.tenant_id]
+    );
+  } catch { /* non-fatal */ }
 
   if (!targets.rows.length) {
     // All done or waiting for retry windows. Check if we should finalize.
@@ -491,7 +714,33 @@ async function processCampaign(campaignId: string): Promise<void> {
     return;
   }
 
-  const provider = getProvider(campaign.provider || 'plivo');
+  // Provider self-correction: trust the actual phone_numbers.provider for
+  // this from_number over campaign.provider. Without this, a campaign
+  // created with from=Twilio-number but provider=plivo (wizard race) hits
+  // a Plivo 400 "not a Plivo Number". One DB query per tick is cheap.
+  let providerName = String(campaign.provider || 'plivo').toLowerCase();
+  try {
+    const pn = await pool.query(
+      `SELECT provider FROM phone_numbers
+       WHERE phone_number = $1 AND tenant_id = $2 AND is_active = TRUE
+       ORDER BY deployed_at DESC NULLS LAST LIMIT 1`,
+      [campaign.from_number, campaign.tenant_id],
+    );
+    const actual = pn.rows[0]?.provider;
+    if (actual && actual.toLowerCase() !== providerName) {
+      logger.warn(
+        { campaignId: campaign.id, stored: providerName, actual, from: campaign.from_number },
+        'campaign provider mismatch — using number\'s actual provider and persisting fix',
+      );
+      providerName = actual.toLowerCase();
+      // Persist the correction so the UI + analytics line up.
+      await pool.query(
+        `UPDATE campaigns SET provider = $1, updated_at = NOW() WHERE id = $2`,
+        [providerName, campaign.id],
+      );
+    }
+  } catch { /* non-fatal — fall back to stored campaign.provider */ }
+  const provider = getProvider(providerName);
 
   // Look up voicemail detection setting on the agent (per-call carrier flag).
   // Also check the deploy gate — refuse to start a campaign on a DRAFT agent.
@@ -530,7 +779,11 @@ async function processCampaign(campaignId: string): Promise<void> {
         voicemailDetection,
       });
 
-      // Insert a calls row
+      // Insert a calls row. metadata carries everything the WS handler needs to
+      // personalize this dial: campaign_instruction (free-form note appended to
+      // the system prompt), per-target name + vars (interpolated into greeting
+      // + injected as CONTACT_CONTEXT), and the deployed snapshot id (so we
+      // read the frozen agent config instead of the live one).
       await pool.query(
         `INSERT INTO calls (tenant_id, agent_id, direction, status, caller_number, called_number,
                             provider, provider_call_sid, metadata)
@@ -538,7 +791,14 @@ async function processCampaign(campaignId: string): Promise<void> {
          ON CONFLICT (provider_call_sid) DO NOTHING`,
         [campaign.tenant_id, campaign.agent_id, campaign.from_number, t.phone_number,
          campaign.provider, result.providerCallId,
-         JSON.stringify({ campaign_id: campaignId, target_id: t.id, target_name: t.name, vars: t.variables })]
+         JSON.stringify({
+           campaign_id: campaignId,
+           target_id: t.id,
+           target_name: t.name,
+           vars: t.variables,
+           campaign_instruction: campaign.campaign_instruction || null,
+           deployed_agent_config_id: campaign.deployed_agent_config_id || null,
+         })]
       );
 
       await pool.query(

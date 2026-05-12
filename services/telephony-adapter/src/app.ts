@@ -11,6 +11,7 @@ import { webhookRouter } from './routes/webhooks';
 import { audioRouter } from './routes/audio';
 import { recordingsRouter } from './routes/recordings';
 import { campaignRouter } from './routes/campaigns';
+import { dncRouter } from './routes/dnc';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 import { verifyTwilioSignature, verifyPlivoSignature } from './middleware/webhookSignature';
@@ -58,6 +59,7 @@ app.use('/api/v1/phone-numbers/kyc-wizard', kycWizardRouter);
 app.use('/api/v1/phone-numbers', numberLifecycleRouter);
 app.use('/api/v1/phone-numbers', phoneNumberRouter);
 app.use('/api/v1/campaigns', campaignRouter);
+app.use('/api/v1/dnc', dncRouter);
 
 app.use(errorHandler);
 

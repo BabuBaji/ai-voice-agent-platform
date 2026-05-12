@@ -40,7 +40,7 @@ export const agentApi = {
     id: string,
     message: string,
     history?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
-  ): Promise<{ reply: string }> => {
+  ): Promise<{ reply: string; rag_chunks_used?: number; agent?: { name: string; provider: string; model: string } }> => {
     const response = await api.post(`/agents/${id}/test`, { message, history });
     return response.data;
   },

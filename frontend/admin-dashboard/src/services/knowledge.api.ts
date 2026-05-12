@@ -73,6 +73,15 @@ export const knowledgeApi = {
     return res.data.data ?? res.data;
   },
 
+  /**
+   * Ingest a plain-text blob as a KB document. Used by the in-page Q&A
+   * trainer so we don't have to round-trip through a File / Blob.
+   */
+  addTextDocument: async (params: { knowledge_base_id: string; filename: string; content: string }): Promise<KBDocumentApi> => {
+    const res = await api.post('/knowledge/documents/text', params);
+    return res.data;
+  },
+
   deleteDocument: async (id: string): Promise<void> => {
     await api.delete(`/knowledge/documents/${id}`);
   },

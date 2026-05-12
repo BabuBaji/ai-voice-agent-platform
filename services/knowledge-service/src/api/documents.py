@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
 from common import get_db_pool, get_logger
 from ..models import DocumentResponse, DocumentListResponse, DocumentStatus
@@ -81,6 +82,77 @@ async def upload_document(
         status=DocumentStatus.pending,
         chunk_count=0,
         file_size=len(content),
+        created_at=now,
+        updated_at=now,
+    )
+
+
+class TextIngestRequest(BaseModel):
+    knowledge_base_id: str
+    filename: str = Field(..., max_length=200)
+    content: str = Field(..., min_length=1, max_length=200_000)
+
+
+@router.post("/text", response_model=DocumentResponse)
+async def upload_text_document(req: TextIngestRequest):
+    """Ingest a chunk of plain text as a knowledge-base document.
+
+    Identical to /upload but takes JSON instead of multipart, so the UI can
+    persist things like Q&A training pairs without building a Blob/File. The
+    text is run through the same parse→chunk→embed pipeline.
+    """
+    document_id = str(uuid4())
+    filename = (req.filename or f"text-{document_id}.txt").strip()[:200] or f"text-{document_id}.txt"
+    if not filename.lower().endswith((".txt", ".md")):
+        filename = f"{filename}.txt"
+    body = req.content.encode("utf-8")
+    now = datetime.now(timezone.utc)
+
+    logger.info(
+        "document_text_ingest",
+        document_id=document_id,
+        filename=filename,
+        size=len(body),
+        knowledge_base_id=req.knowledge_base_id,
+    )
+
+    try:
+        pool = await get_db_pool(settings.database_url)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO documents (id, filename, knowledge_base_id, status, chunk_count, file_size, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                document_id,
+                filename,
+                req.knowledge_base_id,
+                "pending",
+                0,
+                len(body),
+                now,
+                now,
+            )
+    except Exception as e:
+        logger.error("document_text_db_insert_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to create document record: {str(e)}")
+
+    asyncio.create_task(
+        pipeline.process_document(
+            document_id=document_id,
+            filename=filename,
+            content=body,
+            knowledge_base_id=req.knowledge_base_id,
+        )
+    )
+
+    return DocumentResponse(
+        id=document_id,
+        filename=filename,
+        knowledge_base_id=req.knowledge_base_id,
+        status=DocumentStatus.pending,
+        chunk_count=0,
+        file_size=len(body),
         created_at=now,
         updated_at=now,
     )

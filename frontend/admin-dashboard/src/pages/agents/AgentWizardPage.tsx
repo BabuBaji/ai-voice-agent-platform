@@ -28,6 +28,7 @@ import {
 } from '@/utils/constants';
 import { agentApi } from '@/services/agent.api';
 import { callApi } from '@/services/call.api';
+import { phoneNumberApi, type PhoneNumberRecord } from '@/services/phoneNumber.api';
 import { formatCallError } from '@/services/callError';
 import { generateConversationFlow } from '@/utils/conversationFlow';
 import { MyAssistantsSection } from '@/components/agent-builder/MyAssistantsSection';
@@ -216,6 +217,35 @@ export function AgentWizardPage() {
   // "destination unverified" error comes back from /calls/initiate.
   const [verifying, setVerifying] = useState(false);
   const [verifyInfo, setVerifyInfo] = useState<{ phone_number: string; validation_code?: string; already_verified: boolean; message: string } | null>(null);
+
+  // Deployed-number picker: fetch tenant phones when the test modal opens.
+  // Lets the user pick which number to dial *from* even when the new agent
+  // has no attached number — instead of hitting the "No phone number is
+  // configured" backend error.
+  const [availableFromNumbers, setAvailableFromNumbers] = useState<PhoneNumberRecord[]>([]);
+  const [selectedFromId, setSelectedFromId] = useState<string>('');
+  useEffect(() => {
+    if (!showCallModal) return;
+    phoneNumberApi.list()
+      .then((nums) => {
+        // Show only deployed/active numbers — drafts won't dial.
+        const deployed = nums.filter(
+          (n) => n.is_active && (n.deployment_status === 'deployed' || !n.deployment_status),
+        );
+        setAvailableFromNumbers(deployed);
+        if (deployed.length === 0) { setSelectedFromId(''); return; }
+        // Prefer the number already attached to this agent, then any Plivo,
+        // then the first deployed entry.
+        const mine = createdAgentId ? deployed.find((n) => n.agent_id === createdAgentId) : null;
+        const plivo = deployed.find((n) => n.provider === 'plivo');
+        setSelectedFromId(mine?.id || plivo?.id || deployed[0].id);
+      })
+      .catch(() => { setAvailableFromNumbers([]); });
+  }, [showCallModal, createdAgentId]);
+  const selectedFromNumber = useMemo(
+    () => availableFromNumbers.find((n) => n.id === selectedFromId) || null,
+    [availableFromNumbers, selectedFromId],
+  );
 
   const primaryLanguage = languages[0] || 'en-US';
 
@@ -484,7 +514,15 @@ export function AgentWizardPage() {
       // Auto-deploy first so users don't hit "Click Deploy on the agent" 400.
       await ensurePublished();
       const fullNumber = `${countryCode}${phoneNumber.replace(/\s+/g, '')}`;
-      await callApi.initiate({ agentId: createdAgentId, phoneNumber: fullNumber });
+      // Pass the picked caller-ID so the backend doesn't fall back to the
+      // agent-attached number (which may not exist for a freshly created
+      // agent). Provider is inferred from the chosen row.
+      await callApi.initiate({
+        agentId: createdAgentId,
+        phoneNumber: fullNumber,
+        from: selectedFromNumber?.phone_number,
+        provider: (selectedFromNumber?.provider as any) || 'plivo',
+      });
       setShowCallModal(false);
       navigate(`/agents/${createdAgentId}`);
     } catch (e: any) {
@@ -958,6 +996,42 @@ export function AgentWizardPage() {
               </div>
             </div>
           )}
+
+          {/* Caller-ID picker — replaces the "No phone number is configured"
+              error. Lists every deployed Plivo/Twilio/Exotel number for this
+              tenant so the user can pick which one to dial from. */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Call From (Caller ID)
+            </label>
+            {availableFromNumbers.length === 0 ? (
+              <div className="flex items-start gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-xs text-warning-800">
+                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <div>
+                  No deployed phone numbers found.
+                  Go to <a href="/settings/phone-numbers" className="underline font-medium">Settings → Phone Numbers</a> to deploy one (Plivo recommended for India).
+                </div>
+              </div>
+            ) : (
+              <select
+                value={selectedFromId}
+                onChange={(e) => setSelectedFromId(e.target.value)}
+                className="w-full rounded-xl border border-gray-300 px-3.5 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-200 focus:border-teal-500"
+              >
+                {availableFromNumbers.map((n) => {
+                  const isMine = createdAgentId && n.agent_id === createdAgentId;
+                  return (
+                    <option key={n.id} value={n.id}>
+                      {n.phone_number} · {n.provider}
+                      {isMine ? ' · attached to this agent' : ''}
+                      {n.agent_id && !isMine ? ' · attached to another agent' : ''}
+                      {!n.agent_id ? ' · unassigned' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            )}
+          </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">

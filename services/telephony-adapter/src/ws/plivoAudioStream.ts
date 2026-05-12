@@ -35,6 +35,7 @@ import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechC
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, SarvamSttHandle } from '../providers/sarvamSpeech';
 import { plivoProvider } from '../providers/plivo.provider';
 import { resolveDeployedAgent } from '../services/deployedAgentResolver';
+import { updateTargetFromCallEnd } from '../routes/campaigns';
 
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
@@ -373,14 +374,59 @@ async function fetchRagContext(
   }
 }
 
+/**
+ * Short-acknowledgement detector. Used to skip grounding fetches (Wikipedia,
+ * Tavily, RAG) when the caller just said "yes" / "thanks" / "హా" etc. Saves
+ * ~500–1500ms per ack turn because the slowest grounding call sets the floor.
+ *
+ * Strict matching only — substantive short messages like "MBA fee?" or
+ * "Charminar timings" must NOT skip grounding, since RAG is where the
+ * answers live. So we match against an explicit allowlist with punctuation
+ * stripped, and cap at 30 chars to avoid greedy false positives.
+ */
+const SHORT_ACK_SET = new Set([
+  // English
+  'yes', 'yeah', 'yep', 'yup', 'ok', 'okay', 'kk', 'hmm', 'mhm', 'sure', 'right',
+  'fine', 'great', 'nice', 'good', 'cool', 'alright', 'gotcha', 'got it',
+  'thanks', 'thank you', 'thank you very much', 'thanks a lot', 'thank you so much',
+  'no problem', 'no worries',
+  // Telugu
+  'హలో', 'హా', 'మంచిది', 'బాగుంది', 'థాంక్యూ', 'ధన్యవాదాలు', 'సరే', 'ఓకే', 'ఉమ్', 'అవును', 'అచ్ఛా',
+  // Hindi
+  'धन्यवाद', 'शुक्रिया', 'ठीक', 'हाँ', 'हां', 'अच्छा', 'ठीक है',
+  // Tamil
+  'சரி', 'ஆம்', 'நன்றி',
+  // Kannada
+  'ಸರಿ', 'ಧನ್ಯವಾದ', 'ಹೌದು',
+  // Malayalam
+  'ശരി', 'നന്ദി', 'അതെ',
+]);
+
+function isShortAck(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim().toLowerCase().replace(/[.,!?…]+$/g, '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 30) return false;
+  return SHORT_ACK_SET.has(t);
+}
+
 async function callLLM(
   agent: any,
   history: Array<{ role: string; content: string }>,
   customerName: string | null,
   callType: string | null,
   language?: string | null,
+  campaignContext?: CampaignContext,
 ): Promise<string> {
   const basePrompt = agent.system_prompt || 'helpful customer conversation';
+
+  // Latency optimization 1: skip ALL grounding fetches when the last user
+  // utterance is a pure acknowledgement ("ok", "thanks", "హా", etc.). Saves
+  // ~500–1500ms per ack turn because Wikipedia/Tavily/RAG don't fire. The
+  // ack still gets a reply — just from the prompt + history, which is what
+  // the LLM needs for "anything else?" type follow-ups anyway.
+  const lastUserUtter = history.length > 0 && history[history.length - 1].role === 'user'
+    ? history[history.length - 1].content : '';
+  const skipGrounding = isShortAck(lastUserUtter);
 
   // Grounding strategy — three parallel sources, slowest sets the floor:
   //   1. Wikipedia (always, both langs) — encyclopedia facts: cast, plot,
@@ -394,34 +440,49 @@ async function callLLM(
   //      context small.
   const isIndic = !!(language && !/^en/i.test(language) && sarvamCanHandle(language));
   const [webContext, liveContext, ragContext] = await Promise.all([
-    fetchWebContext(agent, history, language || null),
-    fetchLiveSearchContext(history),
-    isIndic ? Promise.resolve('') : fetchRagContext(agent, history),
+    skipGrounding ? Promise.resolve('') : fetchWebContext(agent, history, language || null),
+    skipGrounding ? Promise.resolve('') : fetchLiveSearchContext(history),
+    (skipGrounding || isIndic) ? Promise.resolve('') : fetchRagContext(agent, history),
   ]);
   const groundingContext = (liveContext || '') + (webContext || '') + (ragContext || '');
   const systemPrompt = buildVoiceAgentPrompt(basePrompt + groundingContext, agent, {
     customerName,
     callType,
     language: language || undefined,
+    campaignInstruction: campaignContext?.instruction || null,
+    contactVariables: campaignContext?.variables || null,
   });
+
+  // Latency optimization 2: trim history to the last 14 turns. The LLM needs
+  // the dialogue tail to answer the current question; older turns just inflate
+  // input tokens and slow the model. Keep more for Sarvam (which is more
+  // sensitive to abrupt cuts) — but cap to avoid blowing its context.
+  const trimmedHistory = history.length > 14 ? history.slice(-14) : history;
 
   // Indic path: call Sarvam directly. Two-attempt strategy — full history
   // first, then trimmed history if Sarvam returned null (likely context-
   // length blowout, sarvam-m's reply slot got eaten by <think>).
+  //
+  // IMPORTANT — DO NOT lower maxTokens below ~1200 here. sarvam-m's
+  // <think> reasoning eats 800–1000 tokens before it even starts the
+  // spoken reply. Capping at 350-500 silently truncates the reply slot,
+  // the API returns empty content, we emit "say again" instead — caller
+  // hears it twice, the KB never gets used. We previously dropped this
+  // for latency and the entire Indic flow broke.
   if (isIndic && sarvamConfigured()) {
     let sarvamReply = await callSarvamLLM({
       systemPrompt,
-      messages: history,
-      maxTokens: 500,
+      messages: trimmedHistory,
+      maxTokens: 1500,
       temperature: parseFloat(agent.temperature) || 0.7,
     });
-    if (!sarvamReply && history.length > 6) {
+    if (!sarvamReply && trimmedHistory.length > 6) {
       // Retry with last 6 turns only — keeps the dialogue tail that the
       // model needs to answer the latest user turn, drops earlier history.
       sarvamReply = await callSarvamLLM({
         systemPrompt,
-        messages: history.slice(-6),
-        maxTokens: 500,
+        messages: trimmedHistory.slice(-6),
+        maxTokens: 1500,
         temperature: parseFloat(agent.temperature) || 0.7,
       });
     }
@@ -447,11 +508,15 @@ async function callLLM(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         system_prompt: systemPrompt,
-        messages: history,
+        messages: trimmedHistory,
         provider: agent.llm_provider || 'google',
         model: agent.llm_model || 'gemini-2.5-flash',
         temperature: parseFloat(agent.temperature) || 0.7,
-        max_tokens: 300,
+        // Latency optimization 3: cap reply at 180 tokens. The system prompt
+        // already mandates 2–4 sentences; this hard limit shaves 50–200ms off
+        // generation when the model would otherwise meander.
+        max_tokens: 180,
+        knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
       }),
     });
     if (!resp.ok) return '';
@@ -559,6 +624,32 @@ async function ttsDeepgramMulaw(text: string, voiceIdRaw?: string): Promise<stri
 
 // ---- session state ---------------------------------------------------------
 
+/**
+ * Replace {{var}} placeholders in a template with values from `vars`. Missing
+ * keys collapse to empty + extra whitespace is cleaned so a missing {{name}}
+ * doesn't leave "Hello , this is Priya". Used for the per-contact welcome
+ * message in outbound campaigns.
+ */
+function interpolateVars(template: string, vars: Record<string, any>): string {
+  if (!template) return template;
+  return template
+    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
+      const v = vars?.[key];
+      return v !== undefined && v !== null && String(v).trim() ? String(v).trim() : '';
+    })
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.!?])/g, '$1')
+    .replace(/,\s*,/g, ',')
+    .trim();
+}
+
+type CampaignContext = {
+  instruction: string | null;
+  variables: Record<string, any>;
+  targetName: string | null;
+  campaignId: string | null;
+};
+
 interface StreamSession {
   callSid: string;
   agentId: string;
@@ -568,6 +659,12 @@ interface StreamSession {
   calledNumber: string;
   conversationId: string | null;
   streamId: string | null;
+  // OmniDim-style runtime overlay: set in onStart from calls.metadata when the
+  // dial was kicked by the campaign runner. Used to (a) interpolate the
+  // greeting and (b) inject CAMPAIGN_CONTEXT + CONTACT_CONTEXT into every LLM
+  // turn so the agent acts on the per-contact data without permanently
+  // modifying the agent record.
+  campaignContext: CampaignContext;
   language: string;          // agent voice_config.language, normalized
   sttBackend: 'deepgram' | 'azure' | 'sarvam' | null;
   ttsBackend: 'deepgram' | 'azure' | 'sarvam';
@@ -629,6 +726,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       calledNumber: calledFromUrl,
       conversationId: null,
       streamId: null,
+      campaignContext: { instruction: null, variables: {}, targetName: null, campaignId: null },
       language: 'en-IN',
       sttBackend: null,
       ttsBackend: 'deepgram',
@@ -743,6 +841,34 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     return;
   }
 
+  // Pull the campaign overlay from calls.metadata (set by the campaign runner).
+  // For non-campaign calls (inbound, ad-hoc outbound), metadata is empty and
+  // we keep the zero-value overlay — system prompt blocks render to nothing.
+  if (session.callSid) {
+    try {
+      const cr = await pool.query(
+        `SELECT metadata FROM calls WHERE provider_call_sid = $1 LIMIT 1`,
+        [session.callSid],
+      );
+      const md = (cr.rows[0]?.metadata as any) || {};
+      if (md && (md.campaign_id || md.target_name || md.campaign_instruction)) {
+        session.campaignContext = {
+          campaignId: md.campaign_id || null,
+          instruction: typeof md.campaign_instruction === 'string' && md.campaign_instruction.trim()
+            ? md.campaign_instruction.trim() : null,
+          variables: (md.vars && typeof md.vars === 'object') ? md.vars : {},
+          targetName: md.target_name || null,
+        };
+        logger.info(
+          { callSid: session.callSid, campaignId: session.campaignContext.campaignId, hasInstruction: !!session.campaignContext.instruction, varKeys: Object.keys(session.campaignContext.variables) },
+          'Stream handler: campaign overlay loaded',
+        );
+      }
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'Failed to load campaign overlay from calls.metadata');
+    }
+  }
+
   const lang = firstNonEmpty(session.agent.voice_config?.language, session.agent.voiceConfig?.language) || 'en-IN';
   session.language = lang;
   // Backend selection priority:
@@ -832,22 +958,40 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     await connectDeepgram(session, lang);
   }
 
-  // Seed greeting through LLM so it follows the agent's configured prompt,
-  // then stream it to Plivo as our first audio reply.
-  const seeded = await callLLM(
-    session.agent,
-    [
-      {
-        role: 'user',
-        content:
-          'The call has just connected. Greet the caller briefly (one short sentence), introduce yourself by your first name only and what you help with, then ask ONE short opening question. Sound like a real human on the phone — no "I am an AI", no lists, one or two sentences max.',
-      },
-    ],
-    null,
-    'outbound',
-    session.language,
-  );
-  const greeting = (seeded && seeded.trim()) || session.agent.greeting_message || 'Hey there — how can I help you today?';
+  // Seed greeting. For campaign dials with a templated greeting_message that
+  // contains {{vars}}, interpolate and use directly — it's faster and more
+  // deterministic than re-asking the LLM, which is what OmniDim does too.
+  // Otherwise route through the LLM with the campaign overlay so the greeting
+  // is personalized but stays on-prompt.
+  const greetingVars: Record<string, any> = {
+    ...(session.campaignContext.variables || {}),
+    name: session.campaignContext.targetName || session.campaignContext.variables?.name || '',
+  };
+  const rawTemplate = (session.agent.greeting_message || '').toString();
+  const hasTemplatePlaceholders = /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(rawTemplate);
+  let greeting = '';
+  if (hasTemplatePlaceholders && rawTemplate.trim()) {
+    greeting = interpolateVars(rawTemplate, greetingVars);
+    logger.info({ callSid: session.callSid }, 'Greeting: interpolated from agent.greeting_message template');
+  } else {
+    const seeded = await callLLM(
+      session.agent,
+      [
+        {
+          role: 'user',
+          content:
+            'The call has just connected. Greet the caller briefly (one short sentence), introduce yourself by your first name only and what you help with, then ask ONE short opening question. Sound like a real human on the phone — no "I am an AI", no lists, one or two sentences max.',
+        },
+      ],
+      session.campaignContext.targetName,
+      'outbound',
+      session.language,
+      session.campaignContext,
+    );
+    greeting = (seeded && seeded.trim())
+      || (rawTemplate ? interpolateVars(rawTemplate, greetingVars) : '')
+      || 'Hey there — how can I help you today?';
+  }
   if (session.conversationId) {
     await appendMessage(session.conversationId, session.tenantId, 'assistant', greeting);
   }
@@ -1427,7 +1571,14 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
   // Drain: loop until the last message in history is an assistant turn
   // (meaning there's no outstanding user input to respond to).
   while (session.history.length > 0 && session.history[session.history.length - 1].role === 'user') {
-    const reply = await callLLM(session.agent, session.history, null, 'outbound', session.language);
+    const reply = await callLLM(
+      session.agent,
+      session.history,
+      session.campaignContext.targetName,
+      'outbound',
+      session.language,
+      session.campaignContext,
+    );
     const raw = reply && reply.trim() ? reply.trim() : 'Sorry, could you repeat that?';
 
     // Strip the obsolete [END_CALL] token if the LLM still emits it from an
@@ -1510,12 +1661,14 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   });
 
   // Chunked playback for barge-in support. mulaw 8kHz = 8000 bytes/sec, so
-  // ~800-byte chunks ≈ 100ms each. We send chunks at a 90ms cadence (slightly
-  // ahead of real-time so playback never starves) and check bargeInRequested
-  // between sends — the moment the caller starts speaking, we stop sending
-  // and flush Plivo's queue. Caller hears at most ~150ms of overrun.
-  const CHUNK_BYTES = 800;        // 100ms of mulaw 8kHz
-  const SEND_INTERVAL_MS = 90;    // slightly ahead of playback rate
+  // 400-byte chunks ≈ 50ms each. We send chunks at exactly 50ms cadence
+  // (match-playback-rate) — earlier we drifted 10ms ahead per chunk which
+  // accumulated to ~300ms of Plivo buffer over a 3s reply; on some Indian
+  // carrier paths that surplus shows up as choppy/doubled audio when the
+  // PSTN-to-VoIP gateway re-times frames. Sending exactly at playback rate
+  // keeps Plivo's queue ~empty, smoothing the caller's experience.
+  const CHUNK_BYTES = 400;        // 50ms of mulaw 8kHz — well below Plivo's 100ms ceiling
+  const SEND_INTERVAL_MS = 50;    // exact playback rate
   const BARGE_IN_GRACE_MS = 1500; // protect first 1.5s from trivial interjections
   session.isAgentSpeaking = true;
   session.bargeInRequested = false;
@@ -1836,6 +1989,24 @@ async function finalizeRecording(session: StreamSession): Promise<void> {
       }
     }
     logger.info({ callSid: session.callSid, url, bytes: callerBuf.length, callerScore: callerAcoustic.clarity_score, agentScore: agentAcoustic.clarity_score }, 'Recording written');
+
+    // Campaign target sync. Plivo <Stream> calls don't fire the hangup status
+    // webhook reliably, so without this the runner leaves the target row at
+    // IN_PROGRESS forever — the detail page can't surface audio + transcript
+    // because campaign_targets.conversation_id is never linked. The webhook
+    // path also calls updateTargetFromCallEnd; if both fire, the second is a
+    // safe no-op against COMPLETED rows.
+    if (session.callSid && session.campaignContext?.campaignId) {
+      try {
+        await updateTargetFromCallEnd(
+          session.callSid,
+          'COMPLETED',
+          session.conversationId,
+        );
+      } catch (err: any) {
+        logger.warn({ err: err.message, callSid: session.callSid }, 'updateTargetFromCallEnd failed');
+      }
+    }
   } catch (err: any) {
     logger.warn({ err: err.message, callSid: session.callSid }, 'finalizeRecording error');
   }

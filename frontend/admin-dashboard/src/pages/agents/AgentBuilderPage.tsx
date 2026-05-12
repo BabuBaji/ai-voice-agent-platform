@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Save, ArrowLeft, Sparkles, MessageSquare, Globe, Mic, Brain, Activity,
   Rocket, Search, BookOpen, Plug, CheckCircle2, AlertCircle, PhoneIncoming,
   PhoneOutgoing, PhoneCall, Monitor, Bot, Phone, Clock, Check, Loader2,
+  Upload, FileUp, Plus, X,
 } from 'lucide-react';
+import type { KBDocumentApi } from '@/services/knowledge.api';
 import { Button } from '@/components/ui/Button';
 import { Textarea } from '@/components/ui/Input';
 import { Card } from '@/components/ui/Card';
@@ -12,10 +14,10 @@ import { Modal } from '@/components/ui/Modal';
 import { PromptEditor } from '@/components/agent-builder/PromptEditor';
 import { ConversationFlowEditor } from '@/components/agent-builder/ConversationFlowEditor';
 import { ToolConfigurator } from '@/components/agent-builder/ToolConfigurator';
-import { KnowledgeAttacher } from '@/components/agent-builder/KnowledgeAttacher';
 import { agentApi } from '@/services/agent.api';
 import { callApi } from '@/services/call.api';
 import { phoneNumberApi, type PhoneNumberRecord } from '@/services/phoneNumber.api';
+import { knowledgeApi } from '@/services/knowledge.api';
 import {
   VOICE_PROVIDERS, VOICES, LANGUAGES,
   STT_PROVIDERS, STT_MODELS, COUNTRY_CODES,
@@ -147,6 +149,11 @@ export function AgentBuilderPage() {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [enabledTools, setEnabledTools] = useState<string[]>([]);
   const [attachedKBs, setAttachedKBs] = useState<string[]>([]);
+
+  // Counter that ingestion cards bump after each upload — DocumentsListCard
+  // watches it and refetches. Saves a stale list when a Q&A or PDF lands.
+  const [kbDocsRefresh, setKbDocsRefresh] = useState(0);
+  const [ensuringKb, setEnsuringKb] = useState(false);
 
   // Post-call actions (fire when the call ends: webhook/slack/email)
   type PostCallActionDraft = {
@@ -373,6 +380,43 @@ export function AgentBuilderPage() {
   const handleToolToggle = (t: string) =>
     setEnabledTools((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
 
+  /**
+   * Hand the upload cards / Q&A trainer a KB id, creating one on demand.
+   * Each agent gets one personal KB (named after the agent) — the first
+   * upload of any kind triggers creation, attaches it locally + on the agent
+   * record so the runtime sees it, and returns the id. Returns null and
+   * surfaces an inline error if the agent hasn't been saved yet.
+   */
+  const ensureKbId = async (): Promise<string | null> => {
+    if (attachedKBs.length > 0) return attachedKBs[0];
+    if (isNew || !id) {
+      setMessage({ type: 'error', text: 'Save the agent first, then add knowledge.' });
+      return null;
+    }
+    setEnsuringKb(true);
+    try {
+      const kb = await knowledgeApi.createKnowledgeBase({
+        name: `${name || 'Agent'} — Knowledge`,
+        description: `Personal knowledge base for ${name || 'this agent'}.`,
+      });
+      const next = [kb.id];
+      setAttachedKBs(next);
+      try {
+        await agentApi.update(id, { knowledge_base_ids: next } as any);
+      } catch (err: any) {
+        // Persist failure isn't fatal for the current upload, but tell the
+        // user — they need to Save again to lock it in.
+        setMessage({ type: 'error', text: 'KB created, but the agent record did not save — click Save once to persist.' });
+      }
+      return kb.id;
+    } catch (e: any) {
+      setMessage({ type: 'error', text: 'Failed to set up knowledge base: ' + (e?.response?.data?.detail || e?.message || 'error') });
+      return null;
+    } finally {
+      setEnsuringKb(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -559,12 +603,17 @@ export function AgentBuilderPage() {
               </div>
             </div>
             <div className="p-5">
+              <GenerateWelcomeButton
+                disabled={isNew || !systemPrompt.trim()}
+                agentId={id}
+                onGenerated={(text) => setGreeting(text.slice(0, 600))}
+              />
               <textarea
                 value={greeting}
                 onChange={(e) => setGreeting(e.target.value.slice(0, 600))}
                 placeholder="Hello, I am your AI assistant. How can I help you today?"
                 rows={3}
-                className="block w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-200 focus:bg-white"
+                className="mt-2 block w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-200 focus:bg-white"
               />
               <div className="text-right text-xs text-gray-400 mt-1">{greeting.length}/600</div>
             </div>
@@ -614,14 +663,40 @@ export function AgentBuilderPage() {
       )}
 
       {activeTab === 'knowledge' && (
-        <Card>
-          <h3 className="text-sm font-semibold text-gray-900 mb-3">Knowledge Base</h3>
-          <KnowledgeAttacher
-            attachedIds={attachedKBs}
-            onAttach={(kid) => setAttachedKBs((prev) => [...prev, kid])}
-            onDetach={(kid) => setAttachedKBs((prev) => prev.filter((x) => x !== kid))}
+        <div className="space-y-4">
+          {/* Two ingestion cards (PDF + URL). Both auto-create the agent's
+              personal KB on first use, then upload into it. No "attach KB"
+              step — the user just uploads. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <UploadPdfCard
+              ensureKbId={ensureKbId}
+              onUploaded={() => setKbDocsRefresh((n) => n + 1)}
+            />
+            <WebsiteKbCard
+              ensureKbId={ensureKbId}
+              onUploaded={() => setKbDocsRefresh((n) => n + 1)}
+            />
+          </div>
+
+          {/* Uploaded files list — view content / status */}
+          <DocumentsListCard
+            kbId={attachedKBs[0] || null}
+            refreshSignal={kbDocsRefresh}
+            onChanged={() => setKbDocsRefresh((n) => n + 1)}
           />
-        </Card>
+
+          {/* Quick Q&A test against the agent's knowledge */}
+          <TestKnowledgeCard agentId={id} isNew={isNew} kbId={attachedKBs[0] || null} />
+
+          <KnowledgeTrainerCard
+            agentId={id}
+            isNew={isNew}
+            systemPrompt={systemPrompt}
+            agentName={name}
+            ensureKbId={ensureKbId}
+            onSaved={() => setKbDocsRefresh((n) => n + 1)}
+          />
+        </div>
       )}
 
       {activeTab === 'integrations' && (
@@ -1841,6 +1916,789 @@ function RecentCallsTab({ agentId, isNew }: { agentId?: string; isNew: boolean }
           </div>
         ))}
       </div>
+    </Card>
+  );
+}
+
+/* ---------- Generate Welcome button ---------- */
+/**
+ * Calls the agent's /test endpoint (which runs through the live agent runtime —
+ * system prompt + grounding + RAG) with an internal instruction asking for a
+ * one-line welcome. The reply is the agent's natural voice for greeting a
+ * caller, written from inside its own persona. User can accept/edit.
+ */
+function GenerateWelcomeButton({
+  agentId, disabled, onGenerated,
+}: {
+  agentId?: string;
+  disabled?: boolean;
+  onGenerated: (text: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleClick = async () => {
+    if (!agentId) {
+      setErr('Save the agent first, then generate a welcome.');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await agentApi.test(
+        agentId,
+        'INTERNAL_GENERATION (do not speak this back) — based on your system prompt and business context, produce ONE short voice-call welcome message (max 25 words). Greet the caller naturally, introduce yourself by first name only and what you help with, then ask ONE friendly opening question. Reply with ONLY the welcome line. No quotes, no labels, no markdown.',
+      );
+      const text = (res.reply || '').trim().replace(/^["']|["']$/g, '');
+      if (!text) throw new Error('Empty reply from LLM');
+      onGenerated(text);
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || e?.message || 'Failed to generate welcome');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={!!disabled || busy}
+        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-xs font-medium bg-gradient-to-r from-amber-500 to-orange-500 text-white hover:from-amber-400 hover:to-orange-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        title={disabled && !agentId ? 'Save the agent first' : 'Generate a welcome from the system prompt'}
+      >
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+        {busy ? 'Generating…' : 'Generate from prompt'}
+      </button>
+      {err && <p className="text-xs text-red-600 mt-1">{err}</p>}
+    </div>
+  );
+}
+
+/* ---------- Knowledge-Base Q&A Trainer ---------- */
+/**
+ * Lets the user "train" the agent on FAQ-style Q&A pairs. Each pair has a
+ * question (what a customer would ask) + an answer (what the agent should
+ * say). [Generate answer] auto-fills the answer using the agent's own runtime
+ * so the trainer respects voice / language / business context. [Save to KB]
+ * concatenates all pairs into one document and ingests it via /documents/text;
+ * the embedder makes them retrievable at call time via RAG.
+ */
+type QaPair = { id: string; question: string; answer: string; generating?: boolean };
+const newPairId = () => Math.random().toString(36).slice(2, 10);
+
+function KnowledgeTrainerCard({
+  agentId, isNew, systemPrompt, agentName, ensureKbId, onSaved,
+}: {
+  agentId?: string;
+  isNew: boolean;
+  systemPrompt: string;
+  agentName: string;
+  ensureKbId: () => Promise<string | null>;
+  onSaved?: () => void;
+}) {
+  const [pairs, setPairs] = useState<QaPair[]>([
+    { id: newPairId(), question: '', answer: '' },
+  ]);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const updatePair = (id: string, patch: Partial<QaPair>) =>
+    setPairs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  const addPair = () => setPairs((prev) => [...prev, { id: newPairId(), question: '', answer: '' }]);
+  const removePair = (id: string) =>
+    setPairs((prev) => (prev.length <= 1 ? prev : prev.filter((p) => p.id !== id)));
+
+  const generateAnswer = async (id: string) => {
+    if (!agentId || isNew) {
+      setMsg({ kind: 'err', text: 'Save the agent first, then generate answers.' });
+      return;
+    }
+    const pair = pairs.find((p) => p.id === id);
+    if (!pair || !pair.question.trim()) return;
+    updatePair(id, { generating: true });
+    setMsg(null);
+    try {
+      const res = await agentApi.test(agentId, pair.question.trim());
+      const text = (res.reply || '').trim();
+      if (!text) throw new Error('Empty reply');
+      updatePair(id, { answer: text, generating: false });
+    } catch (e: any) {
+      updatePair(id, { generating: false });
+      setMsg({ kind: 'err', text: e?.response?.data?.error || e?.message || 'Failed to generate answer' });
+    }
+  };
+
+  const saveToKb = async () => {
+    setMsg(null);
+    const usable = pairs.filter((p) => p.question.trim() && p.answer.trim());
+    if (usable.length === 0) {
+      setMsg({ kind: 'err', text: 'Fill at least one Q&A pair (question + answer) before saving.' });
+      return;
+    }
+    setSaving(true);
+    try {
+      const kbId = await ensureKbId();
+      if (!kbId) { setSaving(false); return; }
+      // Format as a single FAQ document. Chunker splits each Q/A into its
+      // own chunk via the blank-line separator; embedder makes them
+      // retrievable at call time.
+      const lines: string[] = [
+        `# ${agentName || 'Agent'} — Q&A Training`,
+        '',
+        `Trained on ${new Date().toLocaleString()}.`,
+        '',
+      ];
+      for (const p of usable) {
+        lines.push(`Q: ${p.question.trim()}`);
+        lines.push(`A: ${p.answer.trim()}`);
+        lines.push('');
+      }
+      const content = lines.join('\n');
+      const filename = `${(agentName || 'agent').replace(/\W+/g, '-').toLowerCase()}-qa-${Date.now()}.txt`;
+      const doc = await knowledgeApi.addTextDocument({
+        knowledge_base_id: kbId,
+        filename,
+        content,
+      });
+      setMsg({
+        kind: 'ok',
+        text: `Saved ${usable.length} Q&A pair${usable.length === 1 ? '' : 's'} as "${doc.filename}". Embeddings are processing — the agent will start using them on the next call.`,
+      });
+      setPairs([{ id: newPairId(), question: '', answer: '' }]);
+      onSaved?.();
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.response?.data?.detail || e?.message || 'Failed to save to KB' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-amber-500" /> Train with Q&amp;A
+          </h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Add common customer questions and what the agent should say. Click <strong>Generate answer</strong> to let the agent answer from its own prompt + KB, then tweak. Saved pairs become searchable RAG context on every call.
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {pairs.map((p, idx) => (
+          <div key={p.id} className="border border-gray-200 rounded-xl p-3 bg-white">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-medium text-gray-500">Q&amp;A #{idx + 1}</span>
+              {pairs.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => removePair(p.id)}
+                  className="text-[11px] text-gray-400 hover:text-red-600"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            <label className="block text-[11px] text-gray-500 mb-1">Question (what would a customer ask?)</label>
+            <textarea
+              value={p.question}
+              onChange={(e) => updatePair(p.id, { question: e.target.value })}
+              placeholder="e.g. What documents do I need for MBA admission?"
+              rows={2}
+              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none mb-2"
+            />
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] text-gray-500">Answer (what the agent should say)</label>
+              <button
+                type="button"
+                onClick={() => generateAnswer(p.id)}
+                disabled={!p.question.trim() || !!p.generating || isNew}
+                className="inline-flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                title={isNew ? 'Save the agent first' : 'Let the agent generate the answer from its prompt + KB'}
+              >
+                {p.generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+                {p.generating ? 'Generating…' : 'Generate answer'}
+              </button>
+            </div>
+            <textarea
+              value={p.answer}
+              onChange={(e) => updatePair(p.id, { answer: e.target.value })}
+              placeholder="The agent's natural-sounding answer."
+              rows={3}
+              className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none"
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between mt-3">
+        <Button type="button" variant="outline" size="sm" onClick={addPair}>
+          + Add Q&amp;A
+        </Button>
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          onClick={saveToKb}
+          disabled={saving || isNew}
+          title={isNew ? 'Save the agent first' : 'Save these Q&A pairs to the agent\'s knowledge base'}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Save Q&amp;A to knowledge base
+        </Button>
+      </div>
+
+      {msg && (
+        <div className={`mt-3 flex items-start gap-2 p-2.5 rounded-lg text-xs ${
+          msg.kind === 'ok'
+            ? 'bg-green-50 border border-green-200 text-green-800'
+            : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          {msg.kind === 'ok' ? <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />}
+          <span>{msg.text}</span>
+        </div>
+      )}
+
+      {!systemPrompt?.trim() && (
+        <p className="text-[11px] text-gray-400 mt-3">
+          Tip: write a system prompt under Assistant Details first — generated answers use it for tone and accuracy.
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/* ---------- Upload PDFs card ---------- */
+/**
+ * Drag-and-drop PDF uploader. Calls ensureKbId() on first use to lazy-create
+ * a personal KB for the agent; subsequent uploads reuse it. PDF-only, 10MB
+ * cap. The standard parse → chunk → embed pipeline picks up new docs and
+ * indexes them for RAG retrieval at call time.
+ */
+function UploadPdfCard({
+  ensureKbId, onUploaded,
+}: {
+  ensureKbId: () => Promise<string | null>;
+  onUploaded?: () => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const MAX_BYTES = 10 * 1024 * 1024;
+
+  const upload = async (file: File) => {
+    setMsg(null);
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setMsg({ kind: 'err', text: 'Only PDF files are supported here.' });
+      return;
+    }
+    if (file.size > MAX_BYTES) {
+      setMsg({ kind: 'err', text: `File too large (${Math.round(file.size / 1024 / 1024)}MB — max 10MB).` });
+      return;
+    }
+    setUploading(true);
+    try {
+      const kbId = await ensureKbId();
+      if (!kbId) { setUploading(false); return; }
+      const doc = await knowledgeApi.uploadDocument(kbId, file);
+      setMsg({
+        kind: 'ok',
+        text: `Uploaded "${doc.filename}". Embeddings processing — usually ready in 10–30s.`,
+      });
+      onUploaded?.();
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.response?.data?.detail || e?.message || 'Upload failed' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void upload(file);
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-1">
+        <Upload className="h-4 w-4 text-teal-500" />
+        <h3 className="text-sm font-semibold text-gray-900">Upload PDFs</h3>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">Add PDF files to your assistant's knowledge base</p>
+
+      <div
+        onClick={() => !uploading && fileInputRef.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
+          uploading
+            ? 'border-gray-200 bg-gray-50 cursor-wait'
+            : dragOver
+              ? 'border-teal-400 bg-teal-50/60 cursor-copy'
+              : 'border-gray-200 hover:border-gray-300 cursor-pointer bg-white'
+        }`}
+      >
+        <div className="h-12 w-12 mx-auto mb-3 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center">
+          {uploading ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileUp className="h-6 w-6" />}
+        </div>
+        <p className="text-sm font-medium text-gray-900">
+          {uploading ? 'Uploading…' : 'Drag and drop a file here, or click to select'}
+        </p>
+        <p className="text-xs text-gray-400 mt-1">Supported formats: PDF (max 10MB)</p>
+      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void upload(f);
+          e.target.value = '';
+        }}
+      />
+
+      {msg && (
+        <div className={`mt-3 flex items-start gap-2 p-2.5 rounded-lg text-xs ${
+          msg.kind === 'ok'
+            ? 'bg-green-50 border border-green-200 text-green-800'
+            : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          {msg.kind === 'ok' ? <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />}
+          <span>{msg.text}</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---------- Website Knowledge Base card ---------- */
+/**
+ * URL → KB scraper. Same lazy-KB pattern as UploadPdfCard. BFS-crawls up to
+ * max_pages of the same-domain pages, extracts main-content text, ingests
+ * each as a KB document through the standard pipeline.
+ */
+function WebsiteKbCard({
+  ensureKbId, onUploaded,
+}: {
+  ensureKbId: () => Promise<string | null>;
+  onUploaded?: () => void;
+}) {
+  const [url, setUrl] = useState('');
+  const [maxPages, setMaxPages] = useState(10);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const submit = async () => {
+    setMsg(null);
+    const u = url.trim();
+    if (!u) return;
+    if (!/^https?:\/\//i.test(u)) {
+      setMsg({ kind: 'err', text: 'URL must start with http:// or https://' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const kbId = await ensureKbId();
+      if (!kbId) { setBusy(false); return; }
+      const res = await knowledgeApi.scrapeWebsite({
+        knowledge_base_id: kbId,
+        url: u,
+        max_pages: maxPages,
+        same_domain_only: true,
+      });
+      setMsg({
+        kind: 'ok',
+        text: `Ingested ${res.total_pages} page${res.total_pages === 1 ? '' : 's'} from ${res.root_url}. Embeddings processing.`,
+      });
+      setUrl('');
+      onUploaded?.();
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: e?.response?.data?.detail || e?.message || 'Scrape failed' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 mb-1">
+        <Globe className="h-4 w-4 text-teal-500" />
+        <h3 className="text-sm font-semibold text-gray-900">Website Knowledge Base</h3>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">Add website content to your assistant's knowledge base</p>
+
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-xs font-medium text-gray-700">Website URL</label>
+        <span title="We'll crawl this URL and pages it links to on the same domain — up to the page cap." className="text-gray-400 cursor-help">
+          <AlertCircle className="h-3 w-3" />
+        </span>
+      </div>
+      <input
+        type="url"
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !busy) submit(); }}
+        placeholder="https://example.com/"
+        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-teal-100"
+      />
+
+      <div className="flex items-center justify-between mb-3 text-xs">
+        <label className="text-gray-600">Max pages to crawl</label>
+        <input
+          type="number"
+          min={1}
+          max={50}
+          value={maxPages}
+          onChange={(e) => setMaxPages(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+          className="w-20 text-xs border border-gray-200 rounded-lg px-2 py-1 text-center"
+        />
+      </div>
+
+      <button
+        type="button"
+        onClick={submit}
+        disabled={busy || !url.trim()}
+        className="w-full inline-flex items-center justify-center gap-2 h-10 rounded-lg text-sm font-medium bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+        Add to Knowledge Base
+      </button>
+
+      {msg && (
+        <div className={`mt-3 flex items-start gap-2 p-2.5 rounded-lg text-xs ${
+          msg.kind === 'ok'
+            ? 'bg-green-50 border border-green-200 text-green-800'
+            : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          {msg.kind === 'ok' ? <CheckCircle2 className="h-4 w-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />}
+          <span>{msg.text}</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ---------- Knowledge Files list (with View modal) ---------- */
+/**
+ * Shows every document in the agent's KB with status + a View button. The
+ * View modal fetches the raw bytes from knowledge-service and renders them
+ * inline — PDF in an iframe, text/JSON in a <pre> block, anything else as
+ * a download link.
+ */
+function DocumentsListCard({
+  kbId, refreshSignal, onChanged,
+}: {
+  kbId: string | null;
+  refreshSignal: number;
+  onChanged?: () => void;
+}) {
+  const [docs, setDocs] = useState<KBDocumentApi[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<KBDocumentApi | null>(null);
+
+  const reload = async () => {
+    if (!kbId) { setDocs([]); setLoading(false); return; }
+    setLoading(true);
+    setErr(null);
+    try {
+      const list = await knowledgeApi.listDocuments(kbId);
+      setDocs(list);
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || e?.message || 'Failed to load files');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { reload(); /* eslint-disable-next-line */ }, [kbId, refreshSignal]);
+
+  // Background poll while any doc is still pending/processing so the status
+  // pill flips to "Ready" without the user clicking refresh.
+  useEffect(() => {
+    if (!kbId) return;
+    const anyPending = docs.some((d) => d.status === 'pending' || d.status === 'processing');
+    if (!anyPending) return;
+    const t = setInterval(reload, 4000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line
+  }, [docs, kbId]);
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this file? The agent will no longer be able to retrieve content from it.')) return;
+    try {
+      await knowledgeApi.deleteDocument(id);
+      onChanged?.();
+      reload();
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || e?.message || 'Delete failed');
+    }
+  };
+
+  return (
+    <Card padding={false}>
+      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+        <div className="flex items-center gap-2">
+          <BookOpen className="h-4 w-4 text-gray-500" />
+          <h3 className="text-sm font-semibold text-gray-900">Knowledge Files</h3>
+          <span className="text-xs text-gray-400">{docs.length}</span>
+        </div>
+        <button
+          type="button"
+          onClick={reload}
+          className="text-xs text-gray-500 hover:text-gray-800 inline-flex items-center gap-1"
+          title="Refresh"
+        >
+          <Loader2 className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} /> Refresh
+        </button>
+      </div>
+
+      {err && (
+        <div className="m-4 flex items-center gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+          <AlertCircle className="h-4 w-4" /> {err}
+        </div>
+      )}
+
+      {!kbId ? (
+        <div className="px-5 py-8 text-center text-sm text-gray-400">
+          Upload a PDF or website above — your agent's knowledge base will be created automatically and the file will land here.
+        </div>
+      ) : loading && docs.length === 0 ? (
+        <div className="flex items-center justify-center gap-2 py-8 text-sm text-gray-500">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading files…
+        </div>
+      ) : docs.length === 0 ? (
+        <div className="px-5 py-8 text-center text-sm text-gray-400">
+          No files yet. Upload a PDF or crawl a website above to start training your agent.
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {docs.map((d) => {
+            const statusInfo: Record<string, { label: string; cls: string }> = {
+              pending:    { label: 'Pending',    cls: 'bg-gray-100 text-gray-600' },
+              processing: { label: 'Processing', cls: 'bg-blue-50 text-blue-700' },
+              processed:  { label: 'Ready',      cls: 'bg-green-50 text-green-700' },
+              completed:  { label: 'Ready',      cls: 'bg-green-50 text-green-700' },
+              failed:     { label: 'Failed',     cls: 'bg-red-50 text-red-700' },
+            };
+            const si = statusInfo[d.status] || { label: d.status, cls: 'bg-gray-100 text-gray-600' };
+            return (
+              <div key={d.id} className="flex items-center justify-between gap-3 px-5 py-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="h-9 w-9 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center flex-shrink-0">
+                    <BookOpen className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900 truncate">{d.filename}</div>
+                    <div className="text-xs text-gray-500">
+                      {d.chunk_count > 0 ? `${d.chunk_count} chunk${d.chunk_count === 1 ? '' : 's'}` : '—'}
+                      {d.file_size ? ` · ${formatBytes(d.file_size)}` : ''}
+                      {' · '}{new Date(d.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${si.cls}`}>{si.label}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setViewing(d)}
+                    disabled={d.status === 'pending' || d.status === 'processing'}
+                  >
+                    View
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(d.id)}
+                    className="text-gray-400 hover:text-red-600 p-1"
+                    title="Delete"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {viewing && (
+        <DocumentViewerModal doc={viewing} onClose={() => setViewing(null)} />
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Inline document viewer. Tries the cheap routes first: text-like content
+ * gets rendered as <pre>, PDFs in an iframe via blob URL, everything else
+ * falls back to a download link. Revokes the blob URL on unmount.
+ */
+function DocumentViewerModal({ doc, onClose }: { doc: KBDocumentApi; onClose: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [text, setText] = useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [contentType, setContentType] = useState<string>('');
+
+  useEffect(() => {
+    let url: string | null = null;
+    setLoading(true);
+    setErr(null);
+    knowledgeApi.fetchDocumentRaw(doc.id)
+      .then(async ({ blob, contentType: ct }) => {
+        setContentType(ct);
+        if (ct.startsWith('text/') || ct === 'application/json' || /\.txt$|\.md$|\.json$|\.csv$/.test(doc.filename)) {
+          const t = await blob.text();
+          setText(t);
+        } else {
+          url = URL.createObjectURL(blob);
+          setBlobUrl(url);
+        }
+      })
+      .catch((e: any) => setErr(e?.response?.data?.detail || e?.message || 'Failed to fetch file'))
+      .finally(() => setLoading(false));
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [doc.id, doc.filename]);
+
+  const isPdf = contentType === 'application/pdf' || doc.filename.toLowerCase().endsWith('.pdf');
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title={doc.filename} size="lg">
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-12 text-sm text-gray-500">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading file…
+        </div>
+      ) : err ? (
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+          <AlertCircle className="h-4 w-4 mt-0.5" /> {err}
+        </div>
+      ) : text != null ? (
+        <pre className="text-xs font-mono whitespace-pre-wrap bg-gray-50 border border-gray-100 rounded-lg p-4 max-h-[60vh] overflow-auto">{text}</pre>
+      ) : isPdf && blobUrl ? (
+        <iframe src={blobUrl} title={doc.filename} className="w-full h-[60vh] border border-gray-200 rounded-lg" />
+      ) : blobUrl ? (
+        <div className="text-sm text-gray-600 p-4">
+          This file type can't be previewed inline.{' '}
+          <a href={blobUrl} download={doc.filename} className="text-teal-600 hover:underline">Download {doc.filename}</a>.
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
+function formatBytes(b: number): string {
+  if (b < 1024) return `${b}B`;
+  if (b < 1024 * 1024) return `${Math.round(b / 1024)}KB`;
+  return `${(b / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/* ---------- Test Your Knowledge card ---------- */
+/**
+ * Lets the user ask the agent a question and see the LLM answer with RAG
+ * applied against the uploaded files. Useful for verifying that PDFs /
+ * scraped pages / Q&A pairs actually ground answers without needing to dial
+ * a real call. The badge shows how many KB chunks were retrieved.
+ */
+function TestKnowledgeCard({
+  agentId, isNew, kbId,
+}: { agentId?: string; isNew: boolean; kbId: string | null }) {
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState<{ text: string; chunks: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const ask = async () => {
+    setErr(null);
+    setAnswer(null);
+    if (!question.trim()) return;
+    if (!agentId || isNew) {
+      setErr('Save the agent first, then test the knowledge.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await agentApi.test(agentId, question.trim());
+      setAnswer({ text: (res.reply || '').trim(), chunks: res.rag_chunks_used || 0 });
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || e?.message || 'Failed to get an answer');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-amber-500" /> Test Your Knowledge
+          </h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Ask the agent any question — it'll answer using the uploaded PDFs, scraped pages, and Q&amp;A pairs above (RAG retrieval). This is the same retrieval path used during a real call.
+          </p>
+        </div>
+      </div>
+
+      <textarea
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) ask(); }}
+        placeholder={'e.g. What is the MBA admission fee?\n     What documents do I need for the scholarship?\n     Who do I call for hostel queries?'}
+        rows={3}
+        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-teal-100"
+      />
+      <div className="mt-2 flex items-center justify-between">
+        <span className="text-[11px] text-gray-400">
+          {kbId
+            ? <>Knowledge base attached — answers will be grounded in uploaded files.</>
+            : <>No knowledge base yet — upload a PDF or URL above first.</>}
+        </span>
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          onClick={ask}
+          disabled={busy || !question.trim() || isNew}
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          Ask agent
+        </Button>
+      </div>
+
+      {err && (
+        <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" /> {err}
+        </div>
+      )}
+
+      {answer && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+          <div className="flex items-center gap-2 mb-1.5">
+            <Bot className="h-3.5 w-3.5 text-teal-600" />
+            <span className="text-[11px] font-medium text-gray-600">Agent reply</span>
+            {answer.chunks > 0 ? (
+              <span className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800">
+                <BookOpen className="h-3 w-3" /> {answer.chunks} chunk{answer.chunks === 1 ? '' : 's'} retrieved
+              </span>
+            ) : (
+              <span className="ml-auto text-[10px] text-gray-500">No KB chunks matched — answered from prompt only</span>
+            )}
+          </div>
+          <p className="text-sm text-gray-800 whitespace-pre-wrap">{answer.text || <span className="italic text-gray-400">(empty reply)</span>}</p>
+        </div>
+      )}
     </Card>
   );
 }
