@@ -2151,16 +2151,21 @@ export function superAdminRouter(): Router {
         safe(() => convPool.query(`SELECT COUNT(*)::int AS c FROM phone_numbers WHERE deployment_status = 'deployed'`), { rows: [{ c: 0 }] }),
       ]);
 
-      // Recent activity feed — last 10 calls + recent number-audit events.
+      // Recent activity feed — every call from the last 24h (capped at 200 so
+      // we don't blow out the snapshot payload on a busy day). Previously this
+      // was LIMIT 10 which hid bulk-campaign call volume — the user wanted to
+      // see every call surface in the live monitor.
       const [recentCalls, recentAudit] = await Promise.all([
         safe(() => convPool.query(
-          `SELECT id, tenant_id, agent_id, direction, status, caller_number, called_number, provider,
-                  COALESCE(started_at, created_at) AS at, duration_seconds
-             FROM calls ORDER BY COALESCE(started_at, created_at) DESC LIMIT 10`,
+          `SELECT id, tenant_id, agent_id, direction, status, outcome, caller_number, called_number, provider,
+                  COALESCE(started_at, created_at) AS at, duration_seconds, recording_url, conversation_id
+             FROM calls
+             WHERE COALESCE(started_at, created_at) > NOW() - INTERVAL '24 hours'
+             ORDER BY COALESCE(started_at, created_at) DESC LIMIT 200`,
         ), { rows: [] }),
         safe(() => convPool.query(
           `SELECT id, tenant_id, number_id, event_type, actor_email, created_at
-             FROM number_audit_log ORDER BY created_at DESC LIMIT 10`,
+             FROM number_audit_log ORDER BY created_at DESC LIMIT 20`,
         ), { rows: [] }),
       ]);
 

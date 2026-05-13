@@ -30,6 +30,7 @@ import { AdminContactDetailPage } from '@/pages/contact/AdminContactDetailPage';
 // Calls
 import { CallLogPage } from '@/pages/calls/CallLogPage';
 import { CallDetailPage } from '@/pages/calls/CallDetailPage';
+import { LiveCallsPage } from '@/pages/calls/LiveCallsPage';
 
 // Campaigns
 import { CampaignsPage } from '@/pages/campaigns/CampaignsPage';
@@ -185,6 +186,7 @@ export const routes: RouteObject[] = [
       { path: '/agents/:id/live-call', element: <AgentLiveCallPage /> },
       { path: '/agents/:id/web-call', element: <AgentWebCallPage /> },
       { path: '/calls', element: <CallLogPage /> },
+      { path: '/calls/live', element: <LiveCallsPage /> },
       { path: '/calls/:id', element: <CallDetailPage /> },
       { path: '/campaigns', element: <CampaignsPage /> },
       { path: '/campaigns/new', element: <CampaignWizardPage /> },

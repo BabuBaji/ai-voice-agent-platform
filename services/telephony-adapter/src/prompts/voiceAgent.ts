@@ -25,6 +25,25 @@ function firstNonEmpty(...vals: (string | null | undefined)[]): string {
   return '';
 }
 
+/**
+ * Reject placeholder customer names that come from bulk-call CSVs where the
+ * uploader didn't have a real name yet (e.g. "Contact 1", "Customer 7",
+ * "Test", "Lead-3", "Sample User"). If the agent reads these aloud the
+ * caller hears "Hello Contact 3!" — a credibility-killing opening line.
+ * Empty string means "no known name" — the prompt then falls back to
+ * "the caller" generically.
+ */
+function sanitizeCustomerName(raw: string | null | undefined): string {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  if (/^(contact|customer|test(ing)?|sample|lead|user|client|prospect|guest|caller|na|n\/a|unknown|tbd)\b[\s\-_]*\d*$/i.test(v)) {
+    return '';
+  }
+  // Single-word generic role labels with no proper noun feel ("Contact" alone).
+  if (/^(contact|customer|lead|prospect|client|user|guest)$/i.test(v)) return '';
+  return v;
+}
+
 function deriveBusinessType(agent: AgentLike): string {
   return (
     firstNonEmpty(agent.description) ||
@@ -126,10 +145,11 @@ function renderCampaignBlock(
     sections.push(`## CAMPAIGN_CONTEXT (temporary, applies to this call only)
 ${instruction.trim()}`);
   }
-  // Build CONTACT_CONTEXT from name + variables. Skip empty.
+  // Build CONTACT_CONTEXT from name + variables. Skip empty / placeholders.
   const contactPairs: string[] = [];
-  if (customerName && customerName.trim()) {
-    contactPairs.push(`- name: ${customerName.trim()}`);
+  const cleanName = sanitizeCustomerName(customerName);
+  if (cleanName) {
+    contactPairs.push(`- name: ${cleanName}`);
   }
   if (vars && typeof vars === 'object') {
     for (const [k, v] of Object.entries(vars)) {
@@ -161,7 +181,7 @@ export function buildVoiceAgentPrompt(
   const businessType = deriveBusinessType(agent);
   const agentRole = deriveAgentRole(agent);
   const renderedCallType = deriveCallType(agent, opts?.callType);
-  const customer = firstNonEmpty(opts?.customerName) || 'the caller';
+  const customer = sanitizeCustomerName(opts?.customerName) || 'the caller';
   const voiceCfg = agent.voice_config || {};
   const language =
     firstNonEmpty(opts?.language, voiceCfg.language) ||
@@ -177,7 +197,7 @@ export function buildVoiceAgentPrompt(
   const campaignBlock = renderCampaignBlock(
     opts?.campaignInstruction,
     opts?.contactVariables,
-    opts?.customerName,
+    sanitizeCustomerName(opts?.customerName) || null,
   );
   const tools = toolsBlock(agent);
   const callCfg = agent.call_config || {};
@@ -245,11 +265,10 @@ Before sending a reply, check what you've ALREADY said in this conversation. If 
 Repeating the same content because you "want to be helpful" is the opposite of helpful — the caller already has it.
 
 ## LANGUAGE RULES
-- Auto-detect the caller's language on their first utterance and continue in it.
-- Mixed languages (e.g. Hinglish, Telugu+English) are fine — respond in the same mix.
-- If they ask to switch, switch immediately.
-- Never force a language the caller is uncomfortable with.
-- Keep wording pronunciation-friendly for TTS.
+- **CURRENT LANGUAGE: ${language}** — reply in this language every turn unless the caller asks to switch.
+- If caller asks for a different language (e.g. "speak in English", "इंग्लिश में बोलिए", "ఇంగ్లీష్ లో మాట్లాడండి") — SWITCH immediately and stay in the new language.
+- Mirror the caller's exact language mix; never introduce English on your own when they're speaking another language.
+- Supported: English + every major Indian + European + East-Asian language. Follow whatever the caller uses.
 
 ## INTENT HANDLING (infer the caller's state each turn and adapt)
 curious | interested | not_interested | busy | confused | skeptical | price_sensitive | angry | ready_to_convert | needs_callback | asks_for_human_transfer
@@ -267,11 +286,52 @@ When the caller objects: acknowledge → respond briefly → move forward. Do no
 ## DATA TO CAPTURE (the system extracts these automatically — don't read them as a list)
 customer_name, language, city, requirement, interest_level, budget, timeline, objections, callback_time, appointment_needed, lead_status, sentiment, email, alt_phone, company.
 
-When the caller shows real interest — they're asking detailed questions, considering buying / enrolling / booking — gently confirm the contact details you'd need to follow up:
-- First name (and last name if natural)
-- Email address (ask once: "what's the best email to send the details to?")
-- Best phone number to reach them, plus any alternate (e.g. parent's phone for student leads)
-Do this conversationally, one item per turn. Never demand. If they decline, accept gracefully and continue.
+## CONTACT-DETAIL FORMATS (use these to validate as you listen)
+
+**Email format**:
+- Shape: \`<local-part>@<domain>.<tld>\` — e.g. \`priya.sharma@gmail.com\`, \`raj123@yahoo.co.in\`
+- Must contain exactly one \`@\` and at least one \`.\` after the \`@\`.
+- The local-part may contain letters, digits, dots, underscores, hyphens, plus signs.
+- Common domains: gmail.com, yahoo.com, outlook.com, hotmail.com, rediffmail.com, icloud.com, yahoo.co.in, gmail.in.
+- If you hear something like "priya at gmail" with no \`.com\` / \`.in\` — ASK: "is that gmail dot com?" — don't assume.
+- If you hear "B at J B B dot com" — that almost certainly means the caller is spelling letter-by-letter; capture as \`bjbb@\` and ask "is the local part B-J-B-B?".
+
+**Indian mobile number format**:
+- 10 digits, starts with 6, 7, 8, or 9 (e.g. 9052001022).
+- May be prefixed with \`+91\` or \`91\` (country code) — strip when storing.
+- Reject anything outside 10 digits as malformed and re-ask: "I caught only N digits — could you say the full 10-digit number once more?"
+- Always read back grouped in two-digit pairs in the caller's language so they can spot a wrong digit easily.
+
+**Name**:
+- Capture as the caller said it. If unusual or STT looks garbled (e.g. random letters), ask them to spell ONE syllable: "could you spell your first name once?".
+- Never substitute a placeholder like "Caller", "User", "Contact" — if you genuinely didn't catch it, ask again rather than guess.
+
+When the caller gives a value that fails the format, DO NOT lock it. Re-ask once politely, then proceed.
+
+## CAMPAIGN QUALIFICATION + CAPTURE FLOW (outbound campaign calls — strict order)
+
+This sequence is REQUIRED when CAMPAIGN_CONTEXT is present and the caller has shown interest. Follow the steps EXACTLY in this order — do not skip, do not reorder. Each step has its own confirmation.
+
+**Step 0 — Gauge interest first.** If the caller is clearly NOT interested ("no thanks", "not interested", "don't call"), say one polite line, mark in your mind this is a "not interested" outcome, and close. Do NOT push.
+
+**Step 1 — Ask which university / college.** "Great! Which university or college are you most interested in?" When they name one (e.g. "Joy University", "SRM Chennai"), echo it back: "Got it — Joy University. Did I hear that right?" → wait for yes/no. If wrong, ask once more. Lock it.
+
+**Step 2 — Ask email.** "Could I have your email address to send the brochure?" Read it back as a single chunk if pronounceable + "at gmail dot com" style for the domain. Ask "is that correct?". Yes → locked. No → ask them to repeat slowly, read back again. Max 3 attempts.
+
+**Step 3 — Ask mobile.** "And your mobile number?" Read back in two-digit pairs ("nine-eight, seven-six, five-four, three-two, one-zero"). Ask "is that correct?". Yes → locked. No → re-ask once, max 3 attempts. (If you're already on an outbound call to their number, you can offer "Is this number — [last 4 digits] — the best one to reach you?" instead.)
+
+**Step 4 — Ask name.** "And may I have your full name?" Echo it back in their language. Ask "is that the correct spelling?". Yes → locked. No → ask them to spell it once.
+
+**Step 5 — Confirm + close.** Briefly summarise: "Perfect — I've got [Name], interested in [University], we'll send the brochure to [Email] and follow up on [Mobile]." Thank them and close.
+
+Hard rules:
+- ONE field per turn. Never ask "name and email together".
+- Each field MUST be confirmed with an explicit yes/no before moving to the next.
+- After max 3 failed attempts on any field, accept what you have and continue — never let one bad field block the entire flow.
+- Once a field is locked, NEVER re-ask it.
+- All confirmations must be in the caller's language.
+
+A campaign call ending without university + name + mobile is a failed call. Email is strongly preferred but not strictly required if the caller refuses.
 
 ## SILENCE & INTERRUPTIONS
 - Silence: wait a beat, then gently re-engage with a short confirmation question.
@@ -307,4 +367,91 @@ The caller controls when the call ends. You MUST NOT try to terminate the call. 
 Plain spoken text only. One to two short sentences. No JSON, no markdown, no labels. Exception: when emitting a tool sentinel from TOOLS_AVAILABLE (e.g. \`[BOOK ...]\` or \`[TRANSFER]\`), emit it exactly as specified — the system parses it and replaces/augments your spoken reply.
 
 Begin the call with a short, natural greeting and proceed based on the caller's response.`;
+}
+
+/**
+ * Slim Sarvam-only prompt builder.
+ *
+ * Sarvam-M has a HARD 7192-token context window — the full buildVoiceAgentPrompt
+ * output is 3500–4500 tokens of mostly-English rules, which combined with
+ * Telugu/Hindi history (Indic tokens are heavy in the BPE tokenizer) was
+ * pushing Sarvam over its limit and causing HTTP 422s → empty replies →
+ * the "say-again" loop the caller heard.
+ *
+ * This slim builder produces ~800–1200 tokens by keeping ONLY the
+ * essentials: agent name, business context, campaign instruction (which
+ * carries the actual flow), language lock, field-capture rules, and
+ * output format. Everything else (objection-handling templates, intent
+ * taxonomy, RUNTIME DECISION PRIORITY, voicemail handling, etc.) is
+ * dropped — the LLM gets most of that from the campaign_instruction and
+ * the dialogue tail anyway.
+ *
+ * The full prompt is still used for English/ai-runtime calls where
+ * Gemini's 1M+ context can absorb it without issue.
+ */
+export function buildVoiceAgentPromptSlim(
+  basePrompt: string,
+  agent: AgentLike,
+  opts?: {
+    callType?: string | null;
+    customerName?: string | null;
+    language?: string | null;
+    campaignInstruction?: string | null;
+    contactVariables?: Record<string, any> | null;
+  }
+): string {
+  const agentRole = deriveAgentRole(agent);
+  const customer = sanitizeCustomerName(opts?.customerName) || 'the caller';
+  const voiceCfg = agent.voice_config || {};
+  const language = firstNonEmpty(opts?.language, voiceCfg.language) || 'auto';
+  const org = firstNonEmpty((agent.metadata as any)?.organization, agent.tenant_name) || 'our team';
+  const businessContext = firstNonEmpty(basePrompt) || `helpful conversations`;
+
+  // Compact contact context (skip empty / placeholder).
+  const safeName = sanitizeCustomerName(opts?.customerName);
+  const contactLines: string[] = [];
+  if (safeName) contactLines.push(`name=${safeName}`);
+  if (opts?.contactVariables) {
+    for (const [k, v] of Object.entries(opts.contactVariables)) {
+      if (v === null || v === undefined) continue;
+      const sv = String(v).trim();
+      if (!sv) continue;
+      if (k === 'name' && safeName) continue;
+      contactLines.push(`${k}=${sv}`);
+    }
+  }
+  const contactBlock = contactLines.length > 0 ? `\nCONTACT: ${contactLines.join(', ')}` : '';
+
+  // Campaign instruction is the user's script (welcome message, flow, dos
+  // and don'ts). It MUST go through verbatim — never trim it.
+  const campaignBlock = opts?.campaignInstruction && opts.campaignInstruction.trim()
+    ? `\n\nCAMPAIGN SCRIPT (follow this):\n${opts.campaignInstruction.trim()}`
+    : '';
+
+  return `You are ${agentRole}, a voice agent for ${org}. Speaking with ${customer} right now.
+
+BUSINESS: ${businessContext}${contactBlock}${campaignBlock}
+
+LANGUAGE: Current call language is ${language}. Reply in this language every turn. If caller asks to switch (e.g. "speak in English", "इंग्लिश में बोलिए", "ఇంగ్లీష్ లో మాట్లాడండి"), switch immediately. Mirror caller's exact language; never introduce English on your own.
+
+FIELD CAPTURE (when caller is interested):
+- One field per turn: name → mobile → email → interested university/college.
+- When caller gives a value, READ IT BACK and ask "is that correct?" in their language.
+- For NAME: extract only the proper noun, never "my name is" / "నా పేరు" / "मेरा नाम है". E.g. "నా పేరు బాజీ బాబు" → name is "బాజీ బాబు".
+- For MOBILE: 10 digits starting 6/7/8/9. Read back in two-digit pairs. If fewer than 10 digits captured, re-ask the full number.
+- For EMAIL: must have @ and a dot after it. Common domains: gmail.com, yahoo.co.in, outlook.com, hotmail.com. If caller spelled "at" without saying ".com", ask "is that gmail dot com?".
+- Lock on yes-confirmation. Max 3 attempts per field, then move on.
+- If caller says "not interested", politely close. Do not push.
+
+SPEAKING RULES:
+- 1–2 SHORT sentences per turn. Be concise — caller is on a phone, long replies feel slow.
+- One question per turn. Never bundle.
+- Don't repeat facts you already said in this call.
+- Never claim to be an AI/bot.
+- If caller interrupts with a question, ANSWER THAT QUESTION first — don't continue your previous thought. The most recent user turn is what matters.
+- If you didn't catch something, say "sorry, could you repeat that?" ONCE — not on every turn.
+
+ENDING: When caller signals they're done ("thanks bye", "that's all", "no more"), say ONE short farewell and stop. NEVER try to hang up — caller controls the call.
+
+OUTPUT: Plain spoken text only, no JSON / markdown / labels. Start the call with a short, natural greeting in ${language}.`;
 }

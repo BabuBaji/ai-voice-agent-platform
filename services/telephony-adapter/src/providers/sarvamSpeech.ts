@@ -348,19 +348,37 @@ export async function callSarvamLLM(opts: {
   const apiKey = process.env.SARVAM_API_KEY;
   if (!apiKey) return null;
   try {
-    // Sarvam-M requires strict alternation starting with "user". Our call
-    // history may start with an "assistant" greeting (we seed the agent's
-    // opening line before the caller has even spoken). Drop any leading
-    // assistant turns and collapse consecutive same-role messages so the
-    // sequence is [user, assistant, user, assistant, ...].
+    // Sarvam-M requires strict alternation starting with "user", AND
+    // rejects any system message that appears mid-conversation with
+    // "System message must appear only once". Our internal history pushes
+    // a `role: 'system'` note when language switching mid-call — those
+    // are runtime hints, NEVER for the API. We must:
+    //   1. Drop all system messages (the API's system message is passed
+    //      separately as opts.systemPrompt).
+    //   2. Merge any "system" guidance into the next user turn as a hint
+    //      so the model still sees it.
+    //   3. Skip leading non-user turns and collapse consecutive same-role.
+    let pendingSystemHint = '';
     const cleaned: Array<{ role: string; content: string }> = [];
     for (const m of opts.messages) {
       if (!m || !m.content) continue;
-      if (cleaned.length === 0 && m.role !== 'user') continue; // skip leading non-user
+      if (m.role === 'system') {
+        // Capture for the NEXT user turn; never pass to Sarvam as 'system'.
+        pendingSystemHint = pendingSystemHint
+          ? pendingSystemHint + '\n' + m.content
+          : m.content;
+        continue;
+      }
+      if (cleaned.length === 0 && m.role !== 'user') continue;
+      let content = m.content;
+      if (m.role === 'user' && pendingSystemHint) {
+        content = `[CONTEXT: ${pendingSystemHint}]\n${content}`;
+        pendingSystemHint = '';
+      }
       if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === m.role) {
-        cleaned[cleaned.length - 1].content += '\n' + m.content;
+        cleaned[cleaned.length - 1].content += '\n' + content;
       } else {
-        cleaned.push({ role: m.role, content: m.content });
+        cleaned.push({ role: m.role, content });
       }
     }
     if (cleaned.length === 0) return null; // nothing to send
@@ -377,16 +395,19 @@ export async function callSarvamLLM(opts: {
           { role: 'system', content: opts.systemPrompt },
           ...cleaned,
         ],
-        // sarvam-m's <think>…</think> reasoning eats half the budget on
-        // anything non-trivial. Capping at 350-500 left zero room for the
-        // actual reply on long contexts (the model emitted only think and
-        // got truncated, so the caller heard say-again instead of an answer).
-        // 1500 gives think ~1000 tokens of room and still leaves 500 for the
-        // spoken reply, which is then trimmed to 90 words / 4 sentences.
-        // `reasoning_effort: low` reduces think length when the API supports
-        // it (no-op otherwise) so most replies come back well under the cap.
-        max_tokens: opts.maxTokens ?? 1500,
+        // Latency: try to disable the <think>…</think> reasoning block.
+        // `enable_thinking: false` is the Sarvam-M flag (silently ignored
+        // by older API versions). `reasoning_effort: 'low'` is the
+        // belt-and-braces fallback — the API enum ONLY accepts
+        // 'low' | 'medium' | 'high', so any other value (e.g. 'minimal')
+        // returns HTTP 400 and silently breaks every call. Do not change
+        // this string. max_tokens=1000 leaves headroom for cases where
+        // the API ignores enable_thinking and still emits <think>.
+        // stripThinkBlocks() runs on the response so any leftover think
+        // never reaches the caller.
+        max_tokens: opts.maxTokens ?? 1000,
         temperature: opts.temperature ?? 0.6,
+        enable_thinking: false,
         reasoning_effort: 'low',
       }),
     });

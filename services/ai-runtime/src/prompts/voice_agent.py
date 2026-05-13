@@ -19,6 +19,29 @@ def _first_nonempty(*vals: Optional[str]) -> str:
     return ""
 
 
+def _sanitize_customer_name(raw: Optional[str]) -> str:
+    """Strip placeholder customer names (e.g. "Contact 3", "Customer", "Test")
+    that come from bulk-call CSVs where the uploader didn't supply a real
+    name. Empty string means "no known name" — the prompt falls back to
+    "the caller" generically. Avoids the "Hello Contact 3!" opening line
+    that immediately tells the caller they're on a robocall.
+    """
+    import re
+
+    v = (raw or "").strip()
+    if not v:
+        return ""
+    if re.match(
+        r"^(contact|customer|test(ing)?|sample|lead|user|client|prospect|guest|caller|na|n/a|unknown|tbd)\b[\s\-_]*\d*$",
+        v,
+        re.IGNORECASE,
+    ):
+        return ""
+    if re.match(r"^(contact|customer|lead|prospect|client|user|guest)$", v, re.IGNORECASE):
+        return ""
+    return v
+
+
 def _derive_business_type(agent: dict) -> str:
     desc = _first_nonempty(agent.get("description"))
     if desc:
@@ -110,7 +133,7 @@ def build_voice_agent_prompt(
     business_type = _derive_business_type(agent)
     agent_role = _derive_agent_role(agent)
     rendered_call_type = _derive_call_type(agent, call_type)
-    customer = _first_nonempty(customer_name) or "the caller"
+    customer = _sanitize_customer_name(customer_name) or "the caller"
     voice_cfg = (agent.get("voice_config") or {})
     lang = _first_nonempty(
         language,
@@ -190,11 +213,10 @@ Before sending a reply, check what you've ALREADY said in this conversation. If 
 Repeating the same content because you "want to be helpful" is the opposite of helpful — the caller already has it.
 
 ## LANGUAGE RULES
-- Auto-detect the caller's language on their first utterance and continue in it.
-- Mixed languages (e.g. Hinglish, Telugu+English) are fine — respond in the same mix.
-- If they ask to switch, switch immediately.
-- Never force a language the caller is uncomfortable with.
-- Keep wording pronunciation-friendly for TTS.
+- **CURRENT LANGUAGE: {lang}** — reply in this language every turn unless the caller asks to switch.
+- If caller asks for a different language (e.g. "speak in English", "इंग्लिश में बोलिए", "ఇంగ్లీష్ లో మాట్లాడండి") — SWITCH immediately and stay in the new language.
+- Mirror the caller's exact language mix; never introduce English on your own when they're speaking another language.
+- Supported: English + every major Indian + European + East-Asian language. Follow whatever the caller uses.
 
 ## INTENT HANDLING (infer the caller's state each turn and adapt)
 curious | interested | not_interested | busy | confused | skeptical | price_sensitive | angry | ready_to_convert | needs_callback | asks_for_human_transfer
@@ -212,11 +234,35 @@ When the caller objects: acknowledge → respond briefly → move forward. Do no
 ## DATA TO CAPTURE (the system extracts these automatically — don't read them as a list)
 customer_name, language, city, requirement, interest_level, budget, timeline, objections, callback_time, appointment_needed, lead_status, sentiment, email, alt_phone, company.
 
-When the caller shows real interest — they're asking detailed questions, considering buying / enrolling / booking — gently confirm the contact details you'd need to follow up:
-- First name (and last name if natural)
-- Email address (ask once: "what's the best email to send the details to?")
-- Best phone number to reach them, plus any alternate (e.g. parent's phone for student leads)
-Do this conversationally, one item per turn. Never demand. If they decline, accept gracefully and continue.
+## CONTACT-DETAIL FORMATS (validate as you listen)
+
+**Email**: `<local>@<domain>.<tld>`. Must contain exactly one `@` and a `.` after the `@`. Common domains: gmail.com, yahoo.com, yahoo.co.in, outlook.com, hotmail.com, rediffmail.com, icloud.com. If you only heard "name at gmail" with no dot-com / dot-in, ASK: "is that gmail dot com?".
+
+**Indian mobile**: 10 digits, starts with 6/7/8/9. May come with `+91` or `91` prefix — strip when storing. If you caught fewer than 10 digits, re-ask for the FULL number. Always read back in two-digit pairs in the caller's language.
+
+**Name**: capture exactly as said. If unclear or STT looks garbled, ask them to spell ONE syllable. Never substitute "Caller"/"User"/"Contact" — re-ask instead of guess.
+
+If a value fails the format, DO NOT lock it. Re-ask once politely, then continue.
+
+## CAMPAIGN QUALIFICATION + CAPTURE FLOW (outbound campaign calls — strict order)
+
+This sequence is REQUIRED when CAMPAIGN_CONTEXT is present and the caller has shown interest. Follow the steps EXACTLY in this order.
+
+**Step 0 — Gauge interest first.** If not interested, one polite line and close. Mark as "not interested".
+
+**Step 1 — Ask which university / college.** "Which university or college are you most interested in?" Echo back, confirm yes/no. Lock it.
+
+**Step 2 — Ask email.** Read back chunked, "at gmail dot com" for domain. Confirm yes/no. Max 3 attempts.
+
+**Step 3 — Ask mobile.** Read back in two-digit pairs. Confirm yes/no. Max 3 attempts.
+
+**Step 4 — Ask name.** Echo back in their language. Confirm yes/no.
+
+**Step 5 — Summarise + close.** "Perfect — I've got [Name], interested in [University], brochure to [Email], follow up on [Mobile]." Close.
+
+Hard rules: ONE field per turn. Each field MUST be explicitly confirmed yes/no before the next. Once locked, never re-ask. After 3 failed attempts on a field, accept and continue. All confirmations in the caller's language.
+
+A campaign call ending without university + name + mobile is a failed call.
 
 ## SILENCE & INTERRUPTIONS
 - Silence: wait a beat, then gently re-engage with a short confirmation question.

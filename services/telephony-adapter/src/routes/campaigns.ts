@@ -415,6 +415,82 @@ campaignRouter.get('/:id/targets', async (req: Request, res: Response, next: Nex
   } catch (err) { next(err); }
 });
 
+/**
+ * POST /api/v1/campaigns/:id/targets/bulk-action
+ * Body: { action: 'exclude' | 'include' | 'exclude_others' | 'include_all', target_ids?: string[] }
+ *
+ * - exclude:        flip the given PENDING targets → EXCLUDED (runner skips)
+ * - include:        flip the given EXCLUDED targets → PENDING (runner picks them up again)
+ * - exclude_others: keep target_ids on PENDING, flip every OTHER PENDING in this campaign → EXCLUDED.
+ *                   This is the "call only these" action.
+ * - include_all:    flip every EXCLUDED in this campaign → PENDING. The reset button.
+ *
+ * Only touches rows in safe statuses (PENDING / EXCLUDED) — never overwrites
+ * IN_PROGRESS / COMPLETED / FAILED so we don't disturb in-flight calls or
+ * rewrite history. Returns {updated} count.
+ */
+campaignRouter.post('/:id/targets/bulk-action', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const campaignId = req.params.id;
+    const { action, target_ids } = req.body || {};
+    const allowed = ['exclude', 'include', 'exclude_others', 'include_all'];
+    if (!allowed.includes(action)) {
+      res.status(400).json({ error: 'Invalid action', allowed });
+      return;
+    }
+    const own = await pool.query(
+      'SELECT id FROM campaigns WHERE id = $1 AND tenant_id = $2',
+      [campaignId, tenantId]
+    );
+    if (!own.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
+
+    let updated = 0;
+    if (action === 'exclude' || action === 'include') {
+      if (!Array.isArray(target_ids) || target_ids.length === 0) {
+        res.status(400).json({ error: 'target_ids must be a non-empty array for this action' });
+        return;
+      }
+      const fromStatus = action === 'exclude' ? 'PENDING' : 'EXCLUDED';
+      const toStatus = action === 'exclude' ? 'EXCLUDED' : 'PENDING';
+      const r = await pool.query(
+        `UPDATE campaign_targets
+            SET status = $1
+          WHERE campaign_id = $2
+            AND status = $3
+            AND id = ANY($4::uuid[])`,
+        [toStatus, campaignId, fromStatus, target_ids]
+      );
+      updated = r.rowCount || 0;
+    } else if (action === 'exclude_others') {
+      if (!Array.isArray(target_ids) || target_ids.length === 0) {
+        res.status(400).json({ error: 'target_ids must list which targets to KEEP' });
+        return;
+      }
+      const r = await pool.query(
+        `UPDATE campaign_targets
+            SET status = 'EXCLUDED'
+          WHERE campaign_id = $1
+            AND status = 'PENDING'
+            AND id <> ALL($2::uuid[])`,
+        [campaignId, target_ids]
+      );
+      updated = r.rowCount || 0;
+    } else if (action === 'include_all') {
+      const r = await pool.query(
+        `UPDATE campaign_targets
+            SET status = 'PENDING'
+          WHERE campaign_id = $1
+            AND status = 'EXCLUDED'`,
+        [campaignId]
+      );
+      updated = r.rowCount || 0;
+    }
+    res.json({ updated, action });
+  } catch (err) { next(err); }
+});
+
 // ---------- Analytics ----------
 
 /**

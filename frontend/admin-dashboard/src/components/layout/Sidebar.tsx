@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Bot, Phone, Users, BookOpen, Workflow,
   BarChart3, Settings, ChevronDown, ChevronLeft, ChevronRight,
   Mic, MessageSquare, Sparkles, Megaphone, ScrollText,
-  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut,
+  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut, Radio,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -23,6 +23,7 @@ const iconMap: Record<string, React.ReactNode> = {
   Megaphone: <Megaphone className="h-[18px] w-[18px]" />,
   ScrollText: <ScrollText className="h-[18px] w-[18px]" />,
   PhoneCall: <PhoneCall className="h-[18px] w-[18px]" />,
+  Radio: <Radio className="h-[18px] w-[18px]" />,
   Puzzle: <Puzzle className="h-[18px] w-[18px]" />,
   CreditCard: <CreditCard className="h-[18px] w-[18px]" />,
   Key: <Key className="h-[18px] w-[18px]" />,
@@ -70,6 +71,7 @@ const navSections: NavSection[] = [
     items: [
       { label: 'Phone Numbers', path: '/settings/phone-numbers', icon: 'Phone' },
       { label: 'Bulk Call', path: '/campaigns', icon: 'Megaphone' },
+      { label: 'Live Calls', path: '/calls/live', icon: 'Radio', badge: 'Live' },
       { label: 'Call Logs', path: '/calls', icon: 'PhoneCall' },
       { label: 'Analytics', path: '/analytics', icon: 'BarChart3' },
       { label: 'Workflows', path: '/workflows', icon: 'Workflow' },

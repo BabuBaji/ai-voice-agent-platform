@@ -137,4 +137,17 @@ export const campaignApi = {
     });
     return res.data;
   },
+
+  // Bulk action over campaign targets. action:
+  //   - 'exclude_others' + target_ids → call only these (rest go EXCLUDED)
+  //   - 'include_all'                 → reset; re-enables every EXCLUDED row
+  //   - 'exclude' / 'include'         → toggle specific ids
+  bulkTargetAction: async (
+    id: string,
+    action: 'exclude' | 'include' | 'exclude_others' | 'include_all',
+    target_ids?: string[],
+  ): Promise<{ updated: number; action: string }> => {
+    const res = await api.post(`/campaigns/${id}/targets/bulk-action`, { action, target_ids });
+    return res.data;
+  },
 };

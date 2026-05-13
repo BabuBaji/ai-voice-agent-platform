@@ -7,6 +7,7 @@ const PAGE_TITLES: { match: string; title: string; subtitle?: string }[] = [
   { match: '/settings/billing', title: 'Balance & Plans', subtitle: 'View your balance and choose right plan' },
   { match: '/settings/api', title: 'API Access', subtitle: 'Manage your API keys and integrate with the platform' },
   { match: '/settings', title: 'Settings', subtitle: 'Manage your account, team, and platform configuration' },
+  { match: '/calls/live', title: 'Live Calls', subtitle: 'In-flight calls with live transcripts, auto-refreshing every 3 seconds' },
   { match: '/calls', title: 'Call Logs', subtitle: 'View and analyze your call history' },
   { match: '/knowledge', title: 'File Management', subtitle: 'Upload and manage documents your agents can search' },
   { match: '/help/contact', title: 'Contact Us', subtitle: 'Send us a message — we usually reply within one business day' },

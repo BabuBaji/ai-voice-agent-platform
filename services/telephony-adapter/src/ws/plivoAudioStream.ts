@@ -29,7 +29,7 @@ import { WebSocketServer, WebSocket, RawData } from 'ws';
 import pino from 'pino';
 import { pool } from '../index';
 import { config } from '../config';
-import { buildVoiceAgentPrompt } from '../prompts/voiceAgent';
+import { buildVoiceAgentPrompt, buildVoiceAgentPromptSlim } from '../prompts/voiceAgent';
 import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, SarvamSttHandle } from '../providers/sarvamSpeech';
@@ -357,7 +357,7 @@ async function fetchRagContext(
     const resp = await fetch(`${url}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, knowledge_base_ids: kbIds, top_k: 4 }),
+      body: JSON.stringify({ query, knowledge_base_ids: kbIds, top_k: 2 }),
       signal: ctrl.signal,
     });
     clearTimeout(t);
@@ -439,10 +439,19 @@ async function callLLM(
   //      the agent's knowledge base. Skipped for Indic to keep Sarvam-M's
   //      context small.
   const isIndic = !!(language && !/^en/i.test(language) && sarvamCanHandle(language));
+  // Grounding strategy by path:
+  //  - Campaign calls skip Wikipedia + Tavily (external HTTP, 0.5–1.5s).
+  //  - Indic (Sarvam) calls skip RAG too because Sarvam-M only has a
+  //    7192-token context — RAG chunks were pushing prompts past it,
+  //    causing 422 errors and the say-again loop. RAG is restored for
+  //    English/ai-runtime calls (Gemini has 1M+ context, plenty of room).
+  const isCampaignCall = !!(campaignContext && campaignContext.instruction);
+  const skipExternalGrounding = skipGrounding || isCampaignCall;
+  const skipRag = skipGrounding || isIndic;
   const [webContext, liveContext, ragContext] = await Promise.all([
-    skipGrounding ? Promise.resolve('') : fetchWebContext(agent, history, language || null),
-    skipGrounding ? Promise.resolve('') : fetchLiveSearchContext(history),
-    (skipGrounding || isIndic) ? Promise.resolve('') : fetchRagContext(agent, history),
+    skipExternalGrounding ? Promise.resolve('') : fetchWebContext(agent, history, language || null),
+    skipExternalGrounding ? Promise.resolve('') : fetchLiveSearchContext(history),
+    skipRag ? Promise.resolve('') : fetchRagContext(agent, history),
   ]);
   const groundingContext = (liveContext || '') + (webContext || '') + (ragContext || '');
   const systemPrompt = buildVoiceAgentPrompt(basePrompt + groundingContext, agent, {
@@ -453,36 +462,40 @@ async function callLLM(
     contactVariables: campaignContext?.variables || null,
   });
 
-  // Latency optimization 2: trim history to the last 14 turns. The LLM needs
-  // the dialogue tail to answer the current question; older turns just inflate
-  // input tokens and slow the model. Keep more for Sarvam (which is more
-  // sensitive to abrupt cuts) — but cap to avoid blowing its context.
+  // Latency optimization 2: trim history to the last 14 turns. Sarvam-M is
+  // sensitive to abrupt history cuts — when we tried 10 the model started
+  // returning empty replies (its <think> block ate the response slot) and
+  // the agent fell back to "say-again" on every turn. 14 preserves enough
+  // dialogue tail without blowing context. Do NOT lower this again.
   const trimmedHistory = history.length > 14 ? history.slice(-14) : history;
 
-  // Indic path: call Sarvam directly. Two-attempt strategy — full history
-  // first, then trimmed history if Sarvam returned null (likely context-
-  // length blowout, sarvam-m's reply slot got eaten by <think>).
-  //
-  // IMPORTANT — DO NOT lower maxTokens below ~1200 here. sarvam-m's
-  // <think> reasoning eats 800–1000 tokens before it even starts the
-  // spoken reply. Capping at 350-500 silently truncates the reply slot,
-  // the API returns empty content, we emit "say again" instead — caller
-  // hears it twice, the KB never gets used. We previously dropped this
-  // for latency and the entire Indic flow broke.
+  // Indic path: call Sarvam directly. CRITICAL — Sarvam-M's context window
+  // is ONLY 7192 tokens. Build a SLIM system prompt for Sarvam that
+  // contains only the essentials (~800-1200 tokens) instead of the full
+  // 3500-4500-token English prompt the ai-runtime path uses. This leaves
+  // ~5000 tokens for history + reply, which is plenty even for Telugu/
+  // Hindi conversations where Indic tokens are heavy. RAG is skipped on
+  // the Sarvam path (see fetchRagContext call above) for the same reason.
   if (isIndic && sarvamConfigured()) {
+    const slimPrompt = buildVoiceAgentPromptSlim(basePrompt, agent, {
+      customerName,
+      callType,
+      language: language || undefined,
+      campaignInstruction: campaignContext?.instruction || null,
+      contactVariables: campaignContext?.variables || null,
+    });
+    const sarvamHistory = trimmedHistory.length > 10 ? trimmedHistory.slice(-10) : trimmedHistory;
     let sarvamReply = await callSarvamLLM({
-      systemPrompt,
-      messages: trimmedHistory,
-      maxTokens: 1500,
+      systemPrompt: slimPrompt,
+      messages: sarvamHistory,
+      maxTokens: 500,
       temperature: parseFloat(agent.temperature) || 0.7,
     });
-    if (!sarvamReply && trimmedHistory.length > 6) {
-      // Retry with last 6 turns only — keeps the dialogue tail that the
-      // model needs to answer the latest user turn, drops earlier history.
+    if (!sarvamReply && sarvamHistory.length > 4) {
       sarvamReply = await callSarvamLLM({
-        systemPrompt,
-        messages: trimmedHistory.slice(-6),
-        maxTokens: 1500,
+        systemPrompt: slimPrompt,
+        messages: sarvamHistory.slice(-4),
+        maxTokens: 800,
         temperature: parseFloat(agent.temperature) || 0.7,
       });
     }
@@ -694,6 +707,12 @@ interface StreamSession {
   // ~1.5s of every agent reply so trivial "హలో" / "yes" interjections don't
   // chop the agent off after only a few hundred bytes of audio.
   bargeInAllowedAt: number;
+  // The text the agent is currently speaking (set by playText, cleared at
+  // end). dispatchUserUtterance compares incoming STT against this — if the
+  // "user" utterance is just an echo of the agent's own TTS (carrier echo
+  // cancellation is imperfect on PSTN), we drop it instead of triggering a
+  // bogus barge-in that would spawn a duplicate, overlapping reply.
+  currentAgentText: string;
   // End-of-call latch: once the caller says goodbye / thank-you-bye / cut
   // the call, we set this and stop firing the LLM on any further utterances.
   // The caller still controls the actual hangup; we just stop talking.
@@ -743,6 +762,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       isAgentSpeaking: false,
       bargeInRequested: false,
       bargeInAllowedAt: 0,
+      currentAgentText: '',
       callEnded: false,
     };
 
@@ -963,9 +983,16 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
   // deterministic than re-asking the LLM, which is what OmniDim does too.
   // Otherwise route through the LLM with the campaign overlay so the greeting
   // is personalized but stays on-prompt.
+  // Strip placeholder names ("Contact 3", "Customer 1", etc.) before they
+  // hit the greeting template — otherwise an agent with greeting "Hello
+  // {{name}}!" announces "Hello Contact 3!" and the caller knows it's a bot
+  // in the first half-second. Same regex as voiceAgent.ts sanitizeCustomerName.
+  const PLACEHOLDER_NAME_RE = /^(contact|customer|test(ing)?|sample|lead|user|client|prospect|guest|caller|na|n\/a|unknown|tbd)\b[\s\-_]*\d*$/i;
+  const rawTargetName = session.campaignContext.targetName || session.campaignContext.variables?.name || '';
+  const safeName = rawTargetName && !PLACEHOLDER_NAME_RE.test(rawTargetName.trim()) ? rawTargetName.trim() : '';
   const greetingVars: Record<string, any> = {
     ...(session.campaignContext.variables || {}),
-    name: session.campaignContext.targetName || session.campaignContext.variables?.name || '',
+    name: safeName,
   };
   const rawTemplate = (session.agent.greeting_message || '').toString();
   const hasTemplatePlaceholders = /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(rawTemplate);
@@ -1104,6 +1131,41 @@ async function connectDeepgram(session: StreamSession, language: string): Promis
  * a new LLM turn; otherwise the utterance stays in history + messages
  * and gets picked up when the current reply finishes.
  */
+/**
+ * STT artifact filter — phrases that Plivo / carrier / voicemail systems
+ * inject into the audio stream and STT happily transcribes as "user
+ * speech". These are not the caller — they're the carrier itself. Dropping
+ * them before they ever hit the LLM keeps the agent from replying to
+ * "this call will be recorded" with a confused acknowledgement.
+ *
+ * Real-world examples observed in /campaigns/3ea28e56 call recordings:
+ *   - "This call will be recorded."
+ *   - "This message has been transcribed. One moment while I notify the caller."
+ *   - Indic-transliterated versions where Sarvam STT heard the English
+ *     voicemail prompt through a low-bitrate codec.
+ */
+const STT_ARTIFACT_PATTERNS: RegExp[] = [
+  /\bthis\s+call\s+(is\s+|will\s+|may\s+)?(be\s+|being\s+)?(recorded|monitored)\b/i,
+  /\b(this|the)\s+(call|conversation)\s+(is|will|may)\s+be\s+recorded\b/i,
+  /\bmessage\s+(has\s+been\s+|is\s+being\s+)?transcribed\b/i,
+  /\bone\s+moment\s+while\s+i\s+notify\s+(the\s+)?caller\b/i,
+  /\b(your\s+)?call\s+(is\s+being\s+|will\s+be\s+|may\s+be\s+)?recorded\s+for\s+(quality|training)/i,
+  /\bplease\s+leave\s+(a\s+|your\s+)?message\s+(after\s+the\s+(beep|tone))?\b/i,
+  /\bthe\s+(number|person)\s+you('?ve)?\s+(have\s+)?dial(l?ed)?\s+is\s+(not\s+available|unavailable|busy)\b/i,
+  /\bthe\s+subscriber\s+you\s+are\s+trying\s+to\s+(call|reach)\b/i,
+  // Indic-script paraphrases of "this call will be recorded" that Sarvam
+  // sometimes produces when the carrier disclaimer leaks in.
+  /(మెసేజ్|మెసేజి|మెసేజ్ ట్రాన్స్క్రైబ్|మెసేజి ట్రాన్స్క్రైబ్|నోటిఫై ద కాలర్|నోటిఫై చేస్తాను)/,
+  /(रिकॉर्ड किया जा रहा|रिकॉर्डिंग|कॉल रिकॉर्ड)/,
+];
+
+function isSttArtifact(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t || t.length < 6) return false;
+  return STT_ARTIFACT_PATTERNS.some((re) => re.test(t));
+}
+
 // Common acknowledgement-only utterances across the languages we support.
 // When the caller responds with one of these RIGHT after the agent answered
 // (and the agent's last turn was not a question), it's a back-channel
@@ -1159,7 +1221,7 @@ const STOP_KEYWORDS: RegExp[] = [
  * it's the 5th sentence — callers should hear "answer + one question", not
  * five paragraphs of encyclopaedia followed by a question that gets cut.
  */
-export function trimReplyForVoice(text: string, maxSentences = 4, maxWords = 90): string {
+export function trimReplyForVoice(text: string, maxSentences = 4, maxWords = 130): string {
   const trimmed = (text || '').trim();
   if (!trimmed) return trimmed;
 
@@ -1182,13 +1244,18 @@ export function trimReplyForVoice(text: string, maxSentences = 4, maxWords = 90)
   }
   let out = pick.join(' ');
 
-  // Hard word cap as a second safety net (handles single-sentence rambles).
-  const words = out.split(/\s+/);
-  if (words.length > maxWords) {
-    out = words.slice(0, maxWords).join(' ').replace(/[,;:]?$/, '');
-    if (!/[.!?।॥]$/u.test(out)) out += '.';
+  // Word cap: drop WHOLE sentences off the tail until we're under maxWords,
+  // never slice mid-sentence. Slicing at word N left half-formed thoughts
+  // ("...the fee structure is forty-five thou.") that sounded broken to
+  // the caller. Always preserve at least the first sentence even if it's
+  // over the cap by itself — clipping the opener is worse than running long.
+  const countWords = (s: string) => s.split(/\s+/).filter(Boolean).length;
+  while (pick.length > 1 && countWords(pick.join(' ')) > maxWords) {
+    pick.pop();
   }
-  return out.trim();
+  out = pick.join(' ').trim();
+  if (!/[.!?।॥]$/u.test(out)) out += '.';
+  return out;
 }
 
 /**
@@ -1366,6 +1433,37 @@ async function generateFarewell(session: StreamSession, callerGoodbye: string): 
   }
 }
 
+/**
+ * Fraction of `a`'s tokens that also appear in `b`. Used to spot when an
+ * inbound STT result is just the agent's own TTS echoed back from the
+ * carrier. Tokens are stripped of punctuation + lowercased so "Hello." and
+ * "hello" match. Token-set membership not multi-set, so a 3-word ack like
+ * "yes, that's right" doesn't score 100% against a long agent sentence
+ * just because each word happened to appear somewhere in it — we require
+ * at least 3 distinct shared tokens before declaring echo, so short
+ * confirmations aren't misclassified.
+ */
+function tokenOverlapRatio(a: string, b: string): number {
+  const norm = (s: string) =>
+    s.toLowerCase()
+      .replace(/[.,!?;:।॥"'`()\-]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 2);
+  const ta = norm(a);
+  const tb = new Set(norm(b));
+  if (ta.length === 0 || tb.size === 0) return 0;
+  let shared = 0;
+  const seen = new Set<string>();
+  for (const w of ta) {
+    if (tb.has(w) && !seen.has(w)) {
+      shared++;
+      seen.add(w);
+    }
+  }
+  if (shared < 3) return 0; // not enough signal to call it echo
+  return shared / ta.length;
+}
+
 function isFillerOnly(text: string): boolean {
   const t = text
     .toLowerCase()
@@ -1386,6 +1484,19 @@ function isFillerOnly(text: string): boolean {
 async function dispatchUserUtterance(session: StreamSession, rawText: string): Promise<void> {
   const text = (rawText || '').trim();
   if (!text) return;
+
+  // STT-artifact guard: the carrier (voicemail prompts, "this call is being
+  // recorded" disclaimers, transcription confirmations) bleeds into the STT
+  // stream and gets recognised as caller speech. Drop it — never persist,
+  // never add to history, never fire the LLM. Without this the agent ends
+  // up replying to ITS OWN system disclaimer with confused acks.
+  if (isSttArtifact(text)) {
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 80) },
+      'Stream: dropped STT artifact (carrier/voicemail/system phrase)',
+    );
+    return;
+  }
 
   // Greeting-race guard: the caller often speaks within the first 1-2 seconds
   // of the call connecting (e.g. "హలో"), but our seeded greeting LLM call
@@ -1491,6 +1602,25 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     return;
   }
 
+  // ECHO REJECTION: while the agent is speaking, Plivo's PSTN echo
+  // cancellation sometimes lets the agent's own TTS leak back into the
+  // caller channel. STT transcribes it as a "user utterance" that looks
+  // substantive (≥4 words), which then fires barge-in and triggers a
+  // duplicate LLM reply — the caller hears two overlapping voices ("double
+  // voice"). If the incoming user text shares a high fraction of tokens
+  // with the audio we're CURRENTLY playing, treat it as echo: drop it
+  // silently — don't persist, don't add to history, don't barge in.
+  if (session.isAgentSpeaking && session.currentAgentText) {
+    const overlap = tokenOverlapRatio(text, session.currentAgentText);
+    if (overlap >= 0.5) {
+      logger.info(
+        { callSid: session.callSid, overlap, userText: text.slice(0, 60), agentText: session.currentAgentText.slice(0, 60) },
+        'Stream: dropped utterance as carrier echo of current agent reply',
+      );
+      return;
+    }
+  }
+
   // BARGE-IN: caller is speaking substantively while the agent is mid-reply.
   // Flag the playback loop to stop streaming TTS chunks and flush Plivo's
   // queue so the agent shuts up immediately and listens to what was said.
@@ -1510,7 +1640,23 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     const isStop = STOP_KEYWORDS.some((re) => re.test(text));
     const wordCount = text.split(/\s+/).filter(Boolean).length;
     const charCount = text.length;
-    const substantive = isStop || wordCount >= 4 || charCount >= 25;
+    // Caller-question bypass: any utterance that's clearly a question
+    // (contains "?" or an interrogative word in any supported language)
+    // ALWAYS barges in, regardless of word count or grace period. This
+    // is the most important signal — if the caller is mid-asking
+    // something, the agent must stop and listen so it can answer that
+    // specific question, not whatever it was about to say.
+    const isQuestion = /[?？]/.test(text) || /\b(what|how|why|when|where|who|which|can you|could you|do you|is it|are you|will you)\b/i.test(text)
+      || /(ఏమి|ఎక్కడ|ఎప్పుడు|ఎందుకు|ఎవరు|ఎలా|ఏది|ఏం)/.test(text)        // Telugu
+      || /(क्या|कहाँ|कब|क्यों|कौन|कैसे|कौनसा)/.test(text)               // Hindi
+      || /(என்ன|எங்கே|எப்போது|ஏன்|யார்|எப்படி|எது)/.test(text)         // Tamil
+      || /(ಏನು|ಎಲ್ಲಿ|ಯಾವಾಗ|ಏಕೆ|ಯಾರು|ಹೇಗೆ|ಯಾವುದು)/.test(text)        // Kannada
+      || /(എന്ത്|എവിടെ|എപ്പോൾ|എന്തിന്|ആര്|എങ്ങനെ)/.test(text);       // Malayalam
+    // Substantive threshold: 3 words / 15 chars (down from 6/35).
+    // Combined with the question bypass above, genuine interruptions
+    // cut the agent off immediately while pure backchannel echoes
+    // ("hmm", "ఆ", "हाँ") still don't fire — those are 1-2 chars max.
+    const substantive = isStop || isQuestion || wordCount >= 3 || charCount >= 15;
     const inGrace = Date.now() < session.bargeInAllowedAt;
 
     if (!substantive) {
@@ -1518,7 +1664,7 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
         { callSid: session.callSid, userText: text.slice(0, 60), wordCount, charCount },
         'Stream: barge-in suppressed — utterance too short to interrupt',
       );
-    } else if (inGrace && !isStop) {
+    } else if (inGrace && !isStop && !isQuestion) {
       logger.info(
         { callSid: session.callSid, userText: text.slice(0, 60), msUntilAllowed: session.bargeInAllowedAt - Date.now() },
         'Stream: barge-in suppressed — within grace period at start of agent reply',
@@ -1630,87 +1776,131 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
 async function playText(plivoWs: WebSocket, session: StreamSession, text: string): Promise<void> {
   session.plivoWs = plivoWs;
   if (plivoWs.readyState !== WebSocket.OPEN) return;
-  // TTS: Sarvam (native Indic voices) → Azure (also Indic) → Deepgram Aura (English only).
-  let b64: string | null = null;
-  if (session.ttsBackend === 'sarvam') {
-    b64 = await synthesizeSarvamTtsMulaw(text, session.language, session.agent?.voice_config?.voice_id);
-    if (!b64) {
-      logger.warn({ callSid: session.callSid, lang: session.language }, 'Sarvam TTS failed — falling back to Deepgram Aura');
-      b64 = await ttsDeepgramMulaw(text, session.agent?.voice_config?.voice_id);
-    }
-  } else if (session.ttsBackend === 'azure') {
-    b64 = await synthesizeAzureTtsMulaw(text, session.language, session.agent?.voice_config?.voice_id);
-    if (!b64) {
-      logger.warn({ callSid: session.callSid, lang: session.language }, 'Azure TTS failed — falling back to Deepgram Aura');
-      b64 = await ttsDeepgramMulaw(text, session.agent?.voice_config?.voice_id);
-    }
-  } else {
-    b64 = await ttsDeepgramMulaw(text, session.agent?.voice_config?.voice_id);
-  }
-  if (!b64) {
-    logger.warn({ callSid: session.callSid }, 'TTS produced no audio — skipping playAudio');
-    return;
-  }
-  // Capture the agent's TTS audio for the stereo recording, positioned at
-  // the current caller-timeline offset. This lines up the agent's speech
-  // with where the caller was "listening" at send-time.
-  const fullBytes = Buffer.from(b64, 'base64');
-  session.agentMulawEvents.push({
-    offsetBytes: session.callerBytes,
-    mulaw: fullBytes,
-  });
 
-  // Chunked playback for barge-in support. mulaw 8kHz = 8000 bytes/sec, so
-  // 400-byte chunks ≈ 50ms each. We send chunks at exactly 50ms cadence
-  // (match-playback-rate) — earlier we drifted 10ms ahead per chunk which
-  // accumulated to ~300ms of Plivo buffer over a 3s reply; on some Indian
-  // carrier paths that surplus shows up as choppy/doubled audio when the
-  // PSTN-to-VoIP gateway re-times frames. Sending exactly at playback rate
-  // keeps Plivo's queue ~empty, smoothing the caller's experience.
-  const CHUNK_BYTES = 400;        // 50ms of mulaw 8kHz — well below Plivo's 100ms ceiling
-  const SEND_INTERVAL_MS = 50;    // exact playback rate
-  const BARGE_IN_GRACE_MS = 1500; // protect first 1.5s from trivial interjections
+  // Sentence-pipelined TTS:
+  //   - Split the reply into sentences.
+  //   - Kick off TTS for ALL sentences in parallel (Sarvam → Azure → Aura
+  //     fallback per backend choice).
+  //   - As soon as sentence-1's audio resolves, start streaming it to Plivo.
+  //     By the time sentence-1's playback finishes, sentences 2..N are
+  //     almost always already synthesised → near-zero inter-sentence gap.
+  //
+  // For a 4-sentence reply this drops first-audio latency from
+  //   ~1.0s (whole-reply Sarvam synth)
+  // to
+  //   ~0.3s (first-sentence Sarvam synth).
+  //
+  // Sarvam handles 4 concurrent TTS requests fine. Falls back to a single
+  // synthesis path if the split produces only one sentence.
+  const sentences = (text || '')
+    .split(/(?<=[.!?।॥])\s+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const effectiveSentences = sentences.length > 0 ? sentences : [text];
+
+  const CHUNK_BYTES = 400;        // 50ms of mulaw 8kHz
+  const BARGE_IN_GRACE_MS = 1200; // 1.2s grace — only protects against the
+                                  // start-of-reply echo loop (carrier
+                                  // playback of agent's own audio leaking
+                                  // into caller channel). Real interrupts
+                                  // and question-words bypass this entirely.
+  const BACKPRESSURE_BYTES = 256 * 1024;
+
   session.isAgentSpeaking = true;
   session.bargeInRequested = false;
   session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
-  let sentBytes = 0;
+  session.currentAgentText = text;
+
+  const synthOne = async (s: string): Promise<string | null> => {
+    if (session.ttsBackend === 'sarvam') {
+      const b = await synthesizeSarvamTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      if (b) return b;
+      logger.warn({ callSid: session.callSid, lang: session.language }, 'Sarvam TTS failed — falling back to Deepgram Aura');
+      return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+    }
+    if (session.ttsBackend === 'azure') {
+      const b = await synthesizeAzureTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      if (b) return b;
+      logger.warn({ callSid: session.callSid, lang: session.language }, 'Azure TTS failed — falling back to Deepgram Aura');
+      return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+    }
+    return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+  };
+
+  // Kick all syntheses off immediately so they overlap with playback.
+  const synthPromises = effectiveSentences.map((s) => synthOne(s));
+
   try {
-    for (let off = 0; off < fullBytes.length; off += CHUNK_BYTES) {
-      if (session.bargeInRequested) {
-        // Flush Plivo's playback queue so the caller stops hearing the agent.
-        try {
-          plivoWs.send(JSON.stringify({ event: 'clearAudio' }));
-        } catch { /* socket may be gone */ }
-        logger.info(
-          { callSid: session.callSid, sentBytes, totalBytes: fullBytes.length },
-          'Stream: barge-in — playback aborted',
+    for (let i = 0; i < effectiveSentences.length; i++) {
+      if (session.bargeInRequested) break;
+      const b64 = await synthPromises[i];
+      if (!b64) {
+        // Skip this sentence on TTS failure, continue with the next so the
+        // caller still hears the rest of the reply.
+        logger.warn(
+          { callSid: session.callSid, sentenceIdx: i, preview: effectiveSentences[i].slice(0, 60) },
+          'TTS produced no audio for sentence — skipping',
         );
-        break;
+        continue;
       }
-      const slice = fullBytes.subarray(off, Math.min(off + CHUNK_BYTES, fullBytes.length));
-      const playEvent = {
-        event: 'playAudio',
-        media: {
-          contentType: 'audio/x-mulaw',
-          sampleRate: '8000',
-          payload: slice.toString('base64'),
-        },
-      };
-      try {
-        plivoWs.send(JSON.stringify(playEvent));
-        sentBytes += slice.length;
-      } catch (err: any) {
-        logger.warn({ callSid: session.callSid, err: err.message }, 'Failed to send playAudio chunk');
-        break;
+
+      const fullBytes = Buffer.from(b64, 'base64');
+      // Capture audio for the stereo recording, positioned at the current
+      // caller-timeline offset, so the agent's speech lines up with where
+      // the caller was "listening" at send-time.
+      session.agentMulawEvents.push({
+        offsetBytes: session.callerBytes,
+        mulaw: fullBytes,
+      });
+
+      let sentBytes = 0;
+      let aborted = false;
+      for (let off = 0; off < fullBytes.length; off += CHUNK_BYTES) {
+        if (session.bargeInRequested) {
+          try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch { /* socket may be gone */ }
+          logger.info(
+            { callSid: session.callSid, sentenceIdx: i, sentBytes, totalBytes: fullBytes.length },
+            'Stream: barge-in — playback aborted',
+          );
+          aborted = true;
+          break;
+        }
+        const slice = fullBytes.subarray(off, Math.min(off + CHUNK_BYTES, fullBytes.length));
+        const playEvent = {
+          event: 'playAudio',
+          media: {
+            contentType: 'audio/x-mulaw',
+            sampleRate: '8000',
+            payload: slice.toString('base64'),
+          },
+        };
+        while ((plivoWs as any).bufferedAmount > BACKPRESSURE_BYTES) {
+          await new Promise((r) => setTimeout(r, 20));
+          if (session.bargeInRequested || plivoWs.readyState !== WebSocket.OPEN) break;
+        }
+        try {
+          plivoWs.send(JSON.stringify(playEvent));
+          sentBytes += slice.length;
+        } catch (err: any) {
+          logger.warn({ callSid: session.callSid, err: err.message }, 'Failed to send playAudio chunk');
+          aborted = true;
+          break;
+        }
+        if (off + CHUNK_BYTES < fullBytes.length) {
+          await new Promise((r) => setImmediate(r));
+        }
       }
-      // Pace ourselves so we don't blast the entire reply faster than playback.
-      // Skip the sleep on the last chunk to avoid an extra idle delay.
-      if (off + CHUNK_BYTES < fullBytes.length) {
-        await new Promise((r) => setTimeout(r, SEND_INTERVAL_MS));
-      }
+      if (aborted) break;
     }
   } finally {
     session.isAgentSpeaking = false;
+    session.currentAgentText = '';
+    // Drain any still-in-flight syntheses so we don't leave dangling
+    // promises on a barged-in reply. Errors are swallowed — we're just
+    // making sure the HTTP responses are consumed.
+    if (session.bargeInRequested) {
+      Promise.allSettled(synthPromises).catch(() => { /* ignore */ });
+    }
   }
 }
 
@@ -1734,6 +1924,53 @@ function decodeMulawBuffer(buf: Buffer): Int16Array {
 }
 
 /**
+ * Bring a channel up to a consistent perceived loudness.
+ *
+ * Plivo's inbound carrier path delivers caller audio at ~-30 to -45 dBFS RMS
+ * while our outbound Aura TTS is near -16 dBFS — so without normalization the
+ * caller side of the recording sounds like quiet bursts surrounded by
+ * silence, which listeners hear as "breaking" audio. We compute RMS over the
+ * voiced portion of the channel (samples above the noise floor) and scale
+ * the whole channel to hit a target RMS, with a hard cap on gain so a near-
+ * silent channel can't be amplified to pure noise.
+ *
+ * Mutates `samples` in place. Uses soft-clip to keep transients below int16
+ * limits without audible distortion.
+ */
+function normalizeChannelPcm16(samples: Int16Array, opts?: { targetRmsDbfs?: number; maxGainDb?: number }): void {
+  if (samples.length === 0) return;
+  const targetRmsDbfs = opts?.targetRmsDbfs ?? -16;
+  const maxGainDb = opts?.maxGainDb ?? 24;
+  const NOISE_FLOOR = 200; // |sample| below this is treated as silence
+  let sumSquares = 0;
+  let voicedCount = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    if (Math.abs(s) >= NOISE_FLOOR) {
+      sumSquares += s * s;
+      voicedCount++;
+    }
+  }
+  if (voicedCount === 0) return; // channel is silent — leave it alone
+  const rms = Math.sqrt(sumSquares / voicedCount);
+  const targetRms = 32767 * Math.pow(10, targetRmsDbfs / 20);
+  let gain = targetRms / rms;
+  const maxGain = Math.pow(10, maxGainDb / 20);
+  if (gain > maxGain) gain = maxGain;
+  if (gain <= 1) return; // already at or above target — don't attenuate, just leave it
+  // Soft-clip (tanh-style) above a knee so transients above the limit get
+  // squashed gently instead of hard-clipping into buzz.
+  const KNEE = 28000;
+  const ROOM = 32767 - KNEE;
+  for (let i = 0; i < samples.length; i++) {
+    let v = samples[i] * gain;
+    if (v > KNEE) v = KNEE + ROOM * Math.tanh((v - KNEE) / ROOM);
+    else if (v < -KNEE) v = -KNEE + ROOM * Math.tanh((v + KNEE) / ROOM);
+    samples[i] = v | 0;
+  }
+}
+
+/**
  * Write a stereo WAV: L = caller (continuous), R = agent (TTS chunks aligned
  * at their send-offset, silence elsewhere). 8000 Hz, 16-bit PCM.
  */
@@ -1752,6 +1989,11 @@ function writeStereoWav(filePath: string, callerMulaw: Buffer, agentEvents: Stre
 
   const left = decodeMulawBuffer(callerMulaw);
   const right = decodeMulawBuffer(agentMulaw);
+  // Normalize caller side aggressively (Plivo inbound is quiet); agent side
+  // is already near target so it'll usually no-op unless TTS provider drift
+  // drops the level.
+  normalizeChannelPcm16(left, { targetRmsDbfs: -16, maxGainDb: 24 });
+  normalizeChannelPcm16(right, { targetRmsDbfs: -16, maxGainDb: 6 });
   const sampleCount = left.length;
 
   const sampleRate = 8000;
@@ -2027,22 +2269,56 @@ async function finalizeRecording(session: StreamSession): Promise<void> {
 //      "<lang> mein baat karo" (Hindi), etc.
 
 const LANG_KEYWORDS: Record<string, string[]> = {
-  'te-IN': ['telugu', 'తెలుగు'],
-  'hi-IN': ['hindi', 'हिंदी', 'हिन्दी'],
-  'ta-IN': ['tamil', 'தமிழ்'],
-  'kn-IN': ['kannada', 'ಕನ್ನಡ'],
-  'ml-IN': ['malayalam', 'മലയാളം'],
-  'mr-IN': ['marathi', 'मराठी'],
-  'bn-IN': ['bengali', 'bangla', 'বাংলা'],
-  'gu-IN': ['gujarati', 'ગુજરાતી'],
-  'pa-IN': ['punjabi', 'ਪੰਜਾਬੀ'],
+  // Indic family (Sarvam-native) — list of words for "<lang>" in every
+  // script the caller might use to ASK for that language. The first set is
+  // Latin transliterations + the native-script word; we then add the
+  // language name as it appears IN OTHER INDIC SCRIPTS too, because Sarvam
+  // STT transcribes "English" said in Telugu as "ఇంగ్లీష్", and the
+  // detector has to match that.
+  'te-IN': ['telugu', 'తెలుగు', 'तेलुगु', 'டெலுங்கு', 'ತೆಲುಗು', 'തെലുങ്ക്'],
+  'hi-IN': ['hindi', 'हिंदी', 'हिन्दी', 'హిందీ', 'இந்தி', 'ಹಿಂದಿ', 'ഹിന്ദി'],
+  'ta-IN': ['tamil', 'தமிழ்', 'తమిళం', 'तमिल', 'ತಮಿಳು', 'തമിഴ്'],
+  'kn-IN': ['kannada', 'ಕನ್ನಡ', 'కన్నడ', 'कन्नड़', 'கன்னடம்', 'കന്നഡ'],
+  'ml-IN': ['malayalam', 'മലയാളം', 'మలయాళం', 'मलयालम', 'மலையாளம்', 'ಮಲಯಾಳಂ'],
+  'mr-IN': ['marathi', 'मराठी', 'మరాఠీ', 'மராத்தி'],
+  'bn-IN': ['bengali', 'bangla', 'বাংলা', 'बंगाली', 'বাংলা', 'బెంగాలీ'],
+  'gu-IN': ['gujarati', 'ગુજરાતી', 'गुजराती'],
+  'pa-IN': ['punjabi', 'ਪੰਜਾਬੀ', 'पंजाबी'],
   'or-IN': ['odia', 'oriya', 'ଓଡ଼ିଆ'],
   'as-IN': ['assamese', 'অসমীয়া'],
-  'ur-IN': ['urdu', 'اردو'],
-  'en-IN': ['english'],
+  'ur-IN': ['urdu', 'اردو', 'उर्दू'],
+  // English: critical — caller often asks for English while STT is still in
+  // Indic mode, so the word "English" comes back in Telugu/Hindi/Tamil
+  // script. Include every Indic-script spelling of the word.
+  'en-IN': [
+    'english', 'inglish', 'angrezi',
+    'ఇంగ్లీష్', 'ఆంగ్ల', 'ఆంగ్లం', 'ఇంగ్లిష్',
+    'इंग्लिश', 'इंग्लिश', 'अंग्रेज़ी', 'अंग्रेजी', 'इंग्लिश में',
+    'ஆங்கிலம்', 'இங்கிலீஷ்',
+    'ಇಂಗ್ಲಿಷ್', 'ಆಂಗ್ಲ',
+    'ഇംഗ്ലീഷ്', 'ഇംഗ്ളീഷ്',
+    'ইংরেজি', 'ઇંગ્લિશ', 'ਅੰਗਰੇਜ਼ੀ',
+  ],
+  'es':    ['spanish', 'español', 'castellano'],
+  'fr':    ['french', 'français', 'francais'],
+  'de':    ['german', 'deutsch'],
+  'it':    ['italian', 'italiano'],
+  'pt':    ['portuguese', 'português', 'portugues'],
+  'nl':    ['dutch', 'nederlands'],
+  'ru':    ['russian', 'русский'],
+  'pl':    ['polish', 'polski'],
+  'tr':    ['turkish', 'türkçe'],
+  'ar':    ['arabic', 'العربية'],
+  'zh':    ['mandarin', 'chinese', '中文', '普通话'],
+  'ja':    ['japanese', '日本語'],
+  'ko':    ['korean', '한국어'],
+  'th':    ['thai', 'ไทย'],
+  'vi':    ['vietnamese', 'tiếng việt'],
+  'id':    ['indonesian', 'bahasa'],
 };
 
 const SCRIPT_TO_LANG: Array<{ re: RegExp; lang: string }> = [
+  // Indic scripts
   { re: /[ఀ-౿]/, lang: 'te-IN' }, // Telugu
   { re: /[஀-௿]/, lang: 'ta-IN' }, // Tamil
   { re: /[ಀ-೿]/, lang: 'kn-IN' }, // Kannada
@@ -2052,6 +2328,13 @@ const SCRIPT_TO_LANG: Array<{ re: RegExp; lang: string }> = [
   { re: /[਀-੿]/, lang: 'pa-IN' }, // Gurmukhi (Punjabi)
   { re: /[଀-୿]/, lang: 'or-IN' }, // Odia
   { re: /[ऀ-ॿ]/, lang: 'hi-IN' }, // Devanagari — Hindi/Marathi (default Hindi)
+  // Non-Indic scripts (Deepgram / Azure handle STT+TTS)
+  { re: /[؀-ۿ]/, lang: 'ar' }, // Arabic
+  { re: /[Ѐ-ӿ]/, lang: 'ru' }, // Cyrillic — default Russian
+  { re: /[一-鿿]/, lang: 'zh' }, // CJK Unified Ideographs
+  { re: /[぀-ゟ゠-ヿ]/, lang: 'ja' }, // Hiragana + Katakana
+  { re: /[가-힯]/, lang: 'ko' }, // Hangul
+  { re: /[฀-๿]/, lang: 'th' }, // Thai
 ];
 
 const FRIENDLY: Record<string, string> = {
@@ -2059,20 +2342,35 @@ const FRIENDLY: Record<string, string> = {
   'kn-IN': 'Kannada', 'ml-IN': 'Malayalam', 'mr-IN': 'Marathi', 'bn-IN': 'Bengali',
   'gu-IN': 'Gujarati', 'pa-IN': 'Punjabi', 'or-IN': 'Odia', 'as-IN': 'Assamese',
   'ur-IN': 'Urdu',
+  es: 'Spanish', fr: 'French', de: 'German', it: 'Italian', pt: 'Portuguese',
+  nl: 'Dutch', ru: 'Russian', pl: 'Polish', tr: 'Turkish', ar: 'Arabic',
+  zh: 'Mandarin', ja: 'Japanese', ko: 'Korean', th: 'Thai', vi: 'Vietnamese',
+  id: 'Indonesian',
 };
 
 const SWITCH_VERB_RE = /\b(speak|talk|switch|change|continue|reply|respond|converse|chat)\s+(in|to)\b/i;
 const INDIC_ASK_HINTS_RE = /\b(lo|mein|me|la|il|para|please|kindly|matladu|matladandi|baat|karo|karein|karo na|pesu|pesungal|maatadi|kannadalli)\b/i;
 
+// "Switch language" intent expressed in Indic scripts. When STT is locked
+// to Telugu/Hindi/etc., the caller's "speak in English" request comes back
+// transcribed in the SAME Indic script — so the Latin patterns above never
+// fire. These cover the common ways callers ask in their own script:
+//   Telugu: "ఇంగ్లీష్ లో మాట్లాడు" / "మాట్లాడగలుగుతారా" / "మాట్లాడుదాం"
+//   Hindi:  "हिंदी में बोलो"      / "बात करो"        / "बोलिए"
+//   Tamil:  "ஆங்கிலம் ல பேசு"      / "பேசலாமா"
+//   Kannada/Malayalam: similar
+const INDIC_SWITCH_INTENT_RE = /(మాట్లాడ|మాట్లాడుతున్నాను|మాట్లాడుదాం|మాట్లాడగలుగుతారా|లో|గా|बोल|बातच|बात\s*करो|पेश|बोलिए|பேசு|பேசலாமா|பேசுங்கள்|ಮಾತಾಡು|ಮಾತನಾಡಿ|പറയൂ|പറയാമോ|بات|بولو)/;
+
 function detectLanguageRequest(text: string, currentLang: string): string | null {
-  const lower = (text || '').toLowerCase();
+  const raw = text || '';
+  const lower = raw.toLowerCase();
   if (!lower) return null;
 
   // 1. Explicit English ask: "speak in Telugu", "switch to Hindi"
   if (SWITCH_VERB_RE.test(lower)) {
     for (const lang of Object.keys(LANG_KEYWORDS)) {
       const kws = LANG_KEYWORDS[lang];
-      if (kws.some((k) => lower.includes(k.toLowerCase()))) {
+      if (kws.some((k) => lower.includes(k.toLowerCase()) || raw.includes(k))) {
         return lang === currentLang ? null : lang;
       }
     }
@@ -2089,11 +2387,43 @@ function detectLanguageRequest(text: string, currentLang: string): string | null
     }
   }
 
+  // 2b. Cross-script switch request: STT is producing Indic script, but the
+  // caller is asking for a different language. We look for ANY language
+  // keyword from LANG_KEYWORDS (which now includes Indic-script spellings
+  // of "English", "Hindi", etc.) combined with an Indic switch-intent
+  // word ("మాట్లాడు" / "बोलो" / "பேசு" / etc.). This is the path that
+  // catches "ఇంగ్లీష్ లో మాట్లాడగలుగుతారా" (Telugu STT of "can you speak in English").
+  if (INDIC_SWITCH_INTENT_RE.test(raw)) {
+    for (const lang of Object.keys(LANG_KEYWORDS)) {
+      for (const kw of LANG_KEYWORDS[lang]) {
+        if (kw && (raw.includes(kw) || lower.includes(kw.toLowerCase()))) {
+          if (lang !== currentLang) return lang;
+        }
+      }
+    }
+  }
+
+  // 2c. Bare language name with no surrounding intent verb — caller says
+  // "English." or "हिंदी।" as a one-word turn. Treat as a switch request
+  // unless they're already in that language.
+  if (raw.trim().split(/\s+/).length <= 3) {
+    for (const lang of Object.keys(LANG_KEYWORDS)) {
+      for (const kw of LANG_KEYWORDS[lang]) {
+        if (kw.length >= 4 && (raw.includes(kw) || lower.includes(kw.toLowerCase()))) {
+          if (lang !== currentLang) return lang;
+        }
+      }
+    }
+  }
+
   // 3. Script detection — caller is suddenly speaking in a different script.
-  // We require enough non-Latin characters to avoid false positives from a
-  // single emoji or stray glyph.
+  // Even one non-Latin glyph is a strong signal in a phone-call context:
+  // STT for a single Indic word like "ఆ" or "हाँ" only produces script in
+  // that language, never accidentally. Previously we required ≥3 chars,
+  // which missed every short acknowledgement and let the agent slide back
+  // to English mid-Telugu call.
   for (const s of SCRIPT_TO_LANG) {
-    if ((text.match(s.re) || []).length >= 3 && s.lang !== currentLang) {
+    if (s.re.test(text) && s.lang !== currentLang) {
       return s.lang;
     }
   }

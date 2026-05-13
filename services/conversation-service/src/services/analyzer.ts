@@ -31,6 +31,10 @@ export interface AnalysisResult {
     email?: string;
     alt_phone?: string;
     company?: string;
+    // Specific to education / admissions campaigns: the university or
+    // college the caller named as their preferred choice. Surfaces in the
+    // CRM lead so the team knows which institution to follow up about.
+    interested_university?: string;
   };
   lead_score?: string;
   conversion_probability?: string;
@@ -226,7 +230,8 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "customer_name": "" | extracted,
     "email": "" | extracted (only if explicitly stated, must contain @),
     "alt_phone": "" | extracted (E.164 if possible, only if explicitly stated as alternate/secondary contact),
-    "company": "" | extracted (employer or organization name only if stated)
+    "company": "" | extracted (employer or organization name only if stated),
+    "interested_university": "" | extracted (the specific university/college the caller named as their preferred choice — e.g. "Joy University", "SRM Chennai", "Marwadi University". Empty string if they didn't name one or said "any" / "I don't know yet")
   },
   "lead_score": "HOT" | "WARM" | "COLD" | "UNQUALIFIED",
   "conversion_probability": "HIGH" | "MEDIUM" | "LOW",
@@ -324,6 +329,10 @@ Rules:
         product_interest: asStr(data?.key_entities?.product_interest),
         appointment_time: asStr(data?.key_entities?.appointment_time),
         customer_name: asStr(data?.key_entities?.customer_name),
+        email: asStr(data?.key_entities?.email),
+        alt_phone: asStr(data?.key_entities?.alt_phone),
+        company: asStr(data?.key_entities?.company),
+        interested_university: asStr(data?.key_entities?.interested_university),
       },
       lead_score: asStr(data.lead_score),
       conversion_probability: asStr(data.conversion_probability),
@@ -471,18 +480,36 @@ async function createLeadFromAnalysis(
       || null;
 
     const ke = result.key_entities || {};
-    // Best-effort name split. Falls back to "Caller (last 4 digits of phone)"
-    // so the CRM row still has identifying info when the agent couldn't get a name.
+
+    // Auto-lead gate: only create a CRM lead when the caller actually showed
+    // interest AND volunteered the three pieces of identifying info — name,
+    // email, mobile. Prevents the CRM from filling up with empty "Caller 1234"
+    // placeholder rows for hang-ups and not-interested calls.
     const rawName = (ke.customer_name || '').trim();
-    let first_name = '', last_name = '';
-    if (rawName) {
-      const parts = rawName.split(/\s+/);
-      first_name = parts[0];
-      last_name = parts.slice(1).join(' ') || '-';
-    } else {
-      first_name = prospectPhone ? `Caller ${String(prospectPhone).slice(-4)}` : 'Caller';
-      last_name = '-';
+    const rawEmail = (ke.email || '').trim();
+    const rawAltPhone = (ke.alt_phone || '').trim();
+    const validEmail = rawEmail.includes('@') && rawEmail.includes('.');
+    const mobile = rawAltPhone || prospectPhone || '';
+    const interested =
+      ['HOT', 'WARM'].includes(String(result.lead_score || '').toUpperCase()) ||
+      (typeof result.interest_level === 'number' && result.interest_level >= 50) ||
+      outcome.includes('qualified') ||
+      outcome.includes('appointment') ||
+      outcome.includes('demo');
+    if (!interested) {
+      console.info(`[analyzer] auto-lead skipped — caller not interested (conv=${conversationId})`);
+      return;
     }
+    if (!rawName || !validEmail || !mobile) {
+      console.info(
+        `[analyzer] auto-lead skipped — incomplete contact info (conv=${conversationId}, name=${!!rawName}, email=${validEmail}, phone=${!!mobile})`,
+      );
+      return;
+    }
+
+    const parts = rawName.split(/\s+/);
+    const first_name = parts[0];
+    const last_name = parts.slice(1).join(' ') || '-';
 
     const status = outcomeToStatus(result.call_outcome || result.outcome);
     const score = leadScoreToInt(result.lead_score, result.interest_level || 0);
@@ -499,8 +526,8 @@ async function createLeadFromAnalysis(
     const leadPayload = {
       first_name,
       last_name,
-      email: (ke.email || '').includes('@') ? ke.email : null,
-      phone: prospectPhone,
+      email: rawEmail,
+      phone: mobile,
       company: ke.company || null,
       source,
       status,
@@ -514,6 +541,10 @@ async function createLeadFromAnalysis(
         budget: ke.budget || null,
         timeline: ke.timeline || null,
         product_interest: ke.product_interest || null,
+        // Campaign capture: which specific university/college the caller named.
+        // Surfaces in the CRM lead's View modal so the team knows what to
+        // pitch in the follow-up.
+        interested_university: ke.interested_university || null,
         appointment_time: ke.appointment_time || null,
         objections: result.objections || [],
         call_outcome: result.call_outcome || result.outcome,
@@ -550,28 +581,36 @@ async function createLeadFromAnalysis(
       );
     } catch (_e) { /* non-fatal */ }
 
-    // Schedule callback appointment if analyzer flagged follow-up. Tied to
-    // both the lead and the originating conversation for traceability.
-    if (result.follow_up_required) {
-      const when = parseFollowUpTime(result.recommended_follow_up_time || ke.appointment_time);
-      if (when) {
-        try {
-          await fetch(`${config.crmServiceUrl}/appointments`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
-            body: JSON.stringify({
-              lead_id: leadId,
-              title: 'Callback (auto-scheduled from previous call)',
-              scheduled_at: when.toISOString(),
-              duration_minutes: 15,
-              notes: result.follow_up_reason || result.next_best_action || '',
-              conversation_id: conversationId,
-            }),
-          });
-        } catch (apptErr: any) {
-          console.warn(`[analyzer] appointment POST failed: ${apptErr.message}`);
-        }
-      }
+    // Schedule callback appointment for every interested lead. The interest
+    // gate above already ran (we only reach this code for HOT/WARM / 50+
+    // interest), so by definition we want a follow-up scheduled. The LLM
+    // may or may not have set follow_up_required — if it didn't, we still
+    // book the callback at a sensible default time. The agent never decides
+    // "skip the follow-up for this interested caller"; that's a CRM-side
+    // decision the team can override after the fact.
+    const followTimeRaw = result.recommended_follow_up_time || ke.appointment_time || 'tomorrow 10:00 AM';
+    const when = parseFollowUpTime(followTimeRaw) || (() => {
+      // Hard default: next business day at 10am local.
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      d.setHours(10, 0, 0, 0);
+      return d;
+    })();
+    try {
+      await fetch(`${config.crmServiceUrl}/appointments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+        body: JSON.stringify({
+          lead_id: leadId,
+          title: 'Callback (auto-scheduled from interested caller)',
+          scheduled_at: when.toISOString(),
+          duration_minutes: 15,
+          notes: result.follow_up_reason || result.next_best_action || result.short_summary || '',
+          conversation_id: conversationId,
+        }),
+      });
+    } catch (apptErr: any) {
+      console.warn(`[analyzer] appointment POST failed: ${apptErr.message}`);
     }
   } catch (err: any) {
     console.warn(`[analyzer] createLeadFromAnalysis error: ${err.message}`);

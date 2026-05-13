@@ -31,6 +31,11 @@ export function CampaignDetailPage() {
   const [concurrencyDraft, setConcurrencyDraft] = useState<number>(1);
   const [editingSchedule, setEditingSchedule] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<string>(''); // datetime-local format YYYY-MM-DDTHH:MM
+  // Per-row selection state for the targets list. lastClickedIdx powers
+  // shift-click range selection across visible rows.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [lastClickedIdx, setLastClickedIdx] = useState<number | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const reload = async () => {
     if (!id) return;
@@ -70,6 +75,75 @@ export function CampaignDetailPage() {
     if (!id) return;
     try { setCampaign(await campaignApi.pause(id)); } catch (e: any) { setError(e?.message); }
   };
+
+  // Click handler with shift-range support over the currently displayed
+  // target rows. Plain click toggles one; shift+click selects/extends from
+  // the previously-clicked row to this one inclusive.
+  const handleSelectRow = (targetId: string, idx: number, shiftKey: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (shiftKey && lastClickedIdx !== null) {
+        const [lo, hi] = lastClickedIdx <= idx ? [lastClickedIdx, idx] : [idx, lastClickedIdx];
+        const turningOn = !prev.has(targetId);
+        for (let i = lo; i <= hi; i++) {
+          const tid = targets[i]?.id;
+          if (!tid) continue;
+          if (turningOn) next.add(tid); else next.delete(tid);
+        }
+      } else {
+        if (next.has(targetId)) next.delete(targetId); else next.add(targetId);
+      }
+      return next;
+    });
+    setLastClickedIdx(idx);
+  };
+
+  const handleToggleSelectAll = () => {
+    if (selectedIds.size === targets.length && targets.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(targets.map((t) => t.id)));
+    }
+  };
+
+  // Call only the selected targets — the rest go EXCLUDED so the campaign
+  // worker skips them. After the flip, auto-start (or resume) the campaign
+  // so the user doesn't have to do a second click.
+  const handleCallOnlySelected = async () => {
+    if (!id || selectedIds.size === 0) return;
+    setBulkBusy(true); setError(null); setInfo(null);
+    try {
+      const ids = Array.from(selectedIds);
+      const r = await campaignApi.bulkTargetAction(id, 'exclude_others', ids);
+      setInfo(`Calling only ${ids.length} selected · ${r.updated} other target${r.updated === 1 ? '' : 's'} excluded`);
+      // Kick the campaign so the worker picks up the kept rows.
+      if (campaign?.status !== 'RUNNING') {
+        try { setCampaign(await campaignApi.start(id)); } catch { /* swallow */ }
+      }
+      await reload();
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'Bulk action failed');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const handleIncludeAll = async () => {
+    if (!id) return;
+    setBulkBusy(true); setError(null); setInfo(null);
+    try {
+      const r = await campaignApi.bulkTargetAction(id, 'include_all');
+      setInfo(`Re-included ${r.updated} previously excluded target${r.updated === 1 ? '' : 's'}`);
+      setSelectedIds(new Set());
+      await reload();
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'Bulk action failed');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const excludedCount = targets.filter((t) => t.status === 'EXCLUDED').length;
 
   // UTC ISO → "YYYY-MM-DDTHH:MM" in the campaign's timezone, ready for the
   // datetime-local input. Returns empty string when the campaign has no
@@ -391,48 +465,98 @@ export function CampaignDetailPage() {
 
       {/* Targets list — each row expandable to reveal recording + transcript + analysis */}
       <Card padding={false} className="shadow-card">
-        <CardHeader className="px-4 pt-4" title="Contacts" subtitle={`${targets.length} contact${targets.length === 1 ? '' : 's'} · click any row to see recording, transcript, and AI analysis`} />
+        <CardHeader className="px-4 pt-4" title="Contacts" subtitle={`${targets.length} contact${targets.length === 1 ? '' : 's'} · click a checkbox to select, shift-click to select a range · click any row to see recording, transcript, AI analysis`} />
+        {/* Selection toolbar — sticky-feeling action bar when ≥1 row is selected */}
+        {(selectedIds.size > 0 || excludedCount > 0) && (
+          <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 bg-primary-50/70 border-y border-primary-100 text-sm">
+            {selectedIds.size > 0 && (
+              <>
+                <span className="text-primary-900 font-medium">{selectedIds.size} selected</span>
+                <Button variant="primary" onClick={handleCallOnlySelected} disabled={bulkBusy}>
+                  {bulkBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  Call only selected ({selectedIds.size})
+                </Button>
+                <button onClick={() => setSelectedIds(new Set())} disabled={bulkBusy}
+                  className="text-xs text-primary-700 underline hover:text-primary-900">Clear selection</button>
+              </>
+            )}
+            {excludedCount > 0 && (
+              <Button variant="outline" onClick={handleIncludeAll} disabled={bulkBusy}>
+                <RefreshCw className="h-4 w-4" /> Reset · re-include {excludedCount} excluded
+              </Button>
+            )}
+          </div>
+        )}
         {targets.length === 0 ? (
           <div className="text-center py-10 text-sm text-gray-400">No contacts yet. Add some above to get started.</div>
         ) : (
           <div className="divide-y divide-gray-100">
             {/* Header row */}
             <div className="hidden md:grid grid-cols-12 gap-3 px-4 py-2 bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500 font-medium">
+              <div className="col-span-1 flex items-center">
+                <input
+                  type="checkbox"
+                  aria-label="Select all"
+                  checked={selectedIds.size === targets.length && targets.length > 0}
+                  ref={(el) => { if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < targets.length; }}
+                  onChange={handleToggleSelectAll}
+                  className="rounded border-gray-300 text-primary-600"
+                />
+              </div>
               <div className="col-span-3">Contact</div>
               <div className="col-span-2">Status</div>
               <div className="col-span-2">Outcome</div>
               <div className="col-span-1 text-center">Attempts</div>
-              <div className="col-span-3">Last attempt</div>
+              <div className="col-span-2">Last attempt</div>
               <div className="col-span-1 text-right">View</div>
             </div>
-            {targets.map((t) => {
+            {targets.map((t, idx) => {
               const isOpen = expandedId === t.id;
+              const isSelected = selectedIds.has(t.id);
+              const isExcluded = t.status === 'EXCLUDED';
               return (
-                <div key={t.id} className={isOpen ? 'bg-primary-50/30' : 'hover:bg-gray-50/60 transition-colors'}>
-                  <button
-                    type="button"
-                    onClick={() => toggleExpand(t.id)}
-                    className="w-full grid grid-cols-1 md:grid-cols-12 gap-3 px-4 py-3 text-left items-center"
-                  >
-                    <div className="md:col-span-3 flex items-center gap-2 min-w-0">
-                      {isOpen ? <ChevronDown className="h-4 w-4 text-primary-600 flex-shrink-0" /> : <ChevronRight className="h-4 w-4 text-gray-400 flex-shrink-0" />}
-                      <div className="min-w-0">
-                        <div className="font-mono text-sm text-gray-900">{t.phone_number}</div>
-                        {t.name && <div className="text-xs text-gray-500 truncate">{t.name}</div>}
+                <div key={t.id} className={
+                  isExcluded ? 'bg-gray-50/80 opacity-60'
+                  : isSelected ? 'bg-primary-50/50'
+                  : isOpen ? 'bg-primary-50/30'
+                  : 'hover:bg-gray-50/60 transition-colors'
+                }>
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3 px-4 py-3 items-center">
+                    <div className="md:col-span-1 flex items-center">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${t.phone_number}`}
+                        checked={isSelected}
+                        onClick={(e) => { e.stopPropagation(); handleSelectRow(t.id, idx, (e as React.MouseEvent).shiftKey); }}
+                        onChange={() => { /* handled by onClick */ }}
+                        className="rounded border-gray-300 text-primary-600"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleExpand(t.id)}
+                      className="md:col-span-11 grid grid-cols-1 md:grid-cols-11 gap-3 text-left items-center"
+                    >
+                      <div className="md:col-span-3 flex items-center gap-2 min-w-0">
+                        {isOpen ? <ChevronDown className="h-4 w-4 text-primary-600 flex-shrink-0" /> : <ChevronRight className="h-4 w-4 text-gray-400 flex-shrink-0" />}
+                        <div className="min-w-0">
+                          <div className="font-mono text-sm text-gray-900">{t.phone_number}</div>
+                          {t.name && <div className="text-xs text-gray-500 truncate">{t.name}</div>}
+                        </div>
                       </div>
-                    </div>
-                    <div className="md:col-span-2"><StatusBadge status={t.status.toLowerCase()} /></div>
-                    <div className="md:col-span-2 text-xs text-gray-600">{t.outcome || '—'}</div>
-                    <div className="md:col-span-1 md:text-center text-sm text-gray-700">{t.attempts}</div>
-                    <div className="md:col-span-3 text-xs text-gray-500">
-                      {t.last_attempt_at ? new Date(t.last_attempt_at).toLocaleString() : '—'}
-                    </div>
-                    <div className="md:col-span-1 md:text-right">
-                      <span className="inline-flex items-center gap-1 text-xs font-medium text-primary-700">
-                        {isOpen ? 'Hide' : 'View'}
-                      </span>
-                    </div>
-                  </button>
+                      <div className="md:col-span-2"><StatusBadge status={t.status.toLowerCase()} /></div>
+                      <div className="md:col-span-2 text-xs text-gray-600">{t.outcome || '—'}</div>
+                      <div className="md:col-span-1 md:text-center text-sm text-gray-700">{t.attempts}</div>
+                      <div className="md:col-span-2 text-xs text-gray-500">
+                        {t.last_attempt_at ? new Date(t.last_attempt_at).toLocaleString() : '—'}
+                      </div>
+                      <div className="md:col-span-1 md:text-right">
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-primary-700">
+                          {isOpen ? 'Hide' : 'View'}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
                   {isOpen && (
                     <div className="px-4 pb-5 pt-1 border-t border-gray-100">
                       <TargetCallPanel target={t} />
