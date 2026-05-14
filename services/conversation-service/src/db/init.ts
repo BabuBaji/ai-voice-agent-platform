@@ -85,6 +85,136 @@ export async function initDatabase(pool: Pool): Promise<void> {
         WHERE status = 'PENDING';
       CREATE INDEX IF NOT EXISTS idx_crm_retry_conv
         ON crm_lead_retry_queue (conversation_id);
+
+      -- Post-call lead module tables (admissions-focused, but kept generic
+      -- enough to work for any campaign vertical). Lives in conversation_db
+      -- so the analyzer can write to them in the same transaction as it
+      -- updates conversations.analysis.
+      --
+      -- post_call_lead_analysis: audit row written every time the post-call
+      -- processor runs on a conversation. Lets us see what was extracted,
+      -- with what confidence, on which run (re-analyze produces a new row,
+      -- so we can compare extractions over time).
+      CREATE TABLE IF NOT EXISTS post_call_lead_analysis (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        conversation_id UUID NOT NULL,
+        call_id UUID,
+        campaign_id UUID,
+        lead_id UUID,                    -- nullable until CRM lead actually created
+        lead_status VARCHAR(40),         -- HOT_INTERESTED / INTERESTED / etc
+        interest_level VARCHAR(20),      -- hot / warm / cold / not_interested
+        confidence_score NUMERIC(3,2),   -- 0.00–1.00
+        analysis_json JSONB NOT NULL,
+        missing_fields TEXT[],
+        review_reasons TEXT[],
+        processor_version VARCHAR(20) DEFAULT 'v1',
+        processed_at TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_pca_tenant ON post_call_lead_analysis (tenant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_pca_conv ON post_call_lead_analysis (conversation_id);
+      CREATE INDEX IF NOT EXISTS idx_pca_status ON post_call_lead_analysis (lead_status, created_at DESC);
+
+      -- follow_up_tasks: explicit task records the sales team works from.
+      -- Replaces the implicit-CRM-appointment pattern that didn't have
+      -- priority, task_type, or proper assignment fields.
+      CREATE TABLE IF NOT EXISTS follow_up_tasks (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        lead_id UUID,                    -- nullable when task created before lead row exists
+        conversation_id UUID,
+        assigned_to UUID,                -- counselor id
+        task_type VARCHAR(40) NOT NULL DEFAULT 'call',
+                                         -- 'call' | 'whatsapp' | 'email' | 'counselor_meeting' | 'campus_visit'
+        scheduled_at TIMESTAMPTZ NOT NULL,
+        priority VARCHAR(10) NOT NULL DEFAULT 'normal',  -- 'urgent' | 'high' | 'normal' | 'low'
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                                         -- 'pending' | 'in_progress' | 'done' | 'cancelled' | 'overdue'
+        notes TEXT,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_followup_tenant ON follow_up_tasks (tenant_id, scheduled_at);
+      CREATE INDEX IF NOT EXISTS idx_followup_assigned ON follow_up_tasks (assigned_to, status);
+      CREATE INDEX IF NOT EXISTS idx_followup_lead ON follow_up_tasks (lead_id);
+      CREATE INDEX IF NOT EXISTS idx_followup_pending ON follow_up_tasks (status, scheduled_at) WHERE status = 'pending';
+
+      -- communication_logs: every email / WhatsApp / SMS we attempt to send
+      -- on a lead's behalf. Tracks provider response + delivery status. The
+      -- WhatsApp provider is generic for now (stub) so this table is the
+      -- contract every concrete provider must write to.
+      CREATE TABLE IF NOT EXISTS communication_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        lead_id UUID,
+        conversation_id UUID,
+        channel VARCHAR(20) NOT NULL,    -- 'email' | 'whatsapp' | 'sms'
+        provider VARCHAR(40),            -- 'smtp' | 'sendgrid' | 'twilio_whatsapp' | 'meta_cloud' | 'stub'
+        recipient VARCHAR(255) NOT NULL,
+        subject TEXT,
+        message TEXT,
+        template_id VARCHAR(64),
+        attachments JSONB,               -- [{name, url}] for brochure attachments
+        status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                                         -- 'queued' | 'sent' | 'delivered' | 'read' | 'failed'
+        provider_response JSONB,
+        last_error TEXT,
+        sent_at TIMESTAMPTZ,
+        delivered_at TIMESTAMPTZ,
+        read_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_comm_tenant ON communication_logs (tenant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_comm_lead ON communication_logs (lead_id);
+      CREATE INDEX IF NOT EXISTS idx_comm_channel_status ON communication_logs (channel, status);
+
+      -- counselors: lookup for assignment rules. Simple v1 — round-robin
+      -- across rows where availability_status='available'. Future: weighted
+      -- by language match / college match / current task count.
+      CREATE TABLE IF NOT EXISTS counselors (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        name VARCHAR(120) NOT NULL,
+        mobile VARCHAR(20),
+        email VARCHAR(255),
+        languages TEXT[],                -- ['te-IN','en-IN']
+        assigned_colleges TEXT[],
+        assigned_courses TEXT[],
+        availability_status VARCHAR(20) DEFAULT 'available',
+                                         -- 'available' | 'busy' | 'offline'
+        active_task_count INTEGER DEFAULT 0,
+        last_assigned_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_counselor_tenant ON counselors (tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_counselor_avail ON counselors (tenant_id, availability_status) WHERE availability_status = 'available';
+
+      -- college_brochures: cached brochure catalogue. Populated by the
+      -- brochure-search helper (Tavily) or admin-uploaded. Only verified
+      -- entries are auto-sent; unverified ones flag a review task.
+      CREATE TABLE IF NOT EXISTS college_brochures (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        college_name VARCHAR(255) NOT NULL,
+        course VARCHAR(120),             -- 'BTech', 'BBA', etc
+        branch VARCHAR(120),             -- 'CSE', 'AI&DS', null for "any branch"
+        brochure_url TEXT,               -- official public URL
+        file_url TEXT,                   -- our local cached copy (if we mirrored it)
+        source VARCHAR(40),              -- 'admin_upload' | 'tavily_search' | 'manual_entry'
+        source_url TEXT,                 -- where we found the link
+        verified_status VARCHAR(20) DEFAULT 'unverified',
+                                         -- 'verified' | 'unverified' | 'rejected'
+        verified_by UUID,
+        verified_at TIMESTAMPTZ,
+        fetched_at TIMESTAMPTZ DEFAULT NOW(),
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_brochure_college ON college_brochures (tenant_id, college_name);
+      CREATE INDEX IF NOT EXISTS idx_brochure_verified ON college_brochures (verified_status);
     `);
     logger.info('Conversation service database tables initialized');
   } finally {

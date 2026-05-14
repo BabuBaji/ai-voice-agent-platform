@@ -326,40 +326,92 @@ function ViewLeadModal({ lead, onClose, onSendBrochure }: {
   const notInterested = lead.status === 'lost' || (lead.tags || []).includes('not_interested');
   const followUpDue = !!cf.recommended_follow_up_time || (lead.tags || []).includes('callback_requested');
 
-  const rows: Array<{ label: string; value: React.ReactNode; icon?: React.ReactNode }> = [
-    { label: 'Name', value: lead.name },
-    { label: 'Mobile', icon: <Phone className="h-3.5 w-3.5 text-gray-400" />, value: lead.phone ? (
+  // Admissions-specific block — only renders rows when the post-call analyzer
+  // actually captured the field. Each row labelled `admission` for visual
+  // grouping (the modal renders all rows in order, with a section divider
+  // injected when the section name changes).
+  type Row = { label: string; value: React.ReactNode; icon?: React.ReactNode; section?: 'contact' | 'admission' | 'meta' };
+  const dash = <span className="text-gray-400 italic">—</span>;
+  const missing = <span className="text-gray-400 italic">not captured</span>;
+  const showVal = (v: any, fallback: React.ReactNode = missing) => (v && String(v).trim() ? <span className="text-gray-800">{String(v)}</span> : fallback);
+
+  const admissionRows: Row[] = [];
+  if (cf.interested_university) admissionRows.push({ section: 'admission', label: 'Interested University', value: <span className="font-medium text-primary-700">{cf.interested_university}</span> });
+  if (cf.interested_course) admissionRows.push({ section: 'admission', label: 'Course', value: showVal(cf.interested_course) });
+  if (cf.interested_branch) admissionRows.push({ section: 'admission', label: 'Branch', value: showVal(cf.interested_branch) });
+  if (cf.preferred_location) admissionRows.push({ section: 'admission', label: 'Preferred Location', value: showVal(cf.preferred_location) });
+  if (cf.intermediate_percentage) admissionRows.push({ section: 'admission', label: 'Intermediate %', value: <span className="font-mono text-gray-800">{cf.intermediate_percentage}</span> });
+  if (cf.intermediate_marks) admissionRows.push({ section: 'admission', label: 'Intermediate Marks', value: showVal(cf.intermediate_marks) });
+  if (cf.eamcet_rank) admissionRows.push({ section: 'admission', label: 'EAMCET Rank', value: <span className="font-mono text-gray-800">{cf.eamcet_rank}</span> });
+  if (cf.jee_rank) admissionRows.push({ section: 'admission', label: 'JEE Rank', value: <span className="font-mono text-gray-800">{cf.jee_rank}</span> });
+  if (cf.diploma_status) admissionRows.push({ section: 'admission', label: 'Diploma Status', value: showVal(cf.diploma_status) });
+  if (cf.category) admissionRows.push({ section: 'admission', label: 'Category', value: <Badge variant="outline">{cf.category}</Badge> });
+  if (cf.hostel_required) admissionRows.push({ section: 'admission', label: 'Hostel Required', value: showVal(cf.hostel_required) });
+  if (cf.parent_name) admissionRows.push({ section: 'admission', label: 'Parent Name', value: showVal(cf.parent_name) });
+  if (cf.parent_mobile) admissionRows.push({ section: 'admission', label: 'Parent Mobile', value: <a href={`tel:${cf.parent_mobile}`} className="font-mono text-gray-800 hover:text-primary-600">{cf.parent_mobile}</a> });
+  if (cf.budget) admissionRows.push({ section: 'admission', label: 'Budget', value: showVal(cf.budget) });
+
+  // Action signals (booleans the analyzer extracted from the conversation).
+  // Only render when ANY is true — empty action block is noise.
+  const actionSignals: Array<[string, boolean | undefined]> = [
+    ['Callback requested', cf.callback_required],
+    ['Counselor meeting requested', cf.counselor_meeting_required],
+    ['Brochure requested', cf.brochure_required],
+    ['WhatsApp opt-in', cf.whatsapp_required],
+    ['Email opt-in', cf.email_required],
+  ];
+  const activeSignals = actionSignals.filter(([, v]) => v === true);
+  if (activeSignals.length > 0) {
+    admissionRows.push({
+      section: 'admission',
+      label: 'Caller Asked For',
+      value: <div className="flex flex-wrap gap-1">{activeSignals.map(([k]) => <Badge key={k} variant="info">{k}</Badge>)}</div>,
+    });
+  }
+
+  // Review reasons surface when the post-call analyzer flagged something
+  // (missing email, invalid mobile format, low interest etc.).
+  const reviewReasons: string[] = Array.isArray(cf.review_reasons) ? cf.review_reasons : [];
+  if (reviewReasons.length > 0) {
+    admissionRows.push({
+      section: 'admission',
+      label: 'Needs review',
+      value: <div className="flex flex-wrap gap-1">{reviewReasons.map((r: string) => <Badge key={r} variant="warning">{r.replace(/_/g, ' ')}</Badge>)}</div>,
+    });
+  }
+
+  const rows: Row[] = [
+    { section: 'contact', label: 'Name', value: lead.name },
+    { section: 'contact', label: 'Mobile', icon: <Phone className="h-3.5 w-3.5 text-gray-400" />, value: lead.phone ? (
       <a href={`tel:${lead.phone}`} className="font-mono text-gray-800 hover:text-primary-600">{lead.phone}</a>
     ) : <span className="text-gray-400 italic">not provided</span> },
-    { label: 'Email', icon: <Mail className="h-3.5 w-3.5 text-gray-400" />, value: lead.email ? (
+    { section: 'contact', label: 'Email', icon: <Mail className="h-3.5 w-3.5 text-gray-400" />, value: lead.email ? (
       <a href={`mailto:${lead.email}`} className="text-gray-800 hover:text-primary-600">{lead.email}</a>
     ) : <span className="text-gray-400 italic">not provided</span> },
-    { label: 'Interested University',
-      value: cf.interested_university
-        ? <span className="font-medium text-primary-700">{cf.interested_university}</span>
-        : <span className="text-gray-400 italic">not captured</span>,
-    },
-    { label: 'Company', icon: <Building2 className="h-3.5 w-3.5 text-gray-400" />, value: lead.company || <span className="text-gray-400 italic">—</span> },
-    { label: 'Status', value: (
+    { section: 'contact', label: 'Company', icon: <Building2 className="h-3.5 w-3.5 text-gray-400" />, value: lead.company || dash },
+    { section: 'contact', label: 'City', value: cf.city || dash },
+    ...admissionRows,
+    { section: 'meta', label: 'Status', value: (
       <span className="inline-flex items-center gap-2">
         <StatusBadge status={lead.status} />
+        {cf.extended_lead_status && <Badge variant="info">{String(cf.extended_lead_status).replace(/_/g, ' ').toLowerCase()}</Badge>}
         {notInterested && <Badge variant="outline">not interested</Badge>}
         {followUpDue && <Badge variant="info">follow-up pending</Badge>}
       </span>
     ) },
-    { label: 'Call outcome', value: cf.call_outcome || <span className="text-gray-400 italic">—</span> },
-    { label: 'Follow-up time', value: cf.recommended_follow_up_time || <span className="text-gray-400 italic">—</span> },
-    { label: 'Follow-up reason', value: cf.follow_up_reason || <span className="text-gray-400 italic">—</span> },
-    { label: 'City', value: cf.city || <span className="text-gray-400 italic">—</span> },
-    { label: 'Source', value: <Badge variant="outline">{lead.source}</Badge> },
-    { label: 'Score', value: <span className="font-semibold text-gray-900">{lead.score}/100</span> },
-    { label: 'Value', value: lead.value > 0 ? formatCurrency(lead.value) : <span className="text-gray-400 italic">—</span> },
-    { label: 'Tags', value: lead.tags && lead.tags.length > 0 ? (
+    { section: 'meta', label: 'Call outcome', value: cf.call_outcome || dash },
+    { section: 'meta', label: 'Follow-up time', value: cf.recommended_follow_up_time || dash },
+    { section: 'meta', label: 'Follow-up reason', value: cf.follow_up_reason || dash },
+    { section: 'meta', label: 'Score', value: <span className="font-semibold text-gray-900">{lead.score}/100</span> },
+    ...(typeof cf.confidence_score === 'number' ? [{ section: 'meta' as const, label: 'AI Confidence', value: <span className="font-mono text-gray-800">{(cf.confidence_score * 100).toFixed(0)}%</span> }] : []),
+    { section: 'meta', label: 'Source', value: <Badge variant="outline">{lead.source}</Badge> },
+    { section: 'meta', label: 'Value', value: lead.value > 0 ? formatCurrency(lead.value) : dash },
+    { section: 'meta', label: 'Tags', value: lead.tags && lead.tags.length > 0 ? (
       <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <Badge key={t} variant="outline">{t}</Badge>)}</div>
-    ) : <span className="text-gray-400 italic">—</span> },
-    { label: 'Notes', value: lead.notes || <span className="text-gray-400 italic">—</span> },
-    { label: 'Created', value: <span className="text-gray-700">{formatDate(lead.createdAt)}</span> },
-    { label: 'Updated', value: <span className="text-gray-700">{formatDate(lead.updatedAt)}</span> },
+    ) : dash },
+    { section: 'meta', label: 'Notes', value: lead.notes || dash },
+    { section: 'meta', label: 'Created', value: <span className="text-gray-700">{formatDate(lead.createdAt)}</span> },
+    { section: 'meta', label: 'Updated', value: <span className="text-gray-700">{formatDate(lead.updatedAt)}</span> },
   ];
 
   return (
@@ -381,14 +433,34 @@ function ViewLeadModal({ lead, onClose, onSendBrochure }: {
         </div>
 
         <div className="px-6 py-5 overflow-y-auto flex-1 space-y-2">
-          {rows.map((r) => (
-            <div key={r.label} className="grid grid-cols-3 gap-3 py-1.5 border-b border-gray-50 last:border-0">
-              <div className="col-span-1 inline-flex items-center gap-1.5 text-xs uppercase font-medium text-gray-500">
-                {r.icon}{r.label}
-              </div>
-              <div className="col-span-2 text-sm text-gray-800">{r.value}</div>
-            </div>
-          ))}
+          {(() => {
+            const out: React.ReactNode[] = [];
+            let prevSection: string | undefined;
+            const SECTION_TITLES: Record<string, string> = {
+              contact: 'Contact',
+              admission: 'Admissions Details',
+              meta: 'Lead Meta',
+            };
+            for (const r of rows) {
+              if (r.section && r.section !== prevSection) {
+                out.push(
+                  <div key={`__section_${r.section}`} className="pt-3 first:pt-0 mt-1 first:mt-0">
+                    <h3 className="text-[11px] uppercase tracking-wide font-semibold text-gray-500 mb-1">{SECTION_TITLES[r.section]}</h3>
+                  </div>
+                );
+                prevSection = r.section;
+              }
+              out.push(
+                <div key={r.label} className="grid grid-cols-3 gap-3 py-1.5 border-b border-gray-50 last:border-0">
+                  <div className="col-span-1 inline-flex items-center gap-1.5 text-xs uppercase font-medium text-gray-500">
+                    {r.icon}{r.label}
+                  </div>
+                  <div className="col-span-2 text-sm text-gray-800">{r.value}</div>
+                </div>
+              );
+            }
+            return out;
+          })()}
         </div>
 
         <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-2">

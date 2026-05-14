@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { pool } from '../index';
 import { analyzeConversation } from '../services/analyzer';
+import { processCallEnd } from '../services/postCallProcessor';
 
 export const conversationRouter = Router();
 
@@ -285,6 +286,48 @@ conversationRouter.post('/:id/analyze', async (req: Request, res: Response, next
   }
 });
 
+// POST /:id/post-call/process — manually trigger the full post-call pipeline
+// (analyzer + audit row + follow-up task scheduling). Useful for re-running
+// a call's processing without manually clicking through the call detail UI.
+// Returns the lead status and CRM lead id when successful.
+conversationRouter.post('/:id/post-call/process', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const { id } = req.params;
+    const out = await processCallEnd(id, tenantId);
+    res.json(out);
+  } catch (err: any) {
+    if (err?.message === 'Conversation not found') {
+      res.status(404).json({ error: 'Not Found', message: err.message });
+      return;
+    }
+    next(err);
+  }
+});
+
+// GET /:id/post-call/analysis — return all audit rows for this conversation
+// (one row per processor run). Drives the call-detail "Post-call analysis
+// history" panel.
+conversationRouter.get('/:id/post-call/analysis', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const { id } = req.params;
+    const r = await pool.query(
+      `SELECT id, lead_status, interest_level, confidence_score, lead_id,
+              missing_fields, review_reasons, analysis_json, processor_version, processed_at
+       FROM post_call_lead_analysis
+       WHERE conversation_id = $1 AND tenant_id = $2
+       ORDER BY processed_at DESC`,
+      [id, tenantId],
+    );
+    res.json({ data: r.rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH /:id/end — mark a conversation finished. Used by telephony adapter +
 // ai-runtime web-call when their stream closes, so rows don't get stuck on
 // status='ACTIVE' forever. Service-to-service call: tenant_id is in header.
@@ -331,20 +374,21 @@ conversationRouter.patch('/:id/end', async (req: Request, res: Response, next: N
       return;
     }
 
-    // Fire-and-forget post-call analysis. Drives:
-    //   - conversations.analysis JSONB (summary, lead_score, key_entities, etc.)
-    //   - createLeadFromAnalysis → CRM lead + auto-scheduled callback appointment
-    //   - recordCallBilling
-    // Previously this only ran when a user manually opened the call detail page
-    // and clicked "Analyze", so bulk-campaign leads never reached the CRM. We
-    // skip when duration_seconds is 0 (instant hang-ups have no transcript) so
-    // we don't waste an LLM call on ringer-only failures. Errors are swallowed
-    // inside the helper — the call-end response must succeed regardless.
+    // Fire-and-forget post-call processor. Runs the full admissions-module
+    // pipeline:
+    //   - analyzer → analysis JSONB + CRM lead (via createLeadFromAnalysis)
+    //   - audit row in post_call_lead_analysis
+    //   - follow_up_tasks scheduling based on extended lead_status
+    //   - counselor assignment (round-robin)
+    //
+    // Errors are caught inside the processor and recorded as a failed audit
+    // row — the call-end response must succeed regardless. Skipped for
+    // sub-5-sec calls (ringers/hang-ups have no usable transcript).
     const hasUsableDuration = (data.duration_seconds || result.rows[0].duration_seconds || 0) > 5;
     if (hasUsableDuration) {
       setImmediate(() => {
-        analyzeConversation(id, tenantId).catch((err: any) => {
-          console.warn(`[analyzer] auto-run on call-end failed (conv=${id}): ${err?.message || err}`);
+        processCallEnd(id, tenantId).catch((err: any) => {
+          console.warn(`[post-call] processor crashed (conv=${id}): ${err?.message || err}`);
         });
       });
     }

@@ -1937,6 +1937,45 @@ async function onStop(session: StreamSession): Promise<void> {
     try { session.sarvamStt.close(); } catch { /* ignore */ }
     session.sarvamStt = null;
   }
+
+  // Bridge the in-memory slot store → conversations.metadata so the
+  // post-call analyzer has access to caller-CONFIRMED captures (name,
+  // mobile, email, course, university, etc.). Without this, the analyzer
+  // re-extracts from the raw transcript via LLM and routinely returns
+  // empty strings for fields the caller had already verbally confirmed —
+  // the slot store's values are higher-confidence because they passed
+  // through readback + yes-confirmation gates during the call.
+  //
+  // Stored under metadata.captured_slots so it's clearly the post-call
+  // bridge data and doesn't collide with the campaign overlay keys.
+  if (session.conversationId && Object.keys(session.collectedFields).length > 0) {
+    try {
+      await pool.query(
+        `UPDATE conversations
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+         WHERE id = $2 AND tenant_id = $3`,
+        [
+          JSON.stringify({ captured_slots: session.collectedFields }),
+          session.conversationId,
+          session.tenantId,
+        ],
+      );
+      logger.info(
+        {
+          callSid: session.callSid,
+          conv: session.conversationId,
+          slots: Object.keys(session.collectedFields),
+        },
+        'onStop: persisted slot store to conversations.metadata.captured_slots',
+      );
+    } catch (err: any) {
+      logger.warn(
+        { callSid: session.callSid, err: err?.message },
+        'onStop: failed to persist slot store',
+      );
+    }
+  }
+
   // Write the stereo WAV and update calls.recording_url — fire-and-forget
   // so close latency doesn't block Plivo's stream-teardown.
   finalizeRecording(session).catch(() => { /* logged inside */ });

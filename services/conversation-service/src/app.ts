@@ -10,6 +10,7 @@ import { webCallRouter } from './routes/webCalls';
 import { webCallInternalRouter } from './routes/webCallsInternal';
 import { userReportRouter, adminReportRouter } from './routes/support';
 import { publicContactRouter, adminContactRouter } from './routes/contact';
+import { postCallLeadRouter } from './routes/postCallLead';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -38,6 +39,11 @@ app.use('/api/v1/admin/reports', adminReportRouter);
 app.use('/api/v1/contact', publicContactRouter);
 app.use('/api/v1/admin/contact-requests', adminContactRouter);
 app.use('/api/v1', translateRouter);
+// Post-call lead module: follow-up tasks, counselors, college brochures,
+// communication logs, manual email/WhatsApp triggers. Mounted at the
+// generic /api/v1 root because the router defines its own path prefixes
+// (/follow-ups, /counselors, /college-brochures, /communications/...).
+app.use('/api/v1', postCallLeadRouter);
 
 app.use(errorHandler);
 

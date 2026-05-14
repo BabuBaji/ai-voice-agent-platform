@@ -46,10 +46,13 @@ function rowToLead(row: any): Lead {
     createdAt: row.created_at || row.createdAt || new Date().toISOString(),
     updatedAt: row.updated_at || row.updatedAt || new Date().toISOString(),
     // Pass through campaign-extracted custom fields so the View modal can
-    // surface them without re-fetching analysis. Lead type carries these as
-    // a free-form object so the UI doesn't have to widen every time the
-    // analyzer adds a new field.
+    // surface them without re-fetching analysis. We forward the whole cf
+    // blob — the lead modal renders only what's present, so adding new
+    // analyzer fields no longer requires editing this mapper.
     customFields: {
+      ...cf,
+      // Explicit defaults for the small set of fields the modal uses
+      // unconditionally — ensures `'' || dash` renders cleanly.
       interested_university: cf.interested_university || '',
       product_interest: cf.product_interest || '',
       city: cf.city || '',

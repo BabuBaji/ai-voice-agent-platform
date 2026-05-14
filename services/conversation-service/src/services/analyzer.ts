@@ -35,7 +35,48 @@ export interface AnalysisResult {
     // college the caller named as their preferred choice. Surfaces in the
     // CRM lead so the team knows which institution to follow up about.
     interested_university?: string;
+    // Admissions-specific extractions (post-call lead module v1).
+    // All optional — the LLM emits empty strings when the caller didn't
+    // volunteer the field, and createLeadFromAnalysis just won't fill
+    // those CRM columns.
+    interested_course?: string;        // 'BTech', 'BBA', 'Polytechnic', etc.
+    interested_branch?: string;        // 'CSE', 'AI&DS', 'ECE', 'Mechanical'
+    preferred_location?: string;       // 'Chennai', 'Hyderabad', 'anywhere in south India'
+    intermediate_marks?: string;       // raw spoken value (e.g. '950/1000')
+    intermediate_percentage?: string;  // e.g. '95%' or '95.5'
+    eamcet_rank?: string;
+    jee_rank?: string;
+    diploma_status?: string;           // 'completed' | 'pursuing' | 'not applicable'
+    category?: string;                 // 'OC' | 'BC' | 'SC' | 'ST' | 'EWS' | 'general'
+    hostel_required?: string;          // 'yes' | 'no' | 'unsure'
+    parent_name?: string;
+    parent_mobile?: string;
+    // Post-call action signals (booleans the LLM emits as strings sometimes).
+    callback_required?: string;        // 'true' | 'false'
+    counselor_meeting_required?: string;
+    brochure_required?: string;
+    whatsapp_required?: string;
+    email_required?: string;
   };
+  /**
+   * Extended lead status enum required by the admissions module spec.
+   * Set alongside `lead_score`. Driven by call_outcome + interest_level +
+   * extracted entities. The legacy CRM `status` column maps from this.
+   */
+  lead_status?:
+    | 'HOT_INTERESTED'
+    | 'INTERESTED'
+    | 'FOLLOW_UP_REQUIRED'
+    | 'NOT_INTERESTED'
+    | 'WRONG_NUMBER'
+    | 'NO_ANSWER'
+    | 'CALLBACK_SCHEDULED'
+    | 'COUNSELOR_MEETING_REQUIRED'
+    | 'BROCHURE_SENT';
+  /** 0-1 score the LLM emits expressing confidence in the captured fields. */
+  confidence_score?: number;
+  /** Fields the agent should have captured but didn't (mobile, name, etc.). */
+  missing_fields?: string[];
   lead_score?: string;
   conversion_probability?: string;
   next_best_action?: string;
@@ -157,7 +198,10 @@ function heuristicAnalyze(transcript: string, messages: Array<{ role: string; co
  */
 async function callSarvamForAnalysis(systemPrompt: string, transcript: string): Promise<any | null> {
   const apiKey = process.env.SARVAM_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) {
+    console.warn('[analyzer] callSarvamForAnalysis: SARVAM_API_KEY not set');
+    return null;
+  }
   try {
     const resp = await fetch('https://api.sarvam.ai/v1/chat/completions', {
       method: 'POST',
@@ -173,12 +217,25 @@ async function callSarvamForAnalysis(systemPrompt: string, transcript: string): 
         ],
         max_tokens: 1800,
         temperature: 0.2,
+        // Disable Sarvam-M's <think> reasoning block — without these flags
+        // the model wastes the entire max_tokens budget on internal reasoning
+        // and the analysis JSON never makes it out. Same flags we use in the
+        // live-call Sarvam path (services/telephony-adapter/.../sarvamSpeech.ts).
+        enable_thinking: false,
+        reasoning_effort: 'low',
       }),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      console.warn(`[analyzer] callSarvamForAnalysis: HTTP ${resp.status} - ${errBody.slice(0, 200)}`);
+      return null;
+    }
     const body = await resp.json() as any;
     let raw = body?.choices?.[0]?.message?.content || '';
-    if (!raw) return null;
+    if (!raw) {
+      console.warn('[analyzer] callSarvamForAnalysis: empty content from Sarvam');
+      return null;
+    }
 
     // Strip sarvam-m thinking blocks + JSON code fences.
     raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -188,13 +245,20 @@ async function callSarvamForAnalysis(systemPrompt: string, transcript: string): 
     if (raw.startsWith('```')) raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    try {
-      return JSON.parse(raw.slice(start, end + 1));
-    } catch {
+    if (start < 0 || end <= start) {
+      console.warn(`[analyzer] callSarvamForAnalysis: no JSON braces in response (raw preview: ${raw.slice(0, 200)})`);
       return null;
     }
-  } catch {
+    try {
+      const parsed = JSON.parse(raw.slice(start, end + 1));
+      console.info(`[analyzer] callSarvamForAnalysis: parsed OK (keys=${Object.keys(parsed).join(',')})`);
+      return parsed;
+    } catch (parseErr: any) {
+      console.warn(`[analyzer] callSarvamForAnalysis: JSON.parse failed: ${parseErr?.message} (raw: ${raw.slice(start, end + 1).slice(0, 200)})`);
+      return null;
+    }
+  } catch (err: any) {
+    console.warn(`[analyzer] callSarvamForAnalysis: threw: ${err?.message || err}`);
     return null;
   }
 }
@@ -231,8 +295,52 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "email": "" | extracted (only if explicitly stated, must contain @),
     "alt_phone": "" | extracted (E.164 if possible, only if explicitly stated as alternate/secondary contact),
     "company": "" | extracted (employer or organization name only if stated),
-    "interested_university": "" | extracted (the specific university/college the caller named as their preferred choice — e.g. "Joy University", "SRM Chennai", "Marwadi University". Empty string if they didn't name one or said "any" / "I don't know yet")
+    "interested_university": "" | extracted (the specific university/college the caller named as their preferred choice — e.g. "Joy University", "SRM Chennai", "Marwadi University". Empty string if they didn't name one or said "any" / "I don't know yet"),
+
+    // ===== ADMISSIONS-SPECIFIC FIELDS (post-call lead module v1) =====
+    // Extract these for B.Tech/B.E./Polytechnic/diploma admission calls.
+    // Empty string when the caller didn't volunteer the value — do NOT
+    // guess. These power the CRM lead's structured columns.
+    "interested_course": "" | extracted ("BTech" | "BE" | "BBA" | "Polytechnic" | "Diploma" | etc),
+    "interested_branch": "" | extracted ("CSE" | "AI&DS" | "ECE" | "Mechanical" | "Civil" | "Biotech" | etc),
+    "preferred_location": "" | extracted (city/state — "Chennai", "Hyderabad", "south India", "anywhere"),
+    "intermediate_marks": "" | extracted (raw value if caller said marks — e.g. "950 out of 1000", "950/1000"),
+    "intermediate_percentage": "" | extracted (e.g. "95%" or "95.5"; convert "ninety five percent" → "95%"),
+    "eamcet_rank": "" | extracted (digits only; "21,000" → "21000"),
+    "jee_rank": "" | extracted (digits only),
+    "diploma_status": "" | "completed" | "pursuing" | "not_applicable",
+    "category": "" | "OC" | "BC" | "SC" | "ST" | "EWS" | "general",
+    "hostel_required": "" | "yes" | "no" | "unsure",
+    "parent_name": "" | extracted (only if the caller explicitly named their parent),
+    "parent_mobile": "" | extracted (only if explicitly stated as parent's number),
+
+    // ===== POST-CALL ACTION SIGNALS =====
+    // Each is "true" or "false" as a string (NOT boolean — keeps the JSON
+    // shape stable). Drive the post-call automation:
+    //   callback_required → schedule follow_up_task type='call'
+    //   counselor_meeting_required → schedule type='counselor_meeting'
+    //   brochure_required → trigger brochure email
+    //   whatsapp_required → trigger WhatsApp send
+    //   email_required → trigger admission-details email
+    "callback_required": "" | "true" | "false",
+    "counselor_meeting_required": "" | "true" | "false",
+    "brochure_required": "" | "true" | "false",
+    "whatsapp_required": "" | "true" | "false",
+    "email_required": "" | "true" | "false"
   },
+  // Extended lead status — admissions module enum. Set this in addition to
+  // lead_score/outcome. The post-call processor maps this to a CRM status
+  // and uses it to decide what follow-up tasks to schedule.
+  "lead_status": "HOT_INTERESTED" | "INTERESTED" | "FOLLOW_UP_REQUIRED" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NO_ANSWER" | "CALLBACK_SCHEDULED" | "COUNSELOR_MEETING_REQUIRED" | "BROCHURE_SENT",
+  // Overall extraction confidence 0.00–1.00 (the LLM's own judgement on
+  // how reliably it parsed the caller's intent and details).
+  "confidence_score": 0.00 to 1.00 — number,
+  // List the critical fields the agent failed to capture, so the team
+  // knows what to ask on the follow-up. Valid values: "student_name",
+  // "mobile_number", "email", "interested_course", "interested_branch",
+  // "interested_college", "intermediate_percentage", "eamcet_rank".
+  // Empty array when nothing critical is missing.
+  "missing_fields": [],
   "lead_score": "HOT" | "WARM" | "COLD" | "UNQUALIFIED",
   "conversion_probability": "HIGH" | "MEDIUM" | "LOW",
   "next_best_action": "book_appointment" | "save_lead" | "schedule_callback" | "transfer_to_human" | "send_info" | "close_no_action" | "retry_later",
@@ -268,8 +376,19 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
 Rules:
 - Leave key_entities fields as empty string "" if not clearly stated — do not guess.
 - If there's too little transcript to judge a field, use a conservative default (COLD lead, LOW probability, "close_no_action").
-- Summaries must be in ${language}.
-- Return ONLY the JSON object.`;
+
+ENGLISH NORMALIZATION (CRITICAL):
+- The conversation may be in Telugu, Hindi, Tamil, Kannada, Malayalam, Marathi, Bengali, Gujarati, Punjabi, or any mix with English (Hinglish/Tenglish).
+- EVERY value in key_entities MUST be in English / Latin script — never the caller's native script.
+  - Transliterate names: "బాజీ బాబు" → "Baji Babu", "रहुल" → "Rahul", "ਪ੍ਰੀਤ" → "Preet"
+  - Translate locations to their canonical English name: "హైదరాబాద్" → "Hyderabad", "बेंगलुरु" → "Bengaluru", "சென்னை" → "Chennai"
+  - Translate branch/course names to standard English: "సిఎస్ఈ" → "Computer Science Engineering", "ईसीई" → "Electronics and Communication Engineering", "ఎఐడిఎస్" → "Artificial Intelligence and Data Science"
+  - Email and phone are already ASCII — keep as-is.
+  - If you can't confidently transliterate a name, output the closest phonetic English approximation (do NOT leave a non-Latin name in the field).
+- The "summary", "short_summary", "detailed_summary", "customer_intent", "objections", "key_points", "follow_ups", "agent_performance_notes", "quality_risks", "follow_up_reason", "recommended_follow_up_time", and "next_best_action" fields ALSO must be in English regardless of conversation language.
+- Only "conversation_quality.*.notes" and "conversation_quality.overall_note" can stay in the conversation's language (those describe HOW the caller spoke, not WHAT they said).
+
+Return ONLY the JSON object.`;
 
     // Try ai-runtime first (respects the agent's configured provider). If
     // that returns anything that looks like the heuristic fallback OR the
@@ -333,7 +452,28 @@ Rules:
         alt_phone: asStr(data?.key_entities?.alt_phone),
         company: asStr(data?.key_entities?.company),
         interested_university: asStr(data?.key_entities?.interested_university),
+        // Admissions-specific
+        interested_course: asStr(data?.key_entities?.interested_course),
+        interested_branch: asStr(data?.key_entities?.interested_branch),
+        preferred_location: asStr(data?.key_entities?.preferred_location),
+        intermediate_marks: asStr(data?.key_entities?.intermediate_marks),
+        intermediate_percentage: asStr(data?.key_entities?.intermediate_percentage),
+        eamcet_rank: asStr(data?.key_entities?.eamcet_rank),
+        jee_rank: asStr(data?.key_entities?.jee_rank),
+        diploma_status: asStr(data?.key_entities?.diploma_status),
+        category: asStr(data?.key_entities?.category),
+        hostel_required: asStr(data?.key_entities?.hostel_required),
+        parent_name: asStr(data?.key_entities?.parent_name),
+        parent_mobile: asStr(data?.key_entities?.parent_mobile),
+        callback_required: asStr(data?.key_entities?.callback_required),
+        counselor_meeting_required: asStr(data?.key_entities?.counselor_meeting_required),
+        brochure_required: asStr(data?.key_entities?.brochure_required),
+        whatsapp_required: asStr(data?.key_entities?.whatsapp_required),
+        email_required: asStr(data?.key_entities?.email_required),
       },
+      lead_status: (asStr(data.lead_status) || '').toUpperCase() as AnalysisResult['lead_status'],
+      confidence_score: Math.max(0, Math.min(1, parseFloat(String(data.confidence_score)) || 0)),
+      missing_fields: asStrArr(data.missing_fields),
       lead_score: asStr(data.lead_score),
       conversion_probability: asStr(data.conversion_probability),
       next_best_action: asStr(data.next_best_action),
@@ -436,6 +576,161 @@ function outcomeToStatus(outcome: string | undefined): string {
 }
 
 /**
+ * Derive the admissions-module extended lead status enum from the analyzer's
+ * outputs. The LLM is asked to emit this directly via `lead_status`, but we
+ * also compute a fallback from outcome + interest_level + entities so we
+ * always have a value even when the LLM omits it. Returns one of:
+ *   HOT_INTERESTED / INTERESTED / FOLLOW_UP_REQUIRED / NOT_INTERESTED
+ *   / WRONG_NUMBER / NO_ANSWER / CALLBACK_SCHEDULED / COUNSELOR_MEETING_REQUIRED
+ *
+ * Priority:
+ *   1. Explicit LLM-emitted lead_status (when valid)
+ *   2. Outcome keywords (wrong number / no answer / qualified / etc.)
+ *   3. Action signals in key_entities (counselor_meeting_required, callback_required)
+ *   4. Interest level + lead_score
+ */
+function deriveExtendedLeadStatus(result: AnalysisResult): NonNullable<AnalysisResult['lead_status']> {
+  const VALID = new Set([
+    'HOT_INTERESTED', 'INTERESTED', 'FOLLOW_UP_REQUIRED', 'NOT_INTERESTED',
+    'WRONG_NUMBER', 'NO_ANSWER', 'CALLBACK_SCHEDULED', 'COUNSELOR_MEETING_REQUIRED',
+    'BROCHURE_SENT',
+  ]);
+  const direct = String(result.lead_status || '').toUpperCase();
+  if (VALID.has(direct)) return direct as NonNullable<AnalysisResult['lead_status']>;
+
+  const outcome = String(result.call_outcome || result.outcome || '').toLowerCase();
+  if (outcome.includes('wrong number')) return 'WRONG_NUMBER';
+  if (outcome.includes('voicemail') || outcome.includes('no answer')) return 'NO_ANSWER';
+  if (outcome.includes('not interested')) return 'NOT_INTERESTED';
+
+  const ke = result.key_entities || {};
+  if (String(ke.counselor_meeting_required).toLowerCase() === 'true') return 'COUNSELOR_MEETING_REQUIRED';
+  if (String(ke.callback_required).toLowerCase() === 'true' && outcome.includes('callback')) return 'CALLBACK_SCHEDULED';
+
+  const lscore = String(result.lead_score || '').toUpperCase();
+  const ilevel = Number(result.interest_level || 0);
+  if (lscore === 'HOT' || ilevel >= 75) return 'HOT_INTERESTED';
+  if (lscore === 'WARM' || ilevel >= 50) return 'INTERESTED';
+  if (lscore === 'UNQUALIFIED') return 'NOT_INTERESTED';
+  return 'FOLLOW_UP_REQUIRED';
+}
+
+/**
+ * Map the admissions-module extended status to the CRM `leads.status` column
+ * value. The CRM stores a free-form string, so this is a convenience
+ * mapping — keeps the CRM filtering buckets consistent.
+ */
+function extendedStatusToCrmStatus(extended: string, needsReview: boolean): string {
+  if (needsReview) return 'NEEDS_REVIEW';
+  switch (extended) {
+    case 'HOT_INTERESTED': return 'HOT_LEAD';
+    case 'INTERESTED': return 'INTERESTED';
+    case 'FOLLOW_UP_REQUIRED': return 'FOLLOW_UP_REQUIRED';
+    case 'NOT_INTERESTED': return 'NOT_INTERESTED';
+    case 'WRONG_NUMBER': return 'WRONG_NUMBER';
+    case 'NO_ANSWER': return 'NO_ANSWER';
+    case 'CALLBACK_SCHEDULED': return 'CALLBACK_SCHEDULED';
+    case 'COUNSELOR_MEETING_REQUIRED': return 'COUNSELOR_MEETING';
+    case 'BROCHURE_SENT': return 'BROCHURE_SENT';
+    default: return 'NEW';
+  }
+}
+
+/**
+ * Merge the in-call slot store (caller-CONFIRMED captures from
+ * conversations.metadata.captured_slots) into the analyzer's
+ * key_entities. The slot store is HIGHER trust than LLM extraction
+ * because each value passed through the agent's readback + caller's
+ * verbal yes/no confirmation during the live call.
+ *
+ * Slot precedence:
+ *  - confirmed=true slots OVERRIDE the LLM extraction
+ *  - unconfirmed slots only FILL empty LLM fields
+ *
+ * Without this merge the LLM routinely returns empty strings for
+ * fields the caller had already confirmed live, and the resulting
+ * CRM lead has no name/email/mobile even when the conversation
+ * captured them. Mutates `entities` in place.
+ */
+async function mergeSlotStoreOverEntities(
+  conversationId: string,
+  entities: AnalysisResult['key_entities'],
+): Promise<{ confirmedSlots: string[]; unconfirmedSlots: string[] }> {
+  if (!entities) return { confirmedSlots: [], unconfirmedSlots: [] };
+  let slots: Record<string, { value: string; confidence: number; confirmed: boolean; source: string } | undefined> = {};
+  try {
+    const r = await pool.query(
+      `SELECT metadata->'captured_slots' AS slots FROM conversations WHERE id = $1`,
+      [conversationId],
+    );
+    slots = (r.rows[0]?.slots || {}) as any;
+  } catch {
+    return { confirmedSlots: [], unconfirmedSlots: [] };
+  }
+
+  // Map slot key → key_entities field name. Slot store names are runtime
+  // names; key_entities uses the analyzer's stable column names.
+  const MAP: Record<string, keyof NonNullable<AnalysisResult['key_entities']>> = {
+    name: 'customer_name',
+    email: 'email',
+    mobile: 'alt_phone',           // caller-confirmed mobile lands in alt_phone slot;
+                                   // primary phone for outbound is already called_number.
+    city: 'city',
+    course: 'interested_course',
+    university: 'interested_university',
+    callback_time: 'appointment_time',
+  };
+
+  // Slot keys whose values are pure ASCII (digits, email) — safe to override
+  // the LLM extraction with the slot store, because there's no language
+  // normalization needed and the caller-CONFIRMED value is ground truth.
+  const ASCII_SAFE_SLOTS = new Set(['mobile', 'email']);
+  // Heuristic: detect non-Latin script text. If the slot value contains
+  // Devanagari / Telugu / Tamil / etc., let the LLM's transliterated form
+  // win so the CRM stays in English — but only when the LLM actually
+  // produced a value. If the LLM left the field empty, fall through to
+  // the slot store (better to save the native-script form than nothing).
+  const NON_LATIN_RE = /[ऀ-ॿঀ-৿਀-੿઀-૿଀-୿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]/;
+
+  const confirmedSlots: string[] = [];
+  const unconfirmedSlots: string[] = [];
+  for (const [slotKey, slot] of Object.entries(slots)) {
+    if (!slot || !slot.value) continue;
+    const field = MAP[slotKey];
+    if (!field) continue;
+    const isAsciiSafe = ASCII_SAFE_SLOTS.has(slotKey);
+    const slotIsNonLatin = NON_LATIN_RE.test(slot.value);
+    const llmHasValue = !!entities[field] && String(entities[field]).trim().length > 0;
+
+    if (isAsciiSafe && slot.confirmed) {
+      // Confirmed mobile/email — always use the slot store value (ASCII).
+      (entities as any)[field] = slot.value;
+      confirmedSlots.push(`${slotKey}=${slot.value}`);
+    } else if (slot.confirmed && !slotIsNonLatin) {
+      // Confirmed text slot in Latin script — slot wins.
+      (entities as any)[field] = slot.value;
+      confirmedSlots.push(`${slotKey}=${slot.value}`);
+    } else if (slot.confirmed && slotIsNonLatin && !llmHasValue) {
+      // Slot is non-Latin AND LLM left field empty — better to have the
+      // native-script value than nothing. Surfaces in the CRM with the
+      // raw text the caller spoke.
+      (entities as any)[field] = slot.value;
+      confirmedSlots.push(`${slotKey}=${slot.value}(native-fallback)`);
+    } else if (slot.confirmed && slotIsNonLatin && llmHasValue) {
+      // Slot is non-Latin but LLM produced an English transliteration —
+      // the LLM wins (CRM stays English per spec). Slot value is logged
+      // for audit only.
+      confirmedSlots.push(`${slotKey}_native=${slot.value}|english=${entities[field]}`);
+    } else if (!llmHasValue) {
+      // Unconfirmed slot, LLM has nothing — fill the gap. Better than empty.
+      (entities as any)[field] = slot.value;
+      unconfirmedSlots.push(`${slotKey}=${slot.value}`);
+    }
+  }
+  return { confirmedSlots, unconfirmedSlots };
+}
+
+/**
  * Auto-create a CRM Lead row from the analyzer's extracted key_entities. We
  * skip flat-out misfires (wrong-number / voicemail with no useful content)
  * and we link the call back via custom_fields.conversation_id. If the
@@ -466,6 +761,17 @@ async function createLeadFromAnalysis(
     const outcome = String(result.call_outcome || result.outcome || '').toLowerCase();
     if (outcome.includes('wrong number')) return;
 
+    // Merge live-call slot store (caller-confirmed captures) over LLM
+    // extraction. Mutates result.key_entities in place so the rest of this
+    // function naturally picks up the higher-confidence values.
+    if (!result.key_entities) result.key_entities = {};
+    const slotMerge = await mergeSlotStoreOverEntities(conversationId, result.key_entities);
+    if (slotMerge.confirmedSlots.length || slotMerge.unconfirmedSlots.length) {
+      console.info(
+        `[analyzer] slot store merged (conv=${conversationId}, confirmed=[${slotMerge.confirmedSlots.join(',')}], unconfirmed=[${slotMerge.unconfirmedSlots.join(',')}])`,
+      );
+    }
+
     // Pull the prospect's phone number. For outbound, that's called_number;
     // for inbound, caller_number. We try both and prefer the non-business one.
     const phoneRes = await pool.query(
@@ -481,10 +787,11 @@ async function createLeadFromAnalysis(
 
     const ke = result.key_entities || {};
 
-    // Auto-lead gate: only create a CRM lead when the caller actually showed
-    // interest AND volunteered the three pieces of identifying info — name,
-    // email, mobile. Prevents the CRM from filling up with empty "Caller 1234"
-    // placeholder rows for hang-ups and not-interested calls.
+    // Auto-lead gate (relaxed per admissions-module spec). Critical fields are
+    // name + mobile + interested_course/branch/college + interest_level. Email
+    // is NOT critical (callers often don't volunteer it on the phone). Missing
+    // non-critical fields → lead is still created, but flagged NEEDS_REVIEW
+    // so the team can complete it on follow-up.
     const rawName = (ke.customer_name || '').trim();
     const rawEmail = (ke.email || '').trim();
     const rawAltPhone = (ke.alt_phone || '').trim();
@@ -500,11 +807,17 @@ async function createLeadFromAnalysis(
       console.info(`[analyzer] auto-lead skipped — caller not interested (conv=${conversationId})`);
       return;
     }
-    if (!rawName || !validEmail || !mobile) {
+    // Hard requirements: name + mobile. Both are needed for ANY useful CRM
+    // entry — without a name or a number we have nothing to follow up on.
+    if (!rawName || !mobile) {
       console.info(
-        `[analyzer] auto-lead skipped — incomplete contact info (conv=${conversationId}, name=${!!rawName}, email=${validEmail}, phone=${!!mobile})`,
+        `[analyzer] auto-lead skipped — missing critical fields (conv=${conversationId}, name=${!!rawName}, phone=${!!mobile})`,
       );
       return;
+    }
+    // Track everything we'll surface as review reasons (drives NEEDS_REVIEW).
+    if (!validEmail) {
+      console.info(`[analyzer] auto-lead PROCEEDING with NEEDS_REVIEW — email missing (conv=${conversationId})`);
     }
 
     const parts = rawName.split(/\s+/);
@@ -523,7 +836,10 @@ async function createLeadFromAnalysis(
       ? mobileDigits.slice(2)
       : mobileDigits;
     const reviewReasons: string[] = [];
-    if (!STRICT_EMAIL_RE.test(rawEmail)) reviewReasons.push('email_format_invalid');
+    // Distinguish "missing" (nothing volunteered) from "format invalid"
+    // (something WAS captured but doesn't pass regex).
+    if (!rawEmail) reviewReasons.push('email_missing');
+    else if (!STRICT_EMAIL_RE.test(rawEmail)) reviewReasons.push('email_format_invalid');
     if (!STRICT_INDIAN_MOBILE_RE.test(mobileFor10)) reviewReasons.push('mobile_format_invalid');
     if (first_name.length < 2) reviewReasons.push('name_too_short');
     // Confidence inferred from the analyzer's own signals — if the LLM
@@ -533,11 +849,16 @@ async function createLeadFromAnalysis(
     if (String(result.conversion_probability || '').toUpperCase() === 'LOW') reviewReasons.push('low_conversion_probability');
 
     const needsReview = reviewReasons.length > 0;
-    const baseStatus = outcomeToStatus(result.call_outcome || result.outcome);
-    // CRM lead status: if any review reason fired, flag as NEEDS_REVIEW so the
-    // sales team triages before treating it as a hot lead. The lead is still
-    // created (don't lose data) — but it doesn't enter the QUALIFIED pipeline.
-    const status = needsReview ? 'NEEDS_REVIEW' : baseStatus;
+    // Derive the admissions-module extended lead status (HOT_INTERESTED /
+    // INTERESTED / etc.) and store BOTH it and the legacy CRM status. This
+    // lets the sales UI filter by the new buckets while existing tooling
+    // that reads the legacy column still works.
+    const extendedStatus = deriveExtendedLeadStatus(result);
+    // Stash the extended status onto the result object so the post-call
+    // processor can write it into post_call_lead_analysis row + decide
+    // which follow-up tasks to schedule.
+    result.lead_status = extendedStatus;
+    const status = extendedStatusToCrmStatus(extendedStatus, needsReview);
     const score = needsReview ? Math.min(50, leadScoreToInt(result.lead_score, result.interest_level || 0)) : leadScoreToInt(result.lead_score, result.interest_level || 0);
 
     if (needsReview) {
@@ -559,7 +880,9 @@ async function createLeadFromAnalysis(
     const leadPayload = {
       first_name,
       last_name,
-      email: rawEmail,
+      // Email is optional per admissions spec — send null when missing so
+      // the CRM doesn't store an empty string the team has to filter out.
+      email: rawEmail || null,
       // Use the normalised 10-digit form when valid; otherwise pass through
       // what we have so the team can still see what was heard.
       phone: STRICT_INDIAN_MOBILE_RE.test(mobileFor10) ? mobileFor10 : mobile,
@@ -592,6 +915,30 @@ async function createLeadFromAnalysis(
         // for clean leads.
         review_reasons: reviewReasons,
         needs_review: needsReview,
+        // Admissions module fields. All optional — CRM stores them in the
+        // lead's custom_fields JSONB so the lead-detail UI can render them
+        // when present. Drives counselor briefing + brochure choice.
+        extended_lead_status: extendedStatus,
+        interested_course: ke.interested_course || null,
+        interested_branch: ke.interested_branch || null,
+        preferred_location: ke.preferred_location || null,
+        intermediate_marks: ke.intermediate_marks || null,
+        intermediate_percentage: ke.intermediate_percentage || null,
+        eamcet_rank: ke.eamcet_rank || null,
+        jee_rank: ke.jee_rank || null,
+        diploma_status: ke.diploma_status || null,
+        category: ke.category || null,
+        hostel_required: ke.hostel_required || null,
+        parent_name: ke.parent_name || null,
+        parent_mobile: ke.parent_mobile || null,
+        // Post-call action signals
+        callback_required: String(ke.callback_required || '').toLowerCase() === 'true',
+        counselor_meeting_required: String(ke.counselor_meeting_required || '').toLowerCase() === 'true',
+        brochure_required: String(ke.brochure_required || '').toLowerCase() === 'true',
+        whatsapp_required: String(ke.whatsapp_required || '').toLowerCase() === 'true',
+        email_required: String(ke.email_required || '').toLowerCase() === 'true',
+        confidence_score: result.confidence_score || null,
+        missing_fields: result.missing_fields || [],
       },
     };
 
