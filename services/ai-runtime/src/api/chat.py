@@ -407,3 +407,95 @@ async def simple_chat(request: Request):
         "mock": used_mock,
         "rag_chunks_used": rag_chunks_used,
     }
+
+
+async def _simple_stream_generator(
+    full_messages: list[dict[str, Any]],
+    provider: str,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+):
+    """SSE generator for /chat/simple-stream — yields {type:'content',content:..}
+    deltas as the provider streams tokens, then a {type:'done'} sentinel.
+
+    Used by the telephony-adapter voice path so it can start synthesising the
+    first complete sentence before the LLM has finished generating the rest.
+    Without streaming, first-audio is gated on whole-reply latency (~1-1.5s on
+    Gemini); with streaming we hand the first sentence to TTS ~250-400ms in.
+
+    Falls back to the mock provider on any provider error so the caller still
+    gets *some* reply rather than a 500 — keeps the call flow alive even when
+    a provider is rate-limited.
+    """
+    async def _iter(llm, mdl):
+        async for chunk in llm.chat_completion(
+            messages=full_messages,
+            model=mdl,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            if chunk.get("type") == "content" and chunk.get("content"):
+                content = chunk["content"]
+                if content.startswith("[") and "error" in content.lower():
+                    raise RuntimeError(content)
+                yield {"data": json.dumps({"type": "content", "content": content})}
+
+    used_mock = False
+    try:
+        llm = llm_router.get_provider(provider)
+        async for ev in _iter(llm, model):
+            yield ev
+    except Exception as e:
+        logger.warn("simple_stream_provider_failed_fallback_to_mock", provider=provider, error=str(e))
+        used_mock = True
+        try:
+            mock_llm = llm_router.get_provider("mock")
+            async for ev in _iter(mock_llm, "mock-v1"):
+                yield ev
+        except Exception as me:
+            logger.warn("simple_stream_mock_also_failed", error=str(me))
+
+    yield {"data": json.dumps({"type": "done", "mock": used_mock})}
+
+
+@router.post("/chat/simple-stream")
+async def simple_stream_chat(request: Request):
+    """Streaming variant of /chat/simple for the voice path.
+
+    Same body shape as /chat/simple. Returns an SSE stream of
+    `{"type":"content","content":"..."}` deltas, followed by a final
+    `{"type":"done","mock":bool}` sentinel.
+    """
+    body = await request.json()
+    system_prompt = body.get("system_prompt", "You are a helpful assistant.")
+    messages = body.get("messages", [])
+    provider = body.get("provider", "openai")
+    model = body.get("model", "gpt-4o")
+    temperature = body.get("temperature", 0.7)
+    max_tokens = body.get("max_tokens", 4096)
+    knowledge_base_ids = body.get("knowledge_base_ids") or []
+
+    # RAG (same best-effort approach as /chat/simple).
+    if knowledge_base_ids:
+        user_query = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_query = msg.get("content", "")
+                break
+        if user_query:
+            try:
+                rag_context = await rag_pipeline.build_context(
+                    query=user_query,
+                    knowledge_base_ids=knowledge_base_ids,
+                    top_k=settings.rag_top_k,
+                )
+                if rag_context:
+                    system_prompt = system_prompt + "\n\n" + rag_context
+            except Exception as e:
+                logger.warn("simple_stream_rag_failed", error=str(e))
+
+    full_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}] + messages
+    return EventSourceResponse(
+        _simple_stream_generator(full_messages, provider, model, temperature, max_tokens)
+    )

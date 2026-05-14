@@ -29,19 +29,25 @@ export function sarvamConfigured(): boolean {
 }
 
 /** Default Sarvam voice per language — all female neural voices. */
+// Default Sarvam voice per language. Switched from `anushka` to `manisha`
+// after callers reported the agent sounded "robotic / monotone" — manisha
+// has a noticeably warmer, more conversational delivery (the Sarvam team's
+// own demo also uses it for natural-conversation flows). All `anushka`
+// voices remain selectable per-agent via agent.voice_config.voice_id; this
+// default just changes what an unspecified voice resolves to.
 const SARVAM_VOICE_DEFAULTS: Record<string, string> = {
-  'te-in': 'anushka',
-  'hi-in': 'anushka',
-  'ta-in': 'anushka',
-  'kn-in': 'anushka',
-  'ml-in': 'anushka',
-  'mr-in': 'anushka',
-  'bn-in': 'anushka',
-  'gu-in': 'anushka',
-  'pa-in': 'anushka',
-  'or-in': 'anushka',
-  'as-in': 'anushka',
-  'en-in': 'anushka',
+  'te-in': 'manisha',
+  'hi-in': 'manisha',
+  'ta-in': 'manisha',
+  'kn-in': 'manisha',
+  'ml-in': 'manisha',
+  'mr-in': 'manisha',
+  'bn-in': 'manisha',
+  'gu-in': 'manisha',
+  'pa-in': 'manisha',
+  'or-in': 'manisha',
+  'as-in': 'manisha',
+  'en-in': 'manisha',
 };
 
 // Sarvam's public speaker catalog. Any voice_id from another provider

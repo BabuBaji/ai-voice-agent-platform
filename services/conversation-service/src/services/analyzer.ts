@@ -511,8 +511,40 @@ async function createLeadFromAnalysis(
     const first_name = parts[0];
     const last_name = parts.slice(1).join(' ') || '-';
 
-    const status = outcomeToStatus(result.call_outcome || result.outcome);
-    const score = leadScoreToInt(result.lead_score, result.interest_level || 0);
+    // Validation: check the captured contact fields against strict regex
+    // patterns. Anything that doesn't match flags the lead for human review
+    // instead of being saved as QUALIFIED — better that the sales team sees
+    // a flagged row than a confident-but-wrong CRM entry.
+    const STRICT_EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+    const STRICT_INDIAN_MOBILE_RE = /^[6-9]\d{9}$/;
+    // Normalise mobile to 10 digits by stripping common prefixes/punct.
+    const mobileDigits = String(mobile).replace(/[^\d]/g, '');
+    const mobileFor10 = mobileDigits.length === 12 && mobileDigits.startsWith('91')
+      ? mobileDigits.slice(2)
+      : mobileDigits;
+    const reviewReasons: string[] = [];
+    if (!STRICT_EMAIL_RE.test(rawEmail)) reviewReasons.push('email_format_invalid');
+    if (!STRICT_INDIAN_MOBILE_RE.test(mobileFor10)) reviewReasons.push('mobile_format_invalid');
+    if (first_name.length < 2) reviewReasons.push('name_too_short');
+    // Confidence inferred from the analyzer's own signals — if the LLM
+    // wasn't sure about lead score / interest_level it likely wasn't sure
+    // about the other extractions either.
+    if (typeof result.interest_level === 'number' && result.interest_level < 35) reviewReasons.push('low_interest_signal');
+    if (String(result.conversion_probability || '').toUpperCase() === 'LOW') reviewReasons.push('low_conversion_probability');
+
+    const needsReview = reviewReasons.length > 0;
+    const baseStatus = outcomeToStatus(result.call_outcome || result.outcome);
+    // CRM lead status: if any review reason fired, flag as NEEDS_REVIEW so the
+    // sales team triages before treating it as a hot lead. The lead is still
+    // created (don't lose data) — but it doesn't enter the QUALIFIED pipeline.
+    const status = needsReview ? 'NEEDS_REVIEW' : baseStatus;
+    const score = needsReview ? Math.min(50, leadScoreToInt(result.lead_score, result.interest_level || 0)) : leadScoreToInt(result.lead_score, result.interest_level || 0);
+
+    if (needsReview) {
+      console.info(
+        `[analyzer] auto-lead flagged for human review (conv=${conversationId}, reasons=${reviewReasons.join(',')})`,
+      );
+    }
 
     const source = isOutbound
       ? 'outbound-call'
@@ -522,12 +554,15 @@ async function createLeadFromAnalysis(
     if (status === 'QUALIFIED') tags.push('interested');
     if (status === 'UNQUALIFIED') tags.push('not_interested');
     if (status === 'CONTACTED' && outcome.includes('callback')) tags.push('callback_requested');
+    if (needsReview) tags.push('needs_review');
 
     const leadPayload = {
       first_name,
       last_name,
       email: rawEmail,
-      phone: mobile,
+      // Use the normalised 10-digit form when valid; otherwise pass through
+      // what we have so the team can still see what was heard.
+      phone: STRICT_INDIAN_MOBILE_RE.test(mobileFor10) ? mobileFor10 : mobile,
       company: ke.company || null,
       source,
       status,
@@ -553,21 +588,57 @@ async function createLeadFromAnalysis(
         next_best_action: result.next_best_action,
         recommended_follow_up_time: result.recommended_follow_up_time,
         follow_up_reason: result.follow_up_reason,
+        // Surfaces flagged-row triage signals to the sales team. Empty array
+        // for clean leads.
+        review_reasons: reviewReasons,
+        needs_review: needsReview,
       },
     };
 
-    const leadRes = await fetch(`${config.crmServiceUrl}/leads`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
-      body: JSON.stringify(leadPayload),
-    });
-    if (!leadRes.ok) {
-      const body = await leadRes.text().catch(() => '');
-      console.warn(`[analyzer] auto-lead POST failed (${leadRes.status}): ${body.slice(0, 200)}`);
+    let leadId: string | null = null;
+    let leadCreateFailed = false;
+    let leadCreateStatus = 0;
+    let leadCreateError = '';
+    try {
+      const leadRes = await fetch(`${config.crmServiceUrl}/leads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+        body: JSON.stringify(leadPayload),
+      });
+      leadCreateStatus = leadRes.status;
+      if (!leadRes.ok) {
+        leadCreateError = (await leadRes.text().catch(() => '')).slice(0, 500);
+        leadCreateFailed = true;
+        console.warn(`[analyzer] auto-lead POST failed (${leadRes.status}): ${leadCreateError.slice(0, 200)}`);
+      } else {
+        const lead: any = await leadRes.json();
+        leadId = lead?.id || lead?.data?.id || null;
+      }
+    } catch (err: any) {
+      leadCreateFailed = true;
+      leadCreateError = String(err?.message || err);
+      console.warn(`[analyzer] auto-lead POST threw: ${leadCreateError.slice(0, 200)}`);
+    }
+
+    // On CRM POST failure, enqueue for the background retry sweeper. This
+    // guarantees the lead survives a CRM outage — the sweeper retries with
+    // exponential backoff up to max_attempts. Without this, leads from
+    // calls that ended during a CRM hiccup were lost permanently.
+    if (leadCreateFailed) {
+      try {
+        await pool.query(
+          `INSERT INTO crm_lead_retry_queue
+             (tenant_id, conversation_id, payload, kind, status, attempts, next_attempt_at, last_error, last_status_code)
+           VALUES ($1, $2, $3::jsonb, 'lead', 'PENDING', 1, NOW() + INTERVAL '60 seconds', $4, $5)`,
+          [tenantId, conversationId, JSON.stringify(leadPayload), leadCreateError, leadCreateStatus || null],
+        );
+        console.info(`[analyzer] auto-lead enqueued for retry (conv=${conversationId}, status=${leadCreateStatus})`);
+      } catch (qe: any) {
+        console.warn(`[analyzer] failed to enqueue lead retry: ${qe.message}`);
+      }
       return;
     }
-    const lead: any = await leadRes.json();
-    const leadId = lead?.id || lead?.data?.id;
+
     if (!leadId) return;
 
     // Persist the lead id on the analysis JSONB so the next re-analyze
@@ -596,21 +667,42 @@ async function createLeadFromAnalysis(
       d.setHours(10, 0, 0, 0);
       return d;
     })();
+    const apptPayload = {
+      lead_id: leadId,
+      title: 'Callback (auto-scheduled from interested caller)',
+      scheduled_at: when.toISOString(),
+      duration_minutes: 15,
+      notes: result.follow_up_reason || result.next_best_action || result.short_summary || '',
+      conversation_id: conversationId,
+    };
     try {
-      await fetch(`${config.crmServiceUrl}/appointments`, {
+      const apptRes = await fetch(`${config.crmServiceUrl}/appointments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
-        body: JSON.stringify({
-          lead_id: leadId,
-          title: 'Callback (auto-scheduled from interested caller)',
-          scheduled_at: when.toISOString(),
-          duration_minutes: 15,
-          notes: result.follow_up_reason || result.next_best_action || result.short_summary || '',
-          conversation_id: conversationId,
-        }),
+        body: JSON.stringify(apptPayload),
       });
+      if (!apptRes.ok) {
+        const apptBody = (await apptRes.text().catch(() => '')).slice(0, 500);
+        console.warn(`[analyzer] appointment POST failed (${apptRes.status}): ${apptBody.slice(0, 200)} — enqueuing retry`);
+        await pool.query(
+          `INSERT INTO crm_lead_retry_queue
+             (tenant_id, conversation_id, payload, kind, related_lead_id, status, attempts, next_attempt_at, last_error, last_status_code)
+           VALUES ($1, $2, $3::jsonb, 'appointment', $4, 'PENDING', 1, NOW() + INTERVAL '60 seconds', $5, $6)`,
+          [tenantId, conversationId, JSON.stringify(apptPayload), leadId, apptBody, apptRes.status],
+        );
+      }
     } catch (apptErr: any) {
-      console.warn(`[analyzer] appointment POST failed: ${apptErr.message}`);
+      console.warn(`[analyzer] appointment POST threw: ${apptErr.message} — enqueuing retry`);
+      try {
+        await pool.query(
+          `INSERT INTO crm_lead_retry_queue
+             (tenant_id, conversation_id, payload, kind, related_lead_id, status, attempts, next_attempt_at, last_error)
+           VALUES ($1, $2, $3::jsonb, 'appointment', $4, 'PENDING', 1, NOW() + INTERVAL '60 seconds', $5)`,
+          [tenantId, conversationId, JSON.stringify(apptPayload), leadId, String(apptErr?.message || apptErr)],
+        );
+      } catch (qe: any) {
+        console.warn(`[analyzer] failed to enqueue appointment retry: ${qe.message}`);
+      }
     }
   } catch (err: any) {
     console.warn(`[analyzer] createLeadFromAnalysis error: ${err.message}`);

@@ -330,6 +330,25 @@ conversationRouter.patch('/:id/end', async (req: Request, res: Response, next: N
       res.status(404).json({ error: 'Not Found' });
       return;
     }
+
+    // Fire-and-forget post-call analysis. Drives:
+    //   - conversations.analysis JSONB (summary, lead_score, key_entities, etc.)
+    //   - createLeadFromAnalysis → CRM lead + auto-scheduled callback appointment
+    //   - recordCallBilling
+    // Previously this only ran when a user manually opened the call detail page
+    // and clicked "Analyze", so bulk-campaign leads never reached the CRM. We
+    // skip when duration_seconds is 0 (instant hang-ups have no transcript) so
+    // we don't waste an LLM call on ringer-only failures. Errors are swallowed
+    // inside the helper — the call-end response must succeed regardless.
+    const hasUsableDuration = (data.duration_seconds || result.rows[0].duration_seconds || 0) > 5;
+    if (hasUsableDuration) {
+      setImmediate(() => {
+        analyzeConversation(id, tenantId).catch((err: any) => {
+          console.warn(`[analyzer] auto-run on call-end failed (conv=${id}): ${err?.message || err}`);
+        });
+      });
+    }
+
     res.json(result.rows[0]);
   } catch (err: any) {
     if (err?.name === 'ZodError') {

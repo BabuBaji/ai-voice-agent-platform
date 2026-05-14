@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -39,6 +40,72 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+
+# Pre-compiled regex patterns for TTS sanitization. Mirrors the
+# `sanitizeForTts` util in telephony-adapter so PSTN + web-call TTS paths
+# both receive markdown/emoji-free text. Stripping is conservative: we
+# remove markup that voices verbalise literally and collapse repeated
+# punctuation that creates long unnatural pauses, but leave Indic scripts,
+# numbers, and currency intact.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_URL_RE = re.compile(r"https?://\S+")
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_ITAL_STAR_RE = re.compile(r"\*([^*\n]+)\*")
+_BOLD_UND_RE = re.compile(r"__([^_]+)__")
+_ITAL_UND_RE = re.compile(r"(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])")
+_CODE_RE = re.compile(r"`([^`]+)`")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
+_BULLET_RE = re.compile(r"^\s*[-*•]\s+", re.MULTILINE)
+_OLIST_RE = re.compile(r"^\s*\d+\.\s+", re.MULTILINE)
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U0001F000-\U0001F2FF☀-➿"
+    "\U0001F900-\U0001F9FF⌀-⏿]",
+    flags=re.UNICODE,
+)
+_ZWSP_RE = re.compile("[​-‏   ⁠﻿]")
+_DASH_RUN_RE = re.compile(r"\s*[—–\-]{2,}\s*")
+_DASH_SPC_RE = re.compile(r"\s+[—–]\s+")
+_REPEAT_PUNCT_RE = re.compile(r"([!?])\1+")
+_DOTS_RE = re.compile(r"\.{3,}")
+_COMMA_RUN_RE = re.compile(r"[,;]{2,}")
+_NEWLINE_RE = re.compile(r"\r?\n+")
+_WS_RUN_RE = re.compile(r"\s{2,}")
+_LEAD_PUNCT_RE = re.compile(r"^[\s,;:.!?…—–\-]+")
+_TRAIL_PUNCT_RE = re.compile(r"[\s,;:]+$")
+
+
+def sanitize_for_tts(text: Optional[str]) -> str:
+    """Strip markdown/emoji/long-punctuation runs from `text` before TTS.
+
+    Returns an empty string for None/empty input. Conservative — keeps
+    Indic scripts, numbers, and ₹/$/etc. intact so prices read correctly.
+    """
+    if not text:
+        return ""
+    s = str(text)
+    s = _MD_LINK_RE.sub(r"\1", s)
+    s = _URL_RE.sub("", s)
+    s = _BOLD_RE.sub(r"\1", s)
+    s = _ITAL_STAR_RE.sub(r"\1", s)
+    s = _BOLD_UND_RE.sub(r"\1", s)
+    s = _ITAL_UND_RE.sub(r"\1", s)
+    s = _CODE_RE.sub(r"\1", s)
+    s = _HEADING_RE.sub("", s)
+    s = _BULLET_RE.sub("", s)
+    s = _OLIST_RE.sub("", s)
+    s = _EMOJI_RE.sub("", s)
+    s = _ZWSP_RE.sub("", s)
+    s = _DASH_RUN_RE.sub(", ", s)
+    s = _DASH_SPC_RE.sub(", ", s)
+    s = _REPEAT_PUNCT_RE.sub(r"\1", s)
+    s = _DOTS_RE.sub("…", s)
+    s = _COMMA_RUN_RE.sub(",", s)
+    s = _NEWLINE_RE.sub(" ", s)
+    s = _WS_RUN_RE.sub(" ", s)
+    s = _LEAD_PUNCT_RE.sub("", s)
+    s = _TRAIL_PUNCT_RE.sub("", s)
+    return s.strip()
 
 from common import get_logger
 from ..providers.speech import (
@@ -307,6 +374,11 @@ async def _run_agent_turn(
 
         if not reply_text:
             return
+
+        # Sanitize once before both the text-frame (used by UI captions) and
+        # the TTS provider. Markdown / emoji / multi-punctuation slipping
+        # through verbalises literally on Sarvam/Azure/Deepgram voices.
+        reply_text = sanitize_for_tts(reply_text) or reply_text
 
         await ws.send_json({
             "type": "agent_response_text",

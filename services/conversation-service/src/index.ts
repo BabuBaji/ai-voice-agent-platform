@@ -9,6 +9,7 @@ import { initContactTables } from './db/contactInit';
 import { setupWebSocketServer } from './ws/realtime';
 import { startRetentionSweeper } from './services/privacy';
 import { startStaleSweeper } from './services/staleSweeper';
+import { startCrmRetrySweeper } from './services/crmRetrySweeper';
 import pino from 'pino';
 
 const logger = pino({
@@ -52,6 +53,11 @@ async function start(): Promise<void> {
     // (default 60 min, no recent messages) to FAILED so they stop polluting
     // the call log.
     startStaleSweeper();
+
+    // CRM retry sweeper — retries enqueued lead/appointment POSTs when the
+    // CRM service was down during the inline POST. Without this, calls that
+    // ended during a CRM outage lost their leads forever.
+    startCrmRetrySweeper();
 
     const shutdown = async () => {
       logger.info('Shutting down...');

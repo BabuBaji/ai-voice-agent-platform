@@ -888,12 +888,18 @@ async function processCampaign(campaignId: string): Promise<void> {
       const msg = err?.message || 'dial failed';
       logger.warn({ campaignId, targetId: t.id, err: msg }, 'target dial failed');
 
-      // Decide retry vs fail
+      // Decide retry vs fail. Re-read the campaign status before requeuing — a
+      // user PAUSE/CANCEL while this dial was in flight should NOT cause the
+      // target to silently re-queue. Without this check, paused campaigns
+      // resurrected themselves the moment a single dial failed.
+      const live = await pool.query(`SELECT status FROM campaigns WHERE id = $1`, [campaignId]);
+      const liveStatus = String(live.rows[0]?.status || '').toUpperCase();
       const maxAttempts = campaign.max_attempts || 1;
-      if (t.attempts + 1 >= maxAttempts) {
+      const isStoppedState = liveStatus === 'PAUSED' || liveStatus === 'CANCELED' || liveStatus === 'CANCELLED' || liveStatus === 'COMPLETED' || liveStatus === 'FAILED';
+      if (isStoppedState || t.attempts + 1 >= maxAttempts) {
         await pool.query(
           `UPDATE campaign_targets SET status = 'FAILED', last_error = $1 WHERE id = $2`,
-          [msg.slice(0, 500), t.id]
+          [(isStoppedState ? `${msg} (campaign ${liveStatus})` : msg).slice(0, 500), t.id]
         );
       } else {
         const delay = campaign.retry_delay_seconds || 900;
@@ -934,11 +940,22 @@ export async function updateTargetFromCallEnd(
     const c = await pool.query(`SELECT max_attempts, retry_delay_seconds, status FROM campaigns WHERE id = $1`, [target.campaign_id]);
     const camp = c.rows[0] || {};
 
-    // Treat COMPLETED = COMPLETED; anything else = retry if attempts remain, otherwise FAILED
+    // Treat COMPLETED = COMPLETED; anything else = retry if attempts remain, otherwise FAILED.
+    // Critical: PAUSED/CANCELED campaigns must NOT cause the failed-target to
+    // re-queue — otherwise pausing a campaign mid-flight resurrects every call
+    // that fails after the pause. We finalize the target as FAILED with a
+    // 'campaign_stopped' outcome so the analytics view shows what happened.
+    const campStatus = String(camp.status || '').toUpperCase();
+    const isStoppedState = campStatus === 'PAUSED' || campStatus === 'CANCELED' || campStatus === 'CANCELLED' || campStatus === 'COMPLETED' || campStatus === 'FAILED';
     if (outcome === 'COMPLETED') {
       await pool.query(
         `UPDATE campaign_targets SET status = 'COMPLETED', outcome = 'answered', conversation_id = $1 WHERE id = $2`,
         [conversationId, target.id]
+      );
+    } else if (isStoppedState) {
+      await pool.query(
+        `UPDATE campaign_targets SET status = 'FAILED', outcome = $1, conversation_id = $2 WHERE id = $3`,
+        [`campaign_${campStatus.toLowerCase()}`, conversationId, target.id]
       );
     } else {
       const maxAttempts = camp.max_attempts || 1;

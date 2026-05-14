@@ -50,6 +50,46 @@ function firstNonEmpty(...vals: (string | null | undefined)[]): string {
   return '';
 }
 
+/**
+ * Normalize a free-form language hint (CSV "language" column, agent default,
+ * Sarvam confidence) into a BCP-47 code our STT/TTS providers accept. Returns
+ * null if the input doesn't map cleanly — caller falls back to agent default.
+ *
+ * Accepts:
+ *   - already-formed BCP-47: "te-IN", "en-US", "hi-IN" → returned as-is
+ *   - bare ISO-639 codes:    "te", "hi", "en", "ta"    → appended with "-IN" (Indic) / "-US" (en)
+ *   - English language names: "telugu", "english", "hindi", "tamil", "kannada"
+ *   - Hinglish-style hints:   "hi+en", "hinglish", "mixed"
+ *
+ * Anything else returns null. Case-insensitive.
+ */
+export function normalizeLanguageCode(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = String(raw).trim().toLowerCase().replace(/[_\s]+/g, '-');
+  if (!s) return null;
+  // already a BCP-47-ish code
+  if (/^[a-z]{2}-[a-z]{2}$/.test(s)) {
+    const [a, b] = s.split('-');
+    return `${a}-${b.toUpperCase()}`;
+  }
+  const NAME_TO_CODE: Record<string, string> = {
+    english: 'en-US', en: 'en-US',
+    hindi: 'hi-IN', hi: 'hi-IN', hinglish: 'hi-IN', 'hi+en': 'hi-IN', 'en+hi': 'hi-IN', mixed: 'hi-IN',
+    telugu: 'te-IN', te: 'te-IN', 'te+en': 'te-IN',
+    tamil: 'ta-IN', ta: 'ta-IN',
+    kannada: 'kn-IN', kn: 'kn-IN',
+    malayalam: 'ml-IN', ml: 'ml-IN',
+    marathi: 'mr-IN', mr: 'mr-IN',
+    bengali: 'bn-IN', bn: 'bn-IN', bangla: 'bn-IN',
+    gujarati: 'gu-IN', gu: 'gu-IN',
+    punjabi: 'pa-IN', pa: 'pa-IN',
+    odia: 'or-IN', oriya: 'or-IN', or: 'or-IN',
+    assamese: 'as-IN', as: 'as-IN',
+    urdu: 'ur-IN', ur: 'ur-IN',
+  };
+  return NAME_TO_CODE[s] || null;
+}
+
 async function loadAgent(
   agentId: string,
   tenantId: string,
@@ -118,6 +158,64 @@ async function appendMessage(
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * Sanitize an LLM reply for TTS so the voice doesn't read out markup, emojis
+ * or repeated punctuation. Applied unconditionally before every TTS provider
+ * call (Sarvam, Azure, Deepgram). KB chunks and prompt text can leak `**bold**`,
+ * `🎯`, em-dashes, multi-newline lists etc. into the reply, all of which some
+ * voices verbalise literally ("star star important star star").
+ *
+ * Rules (kept narrow — anything more invasive risks dropping content):
+ *  - strip markdown emphasis / code / links / headings / bullets
+ *  - strip emoji + pictograph code-points
+ *  - collapse repeated terminal punctuation (??? → ?, !!! → !)
+ *  - replace em/en dashes with comma (natural short pause)
+ *  - collapse newlines and runs of spaces into a single space
+ *  - keep numerics, currency, and phone formatting intact
+ */
+export function sanitizeForTts(text: string): string {
+  if (!text) return '';
+  let s = String(text);
+  // markdown link: [label](url) → label
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+  // raw URLs (some voices spell them out letter by letter)
+  s = s.replace(/https?:\/\/\S+/g, '');
+  // markdown emphasis & code
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1');
+  s = s.replace(/\*([^*\n]+)\*/g, '$1');
+  s = s.replace(/__([^_]+)__/g, '$1');
+  s = s.replace(/(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])/g, '$1');
+  s = s.replace(/`([^`]+)`/g, '$1');
+  // markdown headings + bullet/list markers at line starts
+  s = s.replace(/^\s{0,3}#{1,6}\s+/gm, '');
+  s = s.replace(/^\s*[-*•]\s+/gm, '');
+  s = s.replace(/^\s*\d+\.\s+/gm, '');
+  // emoji / pictograph / symbol ranges (keep CJK + Indic scripts intact)
+  s = s.replace(
+    /[\u{1F300}-\u{1FAFF}\u{1F000}-\u{1F2FF}\u{2600}-\u{27BF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{2300}-\u{23FF}]/gu,
+    '',
+  );
+  // bare zero-width / control chars
+  s = s.replace(/[\u200B-\u200F\u2028\u2029\uFEFF]/g, '');
+  // collapse long dash runs to a single comma-pause
+  s = s.replace(/\s*[—–\-]{2,}\s*/g, ', ');
+  // em/en dash surrounded by spaces → comma (natural pause for TTS)
+  s = s.replace(/\s+[—–]\s+/g, ', ');
+  // collapse repeated terminal punctuation
+  s = s.replace(/([!?])\1{1,}/g, '$1');
+  // 3+ dots → single ellipsis (keep ONE short pause, drop the "...." chains)
+  s = s.replace(/\.{3,}/g, '…');
+  // commas/semicolons stacked → single comma
+  s = s.replace(/[,;]{2,}/g, ',');
+  // any newline → space (TTS doesn't need line breaks)
+  s = s.replace(/\r?\n+/g, ' ');
+  // collapse runs of whitespace
+  s = s.replace(/\s{2,}/g, ' ');
+  // strip leading/trailing whitespace + orphan punctuation
+  s = s.replace(/^[\s,;:.!?…—–-]+/, '').replace(/[\s,;:]+$/, '');
+  return s.trim();
 }
 
 /**
@@ -409,6 +507,405 @@ function isShortAck(text: string): boolean {
   return SHORT_ACK_SET.has(t);
 }
 
+/**
+ * Indic-alphabet → English-letter map used by `decodeIndicSpelling`.
+ *
+ * Sarvam STT transcribes a Telugu speaker spelling an English email/phone as
+ * a sequence of Telugu syllables ("వి ఏ జె ఐ వి ఏ బి యు" instead of
+ * "V A J I V A B U"). The LLM then reads back the wrong value because the
+ * raw transcript looks like gibberish. Mapping the spelled syllables back
+ * to ASCII letters lets us inject a "parsed spelling" hint into the user
+ * turn so the LLM has a usable candidate to read back for confirmation.
+ *
+ * Each value MUST be lowercase ASCII so downstream regex stays simple.
+ */
+const INDIC_LETTER_MAPS: Record<string, Record<string, string>> = {
+  te: {
+    // Telugu — covers the common pronunciations callers actually use.
+    'ఏ': 'a', 'ఎ': 'a', 'ఎయ్': 'a', 'ఆ': 'a',
+    'బి': 'b', 'బీ': 'b',
+    'సి': 'c', 'సీ': 'c',
+    'డి': 'd', 'డీ': 'd',
+    'ఈ': 'e', 'ఇ': 'e', 'ఇమ్': 'e',
+    'ఎఫ్': 'f', 'ఎఫ': 'f', 'ఎఫ్ఫ్': 'f',
+    'జి': 'g', 'జీ': 'g',
+    'హెచ్': 'h', 'ఎచ్': 'h',
+    'ఐ': 'i', 'ఆయ్': 'i',
+    'జే': 'j', 'జె': 'j',
+    'కే': 'k', 'కె': 'k', 'కా': 'k',
+    'ఎల్': 'l', 'ఎల': 'l',
+    'ఎమ్': 'm', 'ఎం': 'm',
+    'ఎన్': 'n', 'ఎన': 'n',
+    'ఓ': 'o', 'ఒ': 'o',
+    'పి': 'p', 'పీ': 'p',
+    'క్యూ': 'q', 'క్యు': 'q',
+    'ఆర్': 'r', 'ఆర': 'r', 'అర్': 'r',
+    'ఎస్': 's', 'ఎస': 's',
+    'టి': 't', 'టీ': 't',
+    'యు': 'u', 'యూ': 'u', 'ఉ': 'u',
+    'వి': 'v', 'వీ': 'v',
+    'డబల్యూ': 'w', 'డబల్యు': 'w', 'డబ్ల్యు': 'w',
+    'ఎక్స్': 'x', 'ఎక్స': 'x',
+    'వై': 'y', 'వాయ్': 'y',
+    'జెడ్': 'z', 'జెడ': 'z', 'జీడ్': 'z',
+  },
+  hi: {
+    // Hindi — most common pronunciations.
+    'ए': 'a', 'अ': 'a', 'आ': 'a',
+    'बी': 'b', 'बि': 'b',
+    'सी': 'c', 'सि': 'c',
+    'डी': 'd', 'डि': 'd',
+    'ई': 'e', 'इ': 'e',
+    'एफ': 'f', 'एफ़': 'f',
+    'जी': 'g', 'जि': 'g',
+    'एच': 'h', 'एचएच': 'h',
+    'आई': 'i', 'आइ': 'i', 'अाई': 'i',
+    'जे': 'j', 'जै': 'j',
+    'के': 'k', 'का': 'k',
+    'एल': 'l', 'एलएल': 'l',
+    'एम': 'm', 'एमएम': 'm',
+    'एन': 'n', 'एनएन': 'n',
+    'ओ': 'o',
+    'पी': 'p', 'पि': 'p',
+    'क्यू': 'q', 'क्यु': 'q',
+    'आर': 'r', 'अार': 'r',
+    'एस': 's',
+    'टी': 't', 'टि': 't',
+    'यू': 'u', 'यु': 'u',
+    'वी': 'v', 'वि': 'v',
+    'डब्ल्यू': 'w', 'डब्लू': 'w',
+    'एक्स': 'x',
+    'वाई': 'y', 'वाय': 'y',
+    'ज़ेड': 'z', 'जेड': 'z',
+  },
+};
+
+/**
+ * Map common spoken digit names (Hindi/Telugu/Tamil) into ASCII digits, in
+ * addition to literal Devanagari/Telugu/Tamil digit code-points. Used by
+ * `decodeIndicSpelling` so "నైన్ ఫోర్ నైన్" → "949".
+ */
+const SPOKEN_DIGIT_MAP: Record<string, string> = {
+  // English-ish (already work but normalize the spellings Sarvam emits)
+  zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9',
+  // Telugu
+  'సున్నా': '0', 'ఒకటి': '1', 'రెండు': '2', 'మూడు': '3', 'నాలుగు': '4', 'ఐదు': '5', 'ఆరు': '6', 'ఏడు': '7', 'ఎనిమిది': '8', 'తొమ్మిది': '9',
+  // Hindi
+  'शून्य': '0', 'जीरो': '0', 'एक': '1', 'दो': '2', 'तीन': '3', 'चार': '4', 'पांच': '5', 'पाँच': '5', 'छह': '6', 'सात': '7', 'आठ': '8', 'नौ': '9',
+  // English digits spoken (Sarvam emits these on bilingual lines)
+  'नैन': '9', 'नाइन': '9', 'फोर': '4', 'थ्री': '3', 'टू': '2', 'वन': '1', 'फाइव': '5', 'सिक्स': '6', 'सेवन': '7', 'एट': '8', 'ओह': '0',
+  'నైన్': '9', 'ఫోర్': '4', 'త్రీ': '3', 'టు': '2', 'వన్': '1', 'ఎయిట్': '8', 'సెవెన్': '7', 'సిక్స్': '6', 'ఫైవ్': '5', 'ఫైవు': '5', 'ఫైవ్‌': '5', 'జీరో': '0', 'ఓ': '0',
+};
+
+/**
+ * Indic-script domain / connector hints. Sarvam sometimes transliterates
+ * "gmail" → "జీమెయిల్" / "जीमेल" — those forms don't survive `toLowerCase`
+ * so the canonical English equivalent is mapped in explicitly. Each value
+ * goes into the decoded output verbatim.
+ */
+const INDIC_DOMAIN_HINTS: Record<string, string> = {
+  'జీమెయిల్': 'gmail', 'జిమెయిల్': 'gmail', 'జీమెయిల': 'gmail',
+  'జీమెయిల్.కామ్': 'gmail.com', 'జీమెయిల్‌డాట్‌కామ్': 'gmail.com',
+  'యాహూ': 'yahoo', 'హాట్‌మెయిల్': 'hotmail', 'ఔట్‌లుక్': 'outlook',
+  'జీమేల్': 'gmail',
+  'जीमेल': 'gmail', 'जीमैल': 'gmail', 'याहू': 'yahoo', 'हॉटमेल': 'hotmail',
+  'आउटलुक': 'outlook',
+  'డాట్': '.', 'కామ్': 'com', 'ఇన్': 'in', 'కోడాట్': 'co.',
+  'डॉट': '.', 'कॉम': 'com', 'इन': 'in',
+};
+
+/**
+ * Decode "spelling-mode" Indic utterances into a candidate ASCII string.
+ *
+ * Returns `null` when the utterance doesn't look like spelling (so the caller
+ * can skip the hint). The detector accepts an utterance as spelling when at
+ * least 3 tokens map cleanly to either a single ASCII letter or a digit, AND
+ * ≥50% of tokens map (so a regular sentence with one stray letter-name like
+ * "వి ఆర్ S.R.M" doesn't trigger).
+ *
+ * Email markers like "@", "gmail", "yahoo", ".com" are preserved as-is and
+ * collapsed into the output, so "వి ఏ జె ఐ at gmail dot com" decodes to
+ * "vaji@gmail.com".
+ *
+ * Example
+ * -------
+ *   in:  "వి ఏ జె ఐ వి ఏ బి యు 3223@gmail.com"
+ *   out: "vajivabu3223@gmail.com"
+ *   in:  "మొబైల్ నెంబర్ 9 4 9 3 3 2 4 7 9 5"
+ *   out: "9493324795"  (the "mobile number" preamble is dropped because
+ *                       only digits and letter-names map; non-mappers are
+ *                       skipped as long as a strong majority map)
+ */
+export function decodeIndicSpelling(text: string, language: string): string | null {
+  if (!text) return null;
+  const langKey = String(language || '').toLowerCase().slice(0, 2);
+  const letterMap = INDIC_LETTER_MAPS[langKey];
+  if (!letterMap) return null;
+
+  // Double/triple-digit normalization. Callers commonly say "double nine"
+  // or "triple five" instead of repeating digits — expand these to "99"/"555"
+  // BEFORE the rest of the decoder runs, so the digit regex catches them.
+  // Supports English, Hindi, and Telugu phrasings.
+  const REPEAT_WORD_MAP: Record<string, number> = {
+    double: 2, triple: 3, quadruple: 4,
+    'डबल': 2, 'ट्रिपल': 3,
+    'డబల్': 2, 'ట్రిపుల్': 3, 'డబుల్': 2,
+  };
+  const repeatPreprocessed = (text || '').replace(
+    /(double|triple|quadruple|डबल|ट्रिपल|డబల్|డబుల్|ట్రిపుల్)\s+(zero|one|two|three|four|five|six|seven|eight|nine|शून्य|एक|दो|तीन|चार|पांच|छह|सात|आठ|नौ|సున్నా|ఒకటి|రెండు|మూడు|నాలుగు|ఐదు|ఆరు|ఏడు|ఎనిమిది|తొమ్మిది|నైన్|ఫోర్|ఫైవ్|త్రీ|టు|వన్|ఎయిట్|సెవెన్|సిక్స్|जीरो|नैन|नाइन|फोर|थ्री|टू|वन|फाइव|सिक्स|सेवन|एट|0|1|2|3|4|5|6|7|8|9)\b/giu,
+    (_full, repeatWord: string, digitWord: string) => {
+      const n = REPEAT_WORD_MAP[repeatWord.toLowerCase()] || 2;
+      const digit = SPOKEN_DIGIT_MAP[digitWord.toLowerCase()] || SPOKEN_DIGIT_MAP[digitWord] || (/^[0-9]$/.test(digitWord) ? digitWord : null);
+      return digit ? digit.repeat(n) : '';
+    },
+  );
+
+  // Fast-path: a single dense 10-digit run is almost certainly a mobile
+  // number — return it directly without requiring the 50% confidence gate.
+  // Without this, "మొబైల్ నెంబర్ వచ్చేసరికి 9493324795" fails because the
+  // filler outweighs the lone digit token even though the digit run IS the
+  // entire answer. Match Indian mobile shape (10 digits, starts 6-9, with
+  // optional +91 / 91 prefix that we strip).
+  const phoneMatch = repeatPreprocessed.match(/(?:\+?91[-\s]*)?([6-9]\d{9})\b/);
+  if (phoneMatch) return phoneMatch[1];
+
+  // Use the doubled/tripled-expanded text for the rest of the decoder.
+  const decodingText = repeatPreprocessed;
+
+  // Normalise common spoken connectors that bridge spelled letters. The
+  // `/u` flag is required so `\b` honours Devanagari/Telugu word boundaries;
+  // without it, "एट द रेट" (Hindi "at the rate") never matches and the "एट"
+  // token gets misread as the digit 8 by the SPOKEN_DIGIT_MAP fallback.
+  let normalised = decodingText
+    .replace(/\bat\s+the\s+rate\b/giu, '@')
+    .replace(/\bat\s+gmail/giu, '@gmail')
+    .replace(/\bat\s+yahoo/giu, '@yahoo')
+    .replace(/\bdot\s+com\b/giu, '.com')
+    .replace(/\bdot\s+in\b/giu, '.in')
+    .replace(/\bdot\s+co\s+dot\s+in\b/giu, '.co.in')
+    .replace(/(^|\s)అట్\s+ద\s+రేట్(\s|$)/giu, '$1@$2')
+    .replace(/(^|\s)డాట్\s+కామ్(\s|$)/giu, '$1.com$2')
+    .replace(/(^|\s)డాట్\s+ఇన్(\s|$)/giu, '$1.in$2')
+    .replace(/(^|\s)एट\s+द\s+रेट(\s|$)/giu, '$1@$2')
+    .replace(/(^|\s)डॉट\s+कॉम(\s|$)/giu, '$1.com$2')
+    .replace(/(^|\s)डॉट\s+इन(\s|$)/giu, '$1.in$2');
+
+  // Tokenise on whitespace + common separators (commas/hyphens).
+  const tokens = normalised
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (tokens.length < 3) return null;
+
+  const decoded: string[] = [];
+  let mappedCount = 0;
+  let totalConsidered = 0;
+
+  for (const raw of tokens) {
+    // Strip surrounding punctuation but keep internal symbols (@, ., 0-9).
+    const t = raw.replace(/^[.,!?;:'"`]+|[,!?;:'"`]+$/g, '');
+    if (!t) continue;
+    totalConsidered++;
+
+    // ASCII letter (single char) — keep
+    if (/^[a-zA-Z]$/.test(t)) { decoded.push(t.toLowerCase()); mappedCount++; continue; }
+    // ASCII digit run — keep
+    if (/^[0-9]+$/.test(t)) { decoded.push(t); mappedCount++; continue; }
+    // Embedded email atoms — keep
+    if (/[@.]/.test(t)) { decoded.push(t.toLowerCase()); mappedCount++; continue; }
+    // Devanagari / Telugu / Tamil etc. digit codepoint runs (rare but seen).
+    if (/^[०-९૦-૯௦-௯౦-౯೦-೯൦-൯]+$/.test(t)) {
+      const ascii = t.replace(/./g, (ch) => {
+        const code = ch.codePointAt(0)!;
+        if (code >= 0x0966 && code <= 0x096F) return String(code - 0x0966);
+        if (code >= 0x0AE6 && code <= 0x0AEF) return String(code - 0x0AE6);
+        if (code >= 0x0BE6 && code <= 0x0BEF) return String(code - 0x0BE6);
+        if (code >= 0x0C66 && code <= 0x0C6F) return String(code - 0x0C66);
+        if (code >= 0x0CE6 && code <= 0x0CEF) return String(code - 0x0CE6);
+        if (code >= 0x0D66 && code <= 0x0D6F) return String(code - 0x0D66);
+        return ch;
+      });
+      decoded.push(ascii); mappedCount++; continue;
+    }
+    // Indic letter-pronunciation
+    const lower = t.toLowerCase();
+    const letter = letterMap[t] || letterMap[lower];
+    if (letter) { decoded.push(letter); mappedCount++; continue; }
+    // Spoken digit name
+    const digit = SPOKEN_DIGIT_MAP[t] || SPOKEN_DIGIT_MAP[lower];
+    if (digit) { decoded.push(digit); mappedCount++; continue; }
+    // Domain hints (case-insensitive) — keep verbatim, contributes to confidence.
+    if (/^(gmail|yahoo|hotmail|outlook|rediffmail|protonmail|icloud)$/i.test(t)) {
+      decoded.push(t.toLowerCase()); mappedCount++; continue;
+    }
+    // Indic-script domain / dot / com hints (Sarvam transliterates "gmail"
+    // → "జీమెయిల్" / "जीमेल"). Map to canonical English so the parsed
+    // address looks like "vaji@gmail.com" instead of "vajiజీమెయిల్".
+    const indicDomain = INDIC_DOMAIN_HINTS[t] || INDIC_DOMAIN_HINTS[lower];
+    if (indicDomain) { decoded.push(indicDomain); mappedCount++; continue; }
+    // Otherwise: skip — but don't penalise the count, this token is just
+    // ignored. Non-mapping words like "మొబైల్ నెంబర్" are filler.
+  }
+
+  if (mappedCount < 3) return null;
+  // Require a meaningful majority so a sentence with ONE letter-name doesn't
+  // trigger. totalConsidered may include filler that was skipped — base the
+  // ratio on total tokens, not on mapped subset.
+  if (mappedCount / Math.max(1, totalConsidered) < 0.5) return null;
+
+  // Stitch the decoded tokens into a contiguous string. Letters/digits glue
+  // directly together; multi-char domain hints ("gmail", ".", "com") also
+  // glue. The result for ["v","a","j","i","v","a","b","u","3223","@","gmail",".","com"]
+  // is "vajivabu3223@gmail.com" — exactly what we want for an email.
+  let out = decoded.join('');
+  // Common Sarvam pattern: ends with "gmail" / "yahoo" but missed the @.
+  // If we have ≥3 letters followed by a recognised domain stem and no @,
+  // splice @ in front of the domain so the LLM gets a usable email shape.
+  out = out.replace(/([a-z0-9.]{3,})(gmail|yahoo|hotmail|outlook|rediffmail|protonmail|icloud)(\.[a-z.]+)?$/, '$1@$2$3');
+  // Trail off with ".com" if a domain stem was emitted without a TLD.
+  out = out.replace(/@(gmail|yahoo|hotmail|outlook|rediffmail|protonmail|icloud)$/, '@$1.com');
+  // Tidy duplicate at-signs or dots that the user/STT may have emitted twice.
+  out = out.replace(/@+/g, '@').replace(/\.{2,}/g, '.').replace(/\s+/g, '');
+  // Lowercase canonical form for emails; digit runs are already ASCII.
+  return out.toLowerCase();
+}
+
+// ----- Slot extraction + confirmation -------------------------------------
+//
+// Structured field capture. Runs on every user utterance to populate
+// `session.collectedFields` from regex / decoder / heuristic extraction. The
+// goal is to give the LLM a SINGLE structured view of what's been captured
+// so it stops re-asking confirmed fields and reads back unconfirmed ones.
+//
+// We never overwrite a CONFIRMED slot. New extractions with higher confidence
+// for an unconfirmed slot replace the old value.
+
+type SlotName = 'name' | 'mobile' | 'email' | 'course' | 'city' | 'callback_time' | 'university';
+type Slot = { value: string; confidence: number; confirmed: boolean; source: string };
+
+const VALID_EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const VALID_INDIAN_MOBILE_RE = /^[6-9]\d{9}$/;
+
+/** Pull a 10-digit Indian mobile out of a phone-shaped string, or null. */
+function extractMobile(text: string): string | null {
+  if (!text) return null;
+  // Try the spelling decoder's phone fast-path first (it strips +91 / 91).
+  const m = text.match(/(?:\+?91[-\s]*)?([6-9]\d{9})\b/);
+  if (m) return m[1];
+  // Sometimes the user gives the number with spaces or "double/triple" already
+  // normalised by decodeIndicSpelling — try a digit-run fallback.
+  const digits = text.replace(/[^\d]/g, '');
+  if (VALID_INDIAN_MOBILE_RE.test(digits)) return digits;
+  // Or maybe the +91 was emitted as part of a longer digit run (12 digits).
+  if (digits.length === 12 && digits.startsWith('91') && VALID_INDIAN_MOBILE_RE.test(digits.slice(2))) {
+    return digits.slice(2);
+  }
+  return null;
+}
+
+/** Pull an email out of a string, or null. Decoder runs first; this is the
+ *  final sanity-check on the post-decoded text. */
+function extractEmail(text: string): string | null {
+  if (!text) return null;
+  const m = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  if (!m) return null;
+  const candidate = m[0].toLowerCase();
+  return VALID_EMAIL_RE.test(candidate) ? candidate : null;
+}
+
+/** Detect explicit affirmative confirmation in the caller's language(s). Used
+ *  to flip the most-recently-touched UNCONFIRMED slot to confirmed when the
+ *  caller agrees to the agent's read-back. */
+function isAffirmative(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  return /\b(yes|yeah|correct|right|that('?s)?\s+right|that('?s)?\s+correct|ok(ay)?|sure|absolutely)\b/i.test(t)
+    || /(సరి|సరిగ్గా|కరెక్ట్|అవును|నిజమే|హా|ఓకే|సరే)/.test(t)
+    || /(हाँ|हां|सही|बिलकुल|ठीक|ओके|एकदम)/.test(t)
+    || /(ஆம்|சரி|நிச்சயம்|ஓகே)/.test(t)
+    || /(ಹೌದು|ಸರಿ|ಸರಿಯಾಗಿದೆ|ಓಕೆ)/.test(t)
+    || /(അതെ|ശരി|കൃത്യം)/.test(t);
+}
+
+function isNegative(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim().toLowerCase();
+  return /\b(no|nope|wrong|incorrect|not\s+(right|correct))\b/i.test(t)
+    || /(కాదు|తప్పు|వద్దు)/.test(t)
+    || /(नहीं|गलत|नही)/.test(t)
+    || /(இல்லை|தவறு)/.test(t)
+    || /(ಇಲ್ಲ|ತಪ್ಪು)/.test(t)
+    || /(ഇല്ല|തെറ്റ്)/.test(t);
+}
+
+/**
+ * Extract slot values from a single user utterance. Writes into `dst` in
+ * place. NEVER overwrites a confirmed slot. Higher-confidence extractions
+ * replace existing unconfirmed slots; lower-confidence ones are dropped.
+ *
+ * `spellingHint` is the decoder's parsed ASCII candidate (if any) — that's
+ * usually higher confidence than free-text regex because the decoder
+ * normalised the syllables.
+ */
+function extractSlotsFromUtterance(
+  text: string,
+  spellingHint: string | null,
+  dst: { [k in SlotName]?: Slot },
+): SlotName[] {
+  const updated: SlotName[] = [];
+  const writeSlot = (name: SlotName, slot: Slot) => {
+    const cur = dst[name];
+    if (cur?.confirmed) return; // never overwrite confirmed
+    if (!cur || slot.confidence >= cur.confidence) {
+      dst[name] = slot;
+      updated.push(name);
+    }
+  };
+
+  // Mobile from decoder hint (high confidence) OR regex on raw text (medium).
+  const mobileFromHint = spellingHint ? extractMobile(spellingHint) : null;
+  if (mobileFromHint) {
+    writeSlot('mobile', { value: mobileFromHint, confidence: 0.92, confirmed: false, source: 'spelling_decoder' });
+  } else {
+    const mobileFromText = extractMobile(text);
+    if (mobileFromText) writeSlot('mobile', { value: mobileFromText, confidence: 0.78, confirmed: false, source: 'regex' });
+  }
+
+  // Email from decoder hint (high confidence) OR regex on raw text.
+  const emailFromHint = spellingHint ? extractEmail(spellingHint) : null;
+  if (emailFromHint) {
+    writeSlot('email', { value: emailFromHint, confidence: 0.9, confirmed: false, source: 'spelling_decoder' });
+  } else {
+    const emailFromText = extractEmail(text);
+    if (emailFromText) writeSlot('email', { value: emailFromText, confidence: 0.8, confirmed: false, source: 'regex' });
+  }
+
+  return updated;
+}
+
+/**
+ * Compute the "[CAPTURED SO FAR: …]" hint string that gets appended to the
+ * LLM's view of the user turn. Returns '' when no slots have been collected
+ * yet so the prompt stays short on early turns.
+ *
+ * Format the LLM sees:
+ *   [CAPTURED SO FAR: name="Rahul" (confirmed), mobile=9876543210 (UNCONFIRMED — read back),
+ *    email=rahul@gmail.com (UNCONFIRMED — read back). DO NOT re-ask confirmed fields.]
+ */
+function buildSlotHint(slots: { [k in SlotName]?: Slot }): string {
+  const parts: string[] = [];
+  const ORDER: SlotName[] = ['name', 'mobile', 'email', 'course', 'university', 'city', 'callback_time'];
+  for (const key of ORDER) {
+    const s = slots[key];
+    if (!s || !s.value) continue;
+    const status = s.confirmed ? 'CONFIRMED' : 'UNCONFIRMED — read back letter-by-letter and ask if correct';
+    parts.push(`${key}=${JSON.stringify(s.value)} (${status})`);
+  }
+  if (parts.length === 0) return '';
+  return `\n[CAPTURED SO FAR: ${parts.join(', ')}. DO NOT re-ask CONFIRMED fields. Read UNCONFIRMED fields back for explicit yes/no.]`;
+}
+
 async function callLLM(
   agent: any,
   history: Array<{ role: string; content: string }>,
@@ -573,6 +1070,242 @@ function hasIndicScript(text: string): boolean {
   return /[ऀ-ॿ਀-੿઀-૿଀-୿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]/.test(text);
 }
 
+/**
+ * Token-streaming LLM call for the ai-runtime path.
+ *
+ * Mirrors callLLM's grounding/RAG/Sarvam-fallback decisions but uses the
+ * /chat/simple-stream SSE endpoint so we can hand each finished sentence to
+ * TTS as soon as it's complete, instead of waiting for the whole reply.
+ *
+ * `onSentence` fires every time a sentence-terminator is detected in the
+ * accumulating buffer (latin .!? + Devanagari ।॥). The whole accumulated
+ * reply is returned at the end so the caller can persist it to the
+ * transcript / apply trimReplyForVoice + dedupeReply.
+ *
+ * Indic / Sarvam path is NOT streamed here — Sarvam-M emits a <think>…</think>
+ * reasoning block that has to be fully received and stripped before any of
+ * the actual reply is usable. Caller should keep using callLLM for Indic.
+ *
+ * Returns '' on any error (matching callLLM's contract).
+ */
+async function streamLLMReply(
+  agent: any,
+  history: Array<{ role: string; content: string }>,
+  customerName: string | null,
+  callType: 'inbound' | 'outbound',
+  language: string | null,
+  campaignContext: { instruction: string | null; variables: Record<string, any> } | null,
+  onSentence: (sentence: string) => void,
+): Promise<string> {
+  if (!agent) return '';
+  const basePrompt = agent.system_prompt || 'helpful customer conversation';
+  const lastUserUtter = history.length > 0 && history[history.length - 1].role === 'user'
+    ? history[history.length - 1].content : '';
+  const skipGrounding = isShortAck(lastUserUtter);
+  const isIndic = !!(language && !/^en/i.test(language) && sarvamCanHandle(language));
+  const isCampaignCall = !!(campaignContext && campaignContext.instruction);
+  const skipExternalGrounding = skipGrounding || isCampaignCall;
+  const skipRag = skipGrounding || isIndic;
+  const [webContext, liveContext, ragContext] = await Promise.all([
+    skipExternalGrounding ? Promise.resolve('') : fetchWebContext(agent, history, language || null),
+    skipExternalGrounding ? Promise.resolve('') : fetchLiveSearchContext(history),
+    skipRag ? Promise.resolve('') : fetchRagContext(agent, history),
+  ]);
+  const groundingContext = (liveContext || '') + (webContext || '') + (ragContext || '');
+  const systemPrompt = buildVoiceAgentPrompt(basePrompt + groundingContext, agent, {
+    customerName,
+    callType,
+    language: language || undefined,
+    campaignInstruction: campaignContext?.instruction || null,
+    contactVariables: campaignContext?.variables || null,
+  });
+  const trimmedHistory = history.length > 14 ? history.slice(-14) : history;
+
+  // Indic path: HYBRID Gemini-first → Sarvam-fallback for latency.
+  // Sarvam-M's <think> block makes it 1.5–3s per turn; Gemini-Flash returns
+  // in 500–800ms. We try Gemini first with an explicit "REPLY ONLY IN <lang>"
+  // instruction, check the output actually contains the right script, and
+  // fall back to Sarvam-M only when Gemini drifted to English. This keeps
+  // most turns fast while preserving Sarvam-quality Telugu on the rare miss.
+  if (isIndic) {
+    const slimPrompt = buildVoiceAgentPromptSlim(basePrompt, agent, {
+      customerName,
+      callType,
+      language: language || undefined,
+      campaignInstruction: campaignContext?.instruction || null,
+      contactVariables: campaignContext?.variables || null,
+    });
+    const sarvamHistory = trimmedHistory.length > 8 ? trimmedHistory.slice(-8) : trimmedHistory;
+
+    // Step 1: try Gemini (fast). The system prompt is the slim prompt PLUS
+    // a hard language-lock so Gemini doesn't drift to English mid-turn.
+    const langName = (() => {
+      const l = String(language || '').toLowerCase().slice(0, 2);
+      return ({ te: 'Telugu', hi: 'Hindi', ta: 'Tamil', kn: 'Kannada', ml: 'Malayalam', mr: 'Marathi', bn: 'Bengali', gu: 'Gujarati', pa: 'Punjabi', or: 'Odia', as: 'Assamese' } as Record<string, string>)[l] || 'the caller\'s language';
+    })();
+    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE LOCK: This call is in ${langName}. EVERY word of your reply must be in ${langName} script (Telugu/Devanagari/etc — never Latin letters). If you don't know how to say something in ${langName}, use the closest natural phrasing. NEVER reply in English on this call.`;
+
+    let geminiReply: string | null = null;
+    try {
+      const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
+      const r = await fetch(`${aiUrl}/chat/simple`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system_prompt: langLockedPrompt,
+          messages: sarvamHistory,
+          provider: 'google',
+          model: 'gemini-2.5-flash',
+          temperature: parseFloat(agent.temperature) || 0.7,
+          max_tokens: 200,
+          knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
+        }),
+      });
+      if (r.ok) {
+        const data = (await r.json()) as { reply?: string; mock?: boolean };
+        if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
+          geminiReply = data.reply.trim();
+          logger.info(
+            { language, replyLen: geminiReply.length, preview: geminiReply.slice(0, 60) },
+            'streamLLMReply (Indic): Gemini hit — using fast path',
+          );
+        } else {
+          logger.info(
+            { language, mock: data.mock, hadIndic: data.reply ? hasIndicScript(data.reply) : false, preview: (data.reply || '').slice(0, 60) },
+            'streamLLMReply (Indic): Gemini drifted to English/mock — falling back to Sarvam',
+          );
+        }
+      }
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'streamLLMReply (Indic): Gemini call threw — falling back to Sarvam');
+    }
+
+    // Step 2: emit Gemini's reply if it survived the language gate; otherwise
+    // fall back to Sarvam (full retry chain like before).
+    let finalReply = geminiReply;
+    if (!finalReply && sarvamConfigured()) {
+      let sarvamReply = await callSarvamLLM({
+        systemPrompt: slimPrompt,
+        messages: sarvamHistory,
+        maxTokens: 200,
+        temperature: parseFloat(agent.temperature) || 0.7,
+      });
+      if (!sarvamReply && sarvamHistory.length > 4) {
+        sarvamReply = await callSarvamLLM({
+          systemPrompt: slimPrompt,
+          messages: sarvamHistory.slice(-4),
+          maxTokens: 400,
+          temperature: parseFloat(agent.temperature) || 0.7,
+        });
+      }
+      finalReply = sarvamReply;
+    }
+
+    if (!finalReply) {
+      const lang = String(language).toLowerCase();
+      const sayAgain = SAY_AGAIN[lang] || SAY_AGAIN[lang.slice(0, 2)] || 'Sorry, could you say that again?';
+      logger.warn(
+        { language, historyLen: history.length },
+        'streamLLMReply: both Gemini and Sarvam failed on Indic call — emitting native say-again',
+      );
+      onSentence(sayAgain);
+      return sayAgain;
+    }
+    // Split the reply into sentences so the TTS pipeline still gets parallel-synth.
+    const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
+    if (sents.length === 0) {
+      onSentence(finalReply);
+    } else {
+      for (const s of sents) onSentence(s);
+    }
+    return finalReply;
+  }
+
+  const aiRuntimeUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
+  let fullReply = '';
+  let buffer = '';
+
+  // Sentence-terminator regex covering latin + Devanagari + Sinhala/Indic full
+  // stops. Match the first terminator + optional trailing space/quote so the
+  // sentence's punctuation comes along for natural TTS prosody.
+  const SENT_BOUNDARY = /^[\s\S]*?[.!?।॥](?=\s|$|["')\]])/u;
+  const flushBuffer = (force: boolean) => {
+    while (true) {
+      const m = buffer.match(SENT_BOUNDARY);
+      if (!m) break;
+      const sentence = m[0].trim();
+      buffer = buffer.slice(m[0].length).replace(/^\s+/, '');
+      if (sentence) onSentence(sentence);
+    }
+    if (force && buffer.trim()) {
+      onSentence(buffer.trim());
+      buffer = '';
+    }
+  };
+
+  try {
+    const resp = await fetch(`${aiRuntimeUrl}/chat/simple-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_prompt: systemPrompt,
+        messages: trimmedHistory,
+        provider: agent.llm_provider || 'google',
+        model: agent.llm_model || 'gemini-2.5-flash',
+        temperature: parseFloat(agent.temperature) || 0.7,
+        max_tokens: 180,
+        knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
+      }),
+    });
+    if (!resp.ok || !resp.body) return '';
+    const reader = (resp.body as any).getReader();
+    const decoder = new TextDecoder();
+    let sseAccum = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseAccum += decoder.decode(value, { stream: true });
+      // SSE events are split by blank lines.
+      let idx;
+      while ((idx = sseAccum.indexOf('\n\n')) >= 0) {
+        const evRaw = sseAccum.slice(0, idx);
+        sseAccum = sseAccum.slice(idx + 2);
+        // Each event line starts with "data: ".
+        for (const line of evRaw.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(payload) as { type?: string; content?: string };
+            if (obj.type === 'content' && obj.content) {
+              buffer += obj.content;
+              fullReply += obj.content;
+              flushBuffer(false);
+            } else if (obj.type === 'done') {
+              flushBuffer(true);
+            }
+          } catch { /* malformed SSE chunk — skip */ }
+        }
+      }
+    }
+    flushBuffer(true);
+  } catch (err: any) {
+    logger.warn({ err: err.message }, 'streamLLMReply failed');
+    return '';
+  }
+
+  // Language-mismatch guard for the streamed path: same logic as callLLM.
+  if (isIndic && fullReply && !hasIndicScript(fullReply)) {
+    logger.warn(
+      { language, replyPreview: fullReply.slice(0, 80) },
+      'streamLLMReply: Latin-only reply on Indic call — falling back to native say-again',
+    );
+    const lang = String(language).toLowerCase();
+    return SAY_AGAIN[lang] || SAY_AGAIN[lang.slice(0, 2)] || fullReply;
+  }
+  return fullReply.trim();
+}
+
 const SAY_AGAIN: Record<string, string> = {
   'hi-IN': 'माफ़ कीजिए, क्या आप दोबारा बोल सकते हैं?',
   hi: 'माफ़ कीजिए, क्या आप दोबारा बोल सकते हैं?',
@@ -684,6 +1417,9 @@ interface StreamSession {
   dgWs: WebSocket | null;
   azureStt: AzureSttHandle | null;
   sarvamStt: SarvamSttHandle | null;
+  /** Set once when Sarvam STT hits a quota/429 error and we permanently
+   * downshift this session to Deepgram. Prevents repeat downshift attempts. */
+  sarvamSttDownshifted?: boolean;
   plivoWs: WebSocket | null;
   history: Array<{ role: string; content: string }>;
   inFlightReply: boolean;
@@ -717,6 +1453,33 @@ interface StreamSession {
   // the call, we set this and stop firing the LLM on any further utterances.
   // The caller still controls the actual hangup; we just stop talking.
   callEnded: boolean;
+  /**
+   * Structured per-field slot store. Populated incrementally as the caller
+   * gives details — overrides what the LLM might otherwise dump-collect, and
+   * is the single source of truth for what gets persisted to CRM at call end.
+   *
+   * Each slot tracks:
+   *  - value: extracted text (canonical, post-decode)
+   *  - confidence: 0–1 score from extraction heuristic / decoder
+   *  - confirmed: caller verbally agreed when the agent read it back ("yes correct")
+   *  - source: where it came from ("spelling_decoder", "regex", "llm_extract", "csv_var")
+   *
+   * Used by:
+   *  - injectSlotHint(): emits "[CAPTURED SO FAR: name=Rahul (confirmed), mobile=… (unconfirmed)]"
+   *    into the LLM's view of each user turn so the agent NEVER re-asks a confirmed
+   *    field and treats unconfirmed ones as needing read-back.
+   *  - createLeadFromAnalysis(): merges slot store with analyzer extraction; slot
+   *    store wins on conflict because it has explicit caller confirmation.
+   */
+  collectedFields: {
+    name?: { value: string; confidence: number; confirmed: boolean; source: string };
+    mobile?: { value: string; confidence: number; confirmed: boolean; source: string };
+    email?: { value: string; confidence: number; confirmed: boolean; source: string };
+    course?: { value: string; confidence: number; confirmed: boolean; source: string };
+    city?: { value: string; confidence: number; confirmed: boolean; source: string };
+    callback_time?: { value: string; confidence: number; confirmed: boolean; source: string };
+    university?: { value: string; confidence: number; confirmed: boolean; source: string };
+  };
 }
 
 // ---- main setup ------------------------------------------------------------
@@ -764,6 +1527,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       bargeInAllowedAt: 0,
       currentAgentText: '',
       callEnded: false,
+      collectedFields: {},
     };
 
     logger.info({ agentId, tenantId }, 'Plivo audio stream WS connected');
@@ -889,7 +1653,29 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     }
   }
 
-  const lang = firstNonEmpty(session.agent.voice_config?.language, session.agent.voiceConfig?.language) || 'en-IN';
+  // Language priority (matches the spec):
+  //   1. Campaign per-contact CSV language column (variables.language / lang /
+  //      preferred_language) → wins over agent default so a Telugu lead dialed
+  //      via a multi-language campaign always opens in Telugu.
+  //   2. Agent default voice_config.language.
+  //   3. Hard fallback en-IN.
+  // The session language is the OPENING language only; mid-call detection
+  // (detectLanguageRequest, around L1695) can still flip session.language
+  // when the caller asks "Telugu lo cheppu" / "English mein bolo".
+  const contactLangRaw =
+    session.campaignContext?.variables?.language ||
+    session.campaignContext?.variables?.lang ||
+    session.campaignContext?.variables?.preferred_language ||
+    null;
+  const contactLang = normalizeLanguageCode(contactLangRaw);
+  const agentLang = firstNonEmpty(session.agent.voice_config?.language, session.agent.voiceConfig?.language);
+  const lang = contactLang || agentLang || 'en-IN';
+  if (contactLang && agentLang && contactLang !== agentLang) {
+    logger.info(
+      { callSid: session.callSid, contactLang, agentLang, raw: contactLangRaw },
+      'Stream: per-contact CSV language overrides agent default',
+    );
+  }
   session.language = lang;
   // Backend selection priority:
   //   - English / non-Indic           → Deepgram (Aura is English-trained)
@@ -964,7 +1750,33 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     session.sarvamStt = startSarvamStt({
       language: lang,
       onFinal: (text) => dispatchUserUtterance(session, text),
-      onError: (msg) => logger.warn({ callSid: session.callSid, err: msg }, 'Sarvam STT error'),
+      onError: (msg) => {
+        logger.warn({ callSid: session.callSid, err: msg }, 'Sarvam STT error');
+        // Quota / 429 fallback: when Sarvam credits are exhausted the call
+        // goes dead because no user utterance ever transcribes. Detect that
+        // specific failure mode and dynamically switch the session over to
+        // Deepgram STT so the conversation continues. Deepgram's Telugu/
+        // Hindi accuracy is approximate but vastly better than silence.
+        // Only fires ONCE per session — subsequent Sarvam errors are
+        // ignored after the switch.
+        const isQuota = /429|No credits|insufficient_quota|quota/i.test(String(msg || ''));
+        if (isQuota && !session.sarvamSttDownshifted) {
+          session.sarvamSttDownshifted = true;
+          logger.warn(
+            { callSid: session.callSid },
+            'Sarvam STT quota exhausted — downshifting to Deepgram for the rest of this call',
+          );
+          try { session.sarvamStt?.close(); } catch { /* ignore */ }
+          session.sarvamStt = null;
+          session.sttBackend = 'deepgram';
+          // Re-open Deepgram with the same language. Best-effort; if
+          // Deepgram doesn't support this language code it falls back to
+          // en-US which is still better than zero transcription.
+          connectDeepgram(session, lang).catch((err: any) => {
+            logger.error({ callSid: session.callSid, err: err?.message }, 'Deepgram fallback open failed');
+          });
+        }
+      },
     });
     logger.info({ callSid: session.callSid }, 'Sarvam STT opened');
   } else if (session.sttBackend === 'azure') {
@@ -994,20 +1806,103 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     ...(session.campaignContext.variables || {}),
     name: safeName,
   };
-  const rawTemplate = (session.agent.greeting_message || '').toString();
+  // Per-language fallback greeting templates. Used when the agent has either
+  // (a) no greeting_message at all, or (b) a greeting_message whose script
+  // doesn't match the call's language (e.g. English template on a Telugu
+  // call). Each template:
+  //   - Greets by name (interpolated from {{name}}).
+  //   - Asks ONE casual "is this a good time?" question.
+  //   - Does NOT ask any qualification question (no "have you completed
+  //     intermediate?" / "what's your name?" on turn 1) — those caused
+  //     callers to hang up early.
+  const LANG_GREETING_TEMPLATES: Record<string, string> = {
+    'te-IN': 'నమస్తే {{name}} గారు, MyLeadX నుండి మాట్లాడుతున్నాను. ఇప్పుడు మాట్లాడటానికి సమయం ఉందా?',
+    te: 'నమస్తే {{name}} గారు, MyLeadX నుండి మాట్లాడుతున్నాను. ఇప్పుడు మాట్లాడటానికి సమయం ఉందా?',
+    'hi-IN': 'नमस्ते {{name}} जी, MyLeadX से बात कर रही हूँ। क्या अभी बात करने का समय है?',
+    hi: 'नमस्ते {{name}} जी, MyLeadX से बात कर रही हूँ। क्या अभी बात करने का समय है?',
+    'ta-IN': 'வணக்கம் {{name}}, MyLeadX-இலிருந்து பேசுகிறேன். இப்போது பேசுவதற்கு நேரம் இருக்கிறதா?',
+    ta: 'வணக்கம் {{name}}, MyLeadX-இலிருந்து பேசுகிறேன். இப்போது பேசுவதற்கு நேரம் இருக்கிறதா?',
+    'kn-IN': 'ನಮಸ್ಕಾರ {{name}} ಅವರೇ, MyLeadX ನಿಂದ ಮಾತಾಡುತ್ತಿದ್ದೇನೆ. ಈಗ ಮಾತನಾಡಲು ಸಮಯವಿದೆಯೇ?',
+    kn: 'ನಮಸ್ಕಾರ {{name}} ಅವರೇ, MyLeadX ನಿಂದ ಮಾತಾಡುತ್ತಿದ್ದೇನೆ. ಈಗ ಮಾತನಾಡಲು ಸಮಯವಿದೆಯೇ?',
+    'ml-IN': 'നമസ്കാരം {{name}}, MyLeadX-ൽ നിന്ന് വിളിക്കുന്നു. ഇപ്പോൾ സംസാരിക്കാൻ സമയം ഉണ്ടോ?',
+    ml: 'നമസ്കാരം {{name}}, MyLeadX-ൽ നിന്ന് വിളിക്കുന്നു. ഇപ്പോൾ സംസാരിക്കാൻ സമയം ഉണ്ടോ?',
+    'mr-IN': 'नमस्कार {{name}}, MyLeadX वरून बोलत आहे. आत्ता बोलण्यासाठी वेळ आहे का?',
+    mr: 'नमस्कार {{name}}, MyLeadX वरून बोलत आहे. आत्ता बोलण्यासाठी वेळ आहे का?',
+    'bn-IN': 'নমস্কার {{name}}, MyLeadX থেকে কথা বলছি। এখন কথা বলার সময় আছে?',
+    bn: 'নমস্কার {{name}}, MyLeadX থেকে কথা বলছি। এখন কথা বলার সময় আছে?',
+    'gu-IN': 'નમસ્તે {{name}}, MyLeadX થી વાત કરી રહી છું. શું હમણાં વાત કરવાનો સમય છે?',
+    gu: 'નમસ્તે {{name}}, MyLeadX થી વાત કરી રહી છું. શું હમણાં વાત કરવાનો સમય છે?',
+    'pa-IN': 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ {{name}}, MyLeadX ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਹੁਣ ਗੱਲ ਕਰਨ ਦਾ ਸਮਾਂ ਹੈ?',
+    pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ {{name}}, MyLeadX ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਹੁਣ ਗੱਲ ਕਰਨ ਦਾ ਸਮਾਂ ਹੈ?',
+    en: 'Hi {{name}}, this is calling from MyLeadX. Is this a good time to talk?',
+    'en-IN': 'Hi {{name}}, this is calling from MyLeadX. Is this a good time to talk?',
+    'en-US': 'Hi {{name}}, this is calling from MyLeadX. Is this a good time to talk?',
+  };
+
+  // Decide whether the agent's stored greeting_message matches the call's
+  // language. Strategy:
+  //  - If session language is Indic but the template is pure Latin (no Indic
+  //    script), the template is mis-aligned — replace with the per-language
+  //    fallback so callers don't hear "Hello sir, this is calling..." on a
+  //    Telugu line.
+  //  - If session language is English-ish but the template contains heavy
+  //    Indic script, also replace (rare; only triggers if someone configured
+  //    a Telugu template but the contact's preferred language is English).
+  const langForGreeting = String(session.language || 'en').toLowerCase();
+  const isIndicCallForGreeting = !/^en/.test(langForGreeting) && /^(te|hi|ta|kn|ml|mr|bn|gu|pa|or|as|ur|ne)/.test(langForGreeting);
+  const rawTemplateInitial = (session.agent.greeting_message || '').toString();
+  const templateIsLatinOnly = !!rawTemplateInitial.trim() && !hasIndicScript(rawTemplateInitial);
+  const templateIsIndic = !!rawTemplateInitial.trim() && hasIndicScript(rawTemplateInitial);
+  const templateMismatch =
+    (isIndicCallForGreeting && templateIsLatinOnly) ||
+    (!isIndicCallForGreeting && templateIsIndic && /^en/.test(langForGreeting));
+
+  let rawTemplate = rawTemplateInitial;
+  if (templateMismatch || !rawTemplate.trim()) {
+    const builtin =
+      LANG_GREETING_TEMPLATES[langForGreeting] ||
+      LANG_GREETING_TEMPLATES[langForGreeting.slice(0, 2)] ||
+      LANG_GREETING_TEMPLATES.en;
+    logger.info(
+      { callSid: session.callSid, sessionLang: session.language, replaced: templateMismatch },
+      templateMismatch
+        ? 'Greeting: agent template language mismatch — using per-language built-in'
+        : 'Greeting: no stored template — using per-language built-in',
+    );
+    rawTemplate = builtin;
+  }
   const hasTemplatePlaceholders = /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(rawTemplate);
   let greeting = '';
   if (hasTemplatePlaceholders && rawTemplate.trim()) {
     greeting = interpolateVars(rawTemplate, greetingVars);
-    logger.info({ callSid: session.callSid }, 'Greeting: interpolated from agent.greeting_message template');
+    logger.info({ callSid: session.callSid }, 'Greeting: interpolated from greeting template');
   } else {
+    // Greeting prompt MUST be in the call's language so Sarvam/Gemini doesn't
+    // default to English when the call is Telugu/Hindi/Tamil. Also tightened
+    // to ONE short sentence + ONE casual "is this a good time?" — no premature
+    // qualification questions about education / course / fees etc. (callers
+    // hung up when the agent jumped into "have you completed Intermediate?"
+    // on turn 1).
+    const greetingInstructionByLang: Record<string, string> = {
+      'te-IN': 'కాల్ ఇప్పుడే కనెక్ట్ అయింది. తెలుగులో ఒక చిన్న వాక్యంలో మిమ్మల్ని పరిచయం చేసుకుని, "ఇప్పుడు మాట్లాడటానికి సమయం ఉందా?" అని మాత్రమే అడగండి. చదువు / కోర్సు / ఫీజు గురించి ఇంకా అడగవద్దు. 12 పదాలకు మించి కాదు.',
+      'hi-IN': 'कॉल अभी कनेक्ट हुई है। हिंदी में एक छोटे वाक्य में अपना परिचय दें और सिर्फ "क्या अभी बात करने का समय है?" पूछें। शिक्षा/कोर्स/फीस के बारे में अभी मत पूछें। 12 शब्दों से ज़्यादा नहीं।',
+      'ta-IN': 'அழைப்பு இப்போதே இணைக்கப்பட்டது. தமிழில் ஒரே வாக்கியத்தில் உங்களை அறிமுகப்படுத்தி, "இப்போது பேசுவதற்கு நேரம் இருக்கிறதா?" என்று மட்டும் கேளுங்கள். கல்வி/பாடம்/கட்டணம் பற்றி இப்போது கேட்க வேண்டாம். 12 சொற்களுக்கு மேல் வேண்டாம்.',
+      'kn-IN': 'ಕರೆ ಈಗ ಸಂಪರ್ಕವಾಯಿತು. ಕನ್ನಡದಲ್ಲಿ ಒಂದು ಚಿಕ್ಕ ವಾಕ್ಯದಲ್ಲಿ ಪರಿಚಯ ಮಾಡಿಕೊಂಡು "ಈಗ ಮಾತನಾಡಲು ಸಮಯವಿದೆಯೇ?" ಎಂದು ಮಾತ್ರ ಕೇಳಿ. ವಿದ್ಯಾಭ್ಯಾಸ/ಕೋರ್ಸ್/ಶುಲ್ಕ ಬಗ್ಗೆ ಈಗ ಕೇಳಬೇಡಿ. 12 ಪದಗಳಿಗಿಂತ ಹೆಚ್ಚಿಲ್ಲ.',
+      'ml-IN': 'കാൾ ഇപ്പോൾ കണക്റ്റ് ആയിട്ടേയുള്ളൂ. മലയാളത്തിൽ ഒറ്റ വാക്യത്തിൽ പരിചയപ്പെടുത്തി "ഇപ്പോൾ സംസാരിക്കാൻ സമയം ഉണ്ടോ?" എന്ന് മാത്രം ചോദിക്കുക. വിദ്യാഭ്യാസം/കോഴ്സ്/ഫീസ് ഇപ്പോൾ ചോദിക്കരുത്. 12 വാക്കിൽ കൂടരുത്.',
+      'mr-IN': 'कॉल आत्ता कनेक्ट झाला आहे. मराठीत एका लहान वाक्यात स्वतःची ओळख करून द्या आणि फक्त "आत्ता बोलण्यासाठी वेळ आहे का?" विचारा. शिक्षण/कोर्स/फी बद्दल आत्ता विचारू नका. 12 शब्दांपेक्षा जास्त नको.',
+      en: 'The call just connected. In ONE short sentence introduce yourself by first name only, then ask casually "is this a good time to talk?". DO NOT ask about education, course, fees, or any qualification question yet. Maximum 15 words total. Sound like a real human, not a script.',
+    };
+    const langKeyForGreeting = String(session.language || 'en').toLowerCase();
+    const greetingInstruction =
+      greetingInstructionByLang[langKeyForGreeting] ||
+      greetingInstructionByLang[langKeyForGreeting.slice(0, 2)] ||
+      greetingInstructionByLang.en;
     const seeded = await callLLM(
       session.agent,
       [
         {
           role: 'user',
-          content:
-            'The call has just connected. Greet the caller briefly (one short sentence), introduce yourself by your first name only and what you help with, then ask ONE short opening question. Sound like a real human on the phone — no "I am an AI", no lists, one or two sentences max.',
+          content: greetingInstruction,
         },
       ],
       session.campaignContext.targetName,
@@ -1680,10 +2575,85 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
 
   logger.info({ callSid: session.callSid, userText: text.slice(0, 100), inFlight: session.inFlightReply }, 'Stream: user utterance');
 
+  // Indic-letter spelling decoder: when the caller spells an email/phone in
+  // their language ("వి ఏ జె ఐ at gmail dot com"), Sarvam STT returns the
+  // raw Telugu syllables which look like nonsense to the LLM. Decode them
+  // into ASCII and attach as a HINT — we keep the caller's exact words for
+  // the transcript but pass a side-channel candidate to the LLM so it can
+  // read back the value for confirmation instead of inventing a wrong one.
+  let historyText = text;
+  const spellingHint = decodeIndicSpelling(text, session.language);
+  if (spellingHint) {
+    logger.info(
+      { callSid: session.callSid, userText: text.slice(0, 80), hint: spellingHint },
+      'Stream: detected spelling — attached parsed-spelling hint to LLM turn',
+    );
+    historyText = `${text}\n[SPELLED VALUE PARSED FROM CALLER'S LETTERS: ${spellingHint} — ALWAYS read this back to the caller letter-by-letter or digit-by-digit and ask if it's correct before storing.]`;
+  }
+
+  // Slot extraction: run on EVERY user turn to populate session.collectedFields
+  // with structured (value, confidence, confirmed, source) for each lead field.
+  // Drives two things:
+  //   1. The CAPTURED-SO-FAR hint appended below so the LLM never re-asks
+  //      a confirmed field.
+  //   2. createLeadFromAnalysis (in conversation-service) uses these slots
+  //      as the source of truth for CRM persistence, overriding the analyzer's
+  //      LLM extraction when the caller explicitly confirmed a value.
+  const slotsUpdated = extractSlotsFromUtterance(text, spellingHint, session.collectedFields);
+  if (slotsUpdated.length > 0) {
+    logger.info(
+      { callSid: session.callSid, updated: slotsUpdated, slots: session.collectedFields },
+      'Stream: slot store updated',
+    );
+  }
+
+  // Confirmation handling: if the user just said "yes / correct / సరి",
+  // flip the most-recently-mentioned unconfirmed slot to confirmed. The
+  // agent's previous turn was the read-back; we infer which slot the user
+  // is confirming from the slot recency. If no obvious slot is awaiting
+  // confirmation, this is a noop.
+  if (isAffirmative(text)) {
+    // Find newest (highest-confidence, unconfirmed) slot and confirm it.
+    const cf = session.collectedFields;
+    const order: SlotName[] = ['email', 'mobile', 'name', 'university', 'city', 'course', 'callback_time'];
+    for (const k of order) {
+      const s = cf[k];
+      if (s && !s.confirmed) {
+        s.confirmed = true;
+        logger.info({ callSid: session.callSid, slot: k, value: s.value }, 'Stream: slot CONFIRMED by caller');
+        break;
+      }
+    }
+  } else if (isNegative(text)) {
+    // Find newest unconfirmed slot and clear it (caller said the read-back
+    // was wrong — agent will re-ask, decoder/regex will pick up the next
+    // utterance and write a fresh slot value).
+    const cf = session.collectedFields;
+    const order: SlotName[] = ['email', 'mobile', 'name', 'university', 'city', 'course', 'callback_time'];
+    for (const k of order) {
+      const s = cf[k];
+      if (s && !s.confirmed) {
+        logger.info({ callSid: session.callSid, slot: k, rejectedValue: s.value }, 'Stream: slot REJECTED by caller — clearing');
+        delete cf[k];
+        break;
+      }
+    }
+  }
+
+  // Append the "[CAPTURED SO FAR: …]" hint so the LLM sees the structured
+  // state on EVERY turn. The agent uses this to skip re-asking confirmed
+  // fields and to read back unconfirmed ones letter-by-letter.
+  const slotHint = buildSlotHint(session.collectedFields);
+  if (slotHint) {
+    historyText = `${historyText}${slotHint}`;
+  }
+
   // Persist the utterance to BOTH the in-memory conversation history
   // (so the next LLM call sees it) and the messages table (so the Call
-  // Detail transcript reflects every word from the recording).
-  session.history.push({ role: 'user', content: text });
+  // Detail transcript reflects every word from the recording). The
+  // transcript gets the caller's ORIGINAL words; only the LLM context
+  // gets the spelling hint appended.
+  session.history.push({ role: 'user', content: historyText });
   if (session.conversationId) {
     await appendMessage(session.conversationId, session.tenantId, 'user', text);
   }
@@ -1717,40 +2687,56 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
   // Drain: loop until the last message in history is an assistant turn
   // (meaning there's no outstanding user input to respond to).
   while (session.history.length > 0 && session.history[session.history.length - 1].role === 'user') {
-    const reply = await callLLM(
-      session.agent,
-      session.history,
-      session.campaignContext.targetName,
-      'outbound',
-      session.language,
-      session.campaignContext,
-    );
-    const raw = reply && reply.trim() ? reply.trim() : 'Sorry, could you repeat that?';
-
-    // Strip the obsolete [END_CALL] token if the LLM still emits it from an
-    // older prompt cache — never say "END_CALL" aloud, never hang up ourselves.
-    // The caller always controls when the call ends; we just stop asking new
-    // questions and go quiet after the farewell.
-    const cleaned = raw.replace(/\[END_CALL\]/gi, '').trim() || 'Sorry, could you repeat that?';
-
-    // Hard brevity cap: cut to first 2 sentences AND ≤ 45 words. Sarvam-m
-    // (used for Indic calls) routinely ignores the prompt's "ONE or TWO short
-    // sentences" rule and emits 5-paragraph encyclopedia entries. We trim
-    // post-LLM so the rule is enforced regardless of which provider replied.
-    const trimmed = trimReplyForVoice(cleaned);
-
-    // Hard anti-repetition guard: if the LLM is about to repeat content it
-    // already said in the previous 3 assistant turns, replace with a short
-    // "anything else?" close. Sarvam-M ignores the NO-REPEAT prompt rule and
-    // happily re-emits "5 sezns 50 epis 33 hours…" 4 turns in a row when the
-    // caller is just acking. Per-turn deterministic check catches it.
-    const spoken = dedupeReply(trimmed, session.history, session.language);
+    // Streaming path: kick off the LLM + per-sentence synth + playback as one
+    // pipeline. First audio reaches the caller ~500ms after the user's final
+    // (vs ~1300ms with the buffered callLLM + playText flow), because we don't
+    // wait for the whole reply before TTS starts. The Indic / Sarvam branch
+    // inside streamLLMReply still buffers Sarvam-M's full output (its
+    // <think>…</think> block forces it), but the sentences are still split
+    // and synthesised in parallel so the downstream pipeline matches.
+    //
+    // Fallback strings MUST be in the call's language. A literal English
+    // "Sorry, could you repeat that?" played on a Telugu call sounded like
+    // a hard provider failure to the caller and broke immersion.
+    const sayAgainLang = String(session.language || '').toLowerCase();
+    const fallbackSayAgain =
+      SAY_AGAIN[sayAgainLang] ||
+      SAY_AGAIN[sayAgainLang.slice(0, 2)] ||
+      'Sorry, could you repeat that?';
+    // Voice-mode brevity caps — tighter for Indic where Sarvam-M tends to
+    // emit 4-5 sentence paragraphs. Callers complained the agent was
+    // "lecturing"; the prompt asks for 1-2 short sentences but Sarvam
+    // ignores that, so we enforce it post-LLM.
+    const isIndicCall = !/^en/i.test(String(session.language || ''));
+    const maxSent = isIndicCall ? 2 : 4;
+    const maxWords = isIndicCall ? 40 : 130;
+    let spoken = '';
+    if (session.plivoWs) {
+      const full = await streamAndPlayReply(session.plivoWs, session);
+      const raw = (full && full.trim()) || fallbackSayAgain;
+      const cleaned = raw.replace(/\[END_CALL\]/gi, '').trim() || fallbackSayAgain;
+      const trimmed = trimReplyForVoice(cleaned, maxSent, maxWords);
+      spoken = dedupeReply(trimmed, session.history, session.language);
+    } else {
+      // Defensive fallback for when the WS is gone before this loop tick —
+      // mirrors the buffered path so messages still land in the transcript.
+      const reply = await callLLM(
+        session.agent,
+        session.history,
+        session.campaignContext.targetName,
+        'outbound',
+        session.language,
+        session.campaignContext,
+      );
+      const raw = (reply && reply.trim()) || fallbackSayAgain;
+      const cleaned = raw.replace(/\[END_CALL\]/gi, '').trim() || fallbackSayAgain;
+      spoken = dedupeReply(trimReplyForVoice(cleaned), session.history, session.language);
+    }
 
     session.history.push({ role: 'assistant', content: spoken });
     if (session.conversationId) {
       await appendMessage(session.conversationId, session.tenantId, 'assistant', spoken);
     }
-    if (session.plivoWs) await playText(session.plivoWs, session, spoken);
 
     // If the caller barged in mid-playback, only the first ~10-20% of the
     // reply actually reached their ear. Trim what's in the LLM history down
@@ -1773,6 +2759,152 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
 
 // ---- sending audio back to Plivo -------------------------------------------
 
+/**
+ * Streaming-LLM + parallel-TTS driver for the main turn loop.
+ *
+ * Pipelines three stages so first-audio arrives ~500–700ms after the user
+ * finishes speaking instead of the ~1200–1500ms of the buffered path:
+ *
+ *   LLM (streaming) ──sentence──> synth (parallel) ──audio──> playback (in order)
+ *
+ * Each sentence emitted by the LLM is sanitized then handed straight to the
+ * configured TTS backend; results are awaited in arrival order so the caller
+ * hears them in the right sequence. Barge-in is honored at every await point.
+ *
+ * Returns the full reply text (post-sanitize) so the caller can persist it to
+ * the transcript / apply dedupeReply / etc. Returns '' if the LLM produced no
+ * usable content — caller should fall back to a "could you repeat" line.
+ */
+async function streamAndPlayReply(
+  plivoWs: WebSocket,
+  session: StreamSession,
+): Promise<string> {
+  session.plivoWs = plivoWs;
+  if (plivoWs.readyState !== WebSocket.OPEN) return '';
+
+  const CHUNK_BYTES = 400;        // 50ms mulaw 8kHz
+  const BARGE_IN_GRACE_MS = 1200; // same value as playText — protects against
+                                  // the start-of-reply echo loop on Plivo's
+                                  // carrier path. Real barge-ins and stop
+                                  // keywords still bypass.
+  const BACKPRESSURE_BYTES = 256 * 1024;
+
+  session.isAgentSpeaking = true;
+  session.bargeInRequested = false;
+  session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
+  session.currentAgentText = '';
+
+  // For each sentence we kick off synthesis immediately and keep the promise
+  // in `synthPromises`. The playback loop awaits them in order so audio
+  // arrives in the right sequence even though syntheses overlap.
+  const synthPromises: Array<Promise<string | null>> = [];
+  const sentencesEmitted: string[] = [];
+  let llmDone = false;
+
+  const synthOne = async (s: string): Promise<string | null> => {
+    if (session.ttsBackend === 'sarvam') {
+      const b = await synthesizeSarvamTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      if (b) return b;
+      return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+    }
+    if (session.ttsBackend === 'azure') {
+      const b = await synthesizeAzureTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      if (b) return b;
+      return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+    }
+    return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
+  };
+
+  // Producer: stream the LLM and kick off synthesis per sentence as soon as
+  // each one terminates. Runs concurrently with the consumer below.
+  const llmPromise = streamLLMReply(
+    session.agent,
+    session.history,
+    session.campaignContext.targetName,
+    'outbound',
+    session.language,
+    session.campaignContext,
+    (sentence: string) => {
+      if (session.bargeInRequested) return;
+      const clean = sanitizeForTts(sentence);
+      if (!clean) return;
+      sentencesEmitted.push(clean);
+      session.currentAgentText = sentencesEmitted.join(' ');
+      synthPromises.push(synthOne(clean));
+    },
+  ).then((full) => {
+    llmDone = true;
+    return full;
+  });
+
+  // Consumer: walks synthPromises in order. Plays each as its audio resolves,
+  // pausing for newly-arriving promises until the LLM signals done.
+  let playIdx = 0;
+  try {
+    while (true) {
+      if (session.bargeInRequested) break;
+      if (playIdx >= synthPromises.length) {
+        if (llmDone) break;
+        // Wait briefly for the next sentence to arrive. We don't want to
+        // hot-spin; 25ms is short enough that first-audio latency isn't
+        // impacted (synth itself takes 200–400ms).
+        await new Promise((r) => setTimeout(r, 25));
+        continue;
+      }
+      const b64 = await synthPromises[playIdx];
+      playIdx++;
+      if (!b64) {
+        logger.warn({ callSid: session.callSid, idx: playIdx - 1 }, 'streamAndPlayReply: TTS empty — skipping');
+        continue;
+      }
+      if (session.bargeInRequested) break;
+
+      const fullBytes = Buffer.from(b64, 'base64');
+      session.agentMulawEvents.push({ offsetBytes: session.callerBytes, mulaw: fullBytes });
+
+      let aborted = false;
+      for (let off = 0; off < fullBytes.length; off += CHUNK_BYTES) {
+        if (session.bargeInRequested) {
+          try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch { /* socket may be gone */ }
+          logger.info({ callSid: session.callSid, idx: playIdx - 1 }, 'streamAndPlayReply: barge-in — aborted');
+          aborted = true;
+          break;
+        }
+        const slice = fullBytes.subarray(off, Math.min(off + CHUNK_BYTES, fullBytes.length));
+        const playEvent = {
+          event: 'playAudio',
+          media: { contentType: 'audio/x-mulaw', sampleRate: '8000', payload: slice.toString('base64') },
+        };
+        while ((plivoWs as any).bufferedAmount > BACKPRESSURE_BYTES) {
+          await new Promise((r) => setTimeout(r, 20));
+          if (session.bargeInRequested || plivoWs.readyState !== WebSocket.OPEN) break;
+        }
+        try {
+          plivoWs.send(JSON.stringify(playEvent));
+        } catch (err: any) {
+          logger.warn({ callSid: session.callSid, err: err.message }, 'streamAndPlayReply: send failed');
+          aborted = true;
+          break;
+        }
+        if (off + CHUNK_BYTES < fullBytes.length) {
+          await new Promise((r) => setImmediate(r));
+        }
+      }
+      if (aborted) break;
+    }
+  } finally {
+    session.isAgentSpeaking = false;
+    session.currentAgentText = '';
+    // Drain any remaining synth promises so we don't leave dangling fetches.
+    if (session.bargeInRequested) {
+      Promise.allSettled(synthPromises).catch(() => {});
+    }
+  }
+
+  const full = await llmPromise.catch(() => '');
+  return (full || sentencesEmitted.join(' ')).trim();
+}
+
 async function playText(plivoWs: WebSocket, session: StreamSession, text: string): Promise<void> {
   session.plivoWs = plivoWs;
   if (plivoWs.readyState !== WebSocket.OPEN) return;
@@ -1792,11 +2924,19 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   //
   // Sarvam handles 4 concurrent TTS requests fine. Falls back to a single
   // synthesis path if the split produces only one sentence.
-  const sentences = (text || '')
+  // Sanitize once at the top so every sentence handed to a TTS provider is
+  // free of markdown/emoji/multi-punctuation. KB chunks + LLM occasionally
+  // produce `**bold**` or 🎯 which some voices read aloud literally.
+  const cleanText = sanitizeForTts(text);
+  if (!cleanText) {
+    logger.warn({ callSid: session.callSid, preview: (text || '').slice(0, 60) }, 'playText: empty after sanitize, skipping');
+    return;
+  }
+  const sentences = cleanText
     .split(/(?<=[.!?।॥])\s+/u)
     .map((s) => s.trim())
     .filter(Boolean);
-  const effectiveSentences = sentences.length > 0 ? sentences : [text];
+  const effectiveSentences = sentences.length > 0 ? sentences : [cleanText];
 
   const CHUNK_BYTES = 400;        // 50ms of mulaw 8kHz
   const BARGE_IN_GRACE_MS = 1200; // 1.2s grace — only protects against the
@@ -1809,7 +2949,7 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   session.isAgentSpeaking = true;
   session.bargeInRequested = false;
   session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
-  session.currentAgentText = text;
+  session.currentAgentText = cleanText;
 
   const synthOne = async (s: string): Promise<string | null> => {
     if (session.ttsBackend === 'sarvam') {
