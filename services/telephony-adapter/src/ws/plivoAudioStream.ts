@@ -32,7 +32,7 @@ import { config } from '../config';
 import { buildVoiceAgentPrompt, buildVoiceAgentPromptSlim } from '../prompts/voiceAgent';
 import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
-import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, SarvamSttHandle } from '../providers/sarvamSpeech';
+import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, callSarvamLLMStream, SarvamSttHandle } from '../providers/sarvamSpeech';
 import { plivoProvider } from '../providers/plivo.provider';
 import { resolveDeployedAgent } from '../services/deployedAgentResolver';
 import { updateTargetFromCallEnd } from '../routes/campaigns';
@@ -40,6 +40,18 @@ import { updateTargetFromCallEnd } from '../routes/campaigns';
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
 });
+
+// ---- module state ----------------------------------------------------------
+
+/**
+ * Gemini-cooldown timestamp (ms epoch). When set to a future value, the
+ * Indic-call hybrid path skips the Gemini probe and goes straight to Sarvam.
+ * Set by streamLLMReply when /chat/simple returns mock=true (Gemini quota
+ * exhausted on free tier); cleared automatically when a future Gemini call
+ * succeeds. 5-minute window so we don't hammer the rate-limited provider.
+ */
+let geminiCooldownUntilMs = 0;
+const GEMINI_COOLDOWN_MS = 5 * 60 * 1000;
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -1127,6 +1139,13 @@ async function streamLLMReply(
   // instruction, check the output actually contains the right script, and
   // fall back to Sarvam-M only when Gemini drifted to English. This keeps
   // most turns fast while preserving Sarvam-quality Telugu on the rare miss.
+  //
+  // Gemini cooldown: when Gemini returns mock=true (rate-limited / no-key),
+  // we set a process-wide cooldown for the next 5 minutes. During that
+  // window every Indic call skips Gemini entirely and goes straight to
+  // Sarvam — saving the ~1.5s wasted fetch + 30s retry-delay per turn when
+  // the free-tier 20-RPD limit is exhausted. Cooldown resets on any
+  // successful Gemini hit so the fast path resumes the moment quota frees.
   if (isIndic) {
     const slimPrompt = buildVoiceAgentPromptSlim(basePrompt, agent, {
       customerName,
@@ -1146,42 +1165,69 @@ async function streamLLMReply(
     const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE LOCK: This call is in ${langName}. EVERY word of your reply must be in ${langName} script (Telugu/Devanagari/etc — never Latin letters). If you don't know how to say something in ${langName}, use the closest natural phrasing. NEVER reply in English on this call.`;
 
     let geminiReply: string | null = null;
-    try {
-      const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
-      const r = await fetch(`${aiUrl}/chat/simple`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system_prompt: langLockedPrompt,
-          messages: sarvamHistory,
-          provider: 'google',
-          model: 'gemini-2.5-flash',
-          temperature: parseFloat(agent.temperature) || 0.7,
-          max_tokens: 200,
-          knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
-        }),
-      });
-      if (r.ok) {
-        const data = (await r.json()) as { reply?: string; mock?: boolean };
-        if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
-          geminiReply = data.reply.trim();
-          logger.info(
-            { language, replyLen: geminiReply.length, preview: geminiReply.slice(0, 60) },
-            'streamLLMReply (Indic): Gemini hit — using fast path',
-          );
-        } else {
-          logger.info(
-            { language, mock: data.mock, hadIndic: data.reply ? hasIndicScript(data.reply) : false, preview: (data.reply || '').slice(0, 60) },
-            'streamLLMReply (Indic): Gemini drifted to English/mock — falling back to Sarvam',
-          );
+    const inCooldown = Date.now() < geminiCooldownUntilMs;
+    if (inCooldown) {
+      logger.info(
+        { language, cooldownRemainingSec: Math.round((geminiCooldownUntilMs - Date.now()) / 1000) },
+        'streamLLMReply (Indic): Gemini cooldown active — skipping straight to Sarvam',
+      );
+    } else {
+      try {
+        const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
+        const r = await fetch(`${aiUrl}/chat/simple`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            system_prompt: langLockedPrompt,
+            messages: sarvamHistory,
+            provider: 'google',
+            model: 'gemini-2.5-flash',
+            temperature: parseFloat(agent.temperature) || 0.7,
+            max_tokens: 200,
+            knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
+          }),
+        });
+        if (r.ok) {
+          const data = (await r.json()) as { reply?: string; mock?: boolean };
+          if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
+            geminiReply = data.reply.trim();
+            // Clear any prior cooldown — Gemini is working again.
+            if (geminiCooldownUntilMs > 0) {
+              logger.info({ language }, 'streamLLMReply (Indic): Gemini cooldown cleared — fast path restored');
+              geminiCooldownUntilMs = 0;
+            }
+            logger.info(
+              { language, replyLen: geminiReply.length, preview: geminiReply.slice(0, 60) },
+              'streamLLMReply (Indic): Gemini hit — using fast path',
+            );
+          } else {
+            // Mock = rate-limited or provider-disabled. Set a cooldown so the
+            // next ~5 min of Indic calls skip the Gemini probe entirely.
+            if (data.mock) {
+              geminiCooldownUntilMs = Date.now() + GEMINI_COOLDOWN_MS;
+              logger.warn(
+                { language, cooldownMinutes: GEMINI_COOLDOWN_MS / 60_000 },
+                'streamLLMReply (Indic): Gemini returned mock — entering cooldown',
+              );
+            }
+            logger.info(
+              { language, mock: data.mock, hadIndic: data.reply ? hasIndicScript(data.reply) : false, preview: (data.reply || '').slice(0, 60) },
+              'streamLLMReply (Indic): Gemini drifted to English/mock — falling back to Sarvam',
+            );
+          }
         }
+      } catch (err: any) {
+        logger.warn({ err: err.message }, 'streamLLMReply (Indic): Gemini call threw — falling back to Sarvam');
       }
-    } catch (err: any) {
-      logger.warn({ err: err.message }, 'streamLLMReply (Indic): Gemini call threw — falling back to Sarvam');
     }
 
     // Step 2: emit Gemini's reply if it survived the language gate; otherwise
-    // fall back to Sarvam (full retry chain like before).
+    // fall back to Sarvam. NOTE — Sarvam-M streaming was tried and reverted
+    // because its <think> block dominates token-output time on stream:true
+    // (no usable sentence emitted until ~30s in). Buffered call returns the
+    // think-stripped reply faster end-to-end (~10s typical) than streaming
+    // ever reaches the first user-visible sentence. callSarvamLLMStream is
+    // still exported for the day Sarvam exposes a non-thinking variant.
     let finalReply = geminiReply;
     if (!finalReply && sarvamConfigured()) {
       let sarvamReply = await callSarvamLLM({
@@ -1211,7 +1257,9 @@ async function streamLLMReply(
       onSentence(sayAgain);
       return sayAgain;
     }
-    // Split the reply into sentences so the TTS pipeline still gets parallel-synth.
+    // Fallthrough path: Gemini reply or Sarvam returned a final reply but
+    // streaming didn't emit (e.g. all-think-block output). Sentence-split
+    // and emit the buffered text so TTS gets a chance.
     const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
     if (sents.length === 0) {
       onSentence(finalReply);
@@ -2821,7 +2869,13 @@ async function streamAndPlayReply(
   session.plivoWs = plivoWs;
   if (plivoWs.readyState !== WebSocket.OPEN) return '';
 
-  const CHUNK_BYTES = 400;        // 50ms mulaw 8kHz
+  // 800 bytes = 100ms of mulaw 8kHz. Doubled from 400 (50ms) after callers
+  // reported voice "breaking" mid-sentence — smaller chunks paid too much
+  // per-chunk WebSocket-send overhead under network jitter, leading to
+  // micro-gaps. 100ms is still fine-grained enough for barge-in (caller
+  // utterances that trigger barge-in are ≥3 words / ≥15 chars, so at most
+  // ~100ms of agent audio plays past the interrupt — imperceptible).
+  const CHUNK_BYTES = 800;        // 100ms mulaw 8kHz
   const BARGE_IN_GRACE_MS = 1200; // same value as playText — protects against
                                   // the start-of-reply echo loop on Plivo's
                                   // carrier path. Real barge-ins and stop
@@ -2977,7 +3031,9 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
     .filter(Boolean);
   const effectiveSentences = sentences.length > 0 ? sentences : [cleanText];
 
-  const CHUNK_BYTES = 400;        // 50ms of mulaw 8kHz
+  // 800 bytes = 100ms of mulaw 8kHz. See streamAndPlayReply for the
+  // rationale on chunk size — kept in sync between both playback paths.
+  const CHUNK_BYTES = 800;        // 100ms of mulaw 8kHz
   const BARGE_IN_GRACE_MS = 1200; // 1.2s grace — only protects against the
                                   // start-of-reply echo loop (carrier
                                   // playback of agent's own audio leaking

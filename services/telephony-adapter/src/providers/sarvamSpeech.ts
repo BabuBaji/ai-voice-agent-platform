@@ -445,6 +445,177 @@ function stripThinkBlocks(text: string): string {
   return out.trim();
 }
 
+/**
+ * Streaming variant of callSarvamLLM. Yields complete sentences via
+ * `onSentence` as Sarvam-M generates them, then returns the full
+ * (think-stripped) reply text. Cuts ~2s off first-audio latency on Indic
+ * calls because TTS synthesis can start before the LLM has finished
+ * generating the whole reply.
+ *
+ * Sarvam-M's <think>…</think> reasoning block (emitted even with
+ * enable_thinking:false on some prompt sizes) breaks naive token-streaming
+ * — we'd hear the model "thinking out loud" if those chunks reached TTS.
+ * Solution: hold sentences back until we observe </think> in the buffer,
+ * then start emitting. If <think> never appears, we emit from the start.
+ *
+ * Returns null when the request fails entirely. Always finishes the
+ * underlying stream before returning so the caller's full-text return
+ * value is consistent.
+ */
+export async function callSarvamLLMStream(opts: {
+  systemPrompt: string;
+  messages: Array<{ role: string; content: string }>;
+  maxTokens?: number;
+  temperature?: number;
+}, onSentence: (sentence: string) => void): Promise<string | null> {
+  const apiKey = process.env.SARVAM_API_KEY;
+  if (!apiKey) return null;
+
+  // Same "clean messages for Sarvam-M's strict-alternation API" pass as
+  // the buffered callSarvamLLM. Drops system messages mid-thread, merges
+  // them into the next user turn, collapses consecutive same-role.
+  let pendingSystemHint = '';
+  const cleaned: Array<{ role: string; content: string }> = [];
+  for (const m of opts.messages) {
+    if (!m || !m.content) continue;
+    if (m.role === 'system') {
+      pendingSystemHint = pendingSystemHint ? pendingSystemHint + '\n' + m.content : m.content;
+      continue;
+    }
+    if (cleaned.length === 0 && m.role !== 'user') continue;
+    let content = m.content;
+    if (m.role === 'user' && pendingSystemHint) {
+      content = `[CONTEXT: ${pendingSystemHint}]\n${content}`;
+      pendingSystemHint = '';
+    }
+    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === m.role) {
+      cleaned[cleaned.length - 1].content += '\n' + content;
+    } else {
+      cleaned.push({ role: m.role, content });
+    }
+  }
+  if (cleaned.length === 0) return null;
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'sarvam-m',
+        messages: [
+          { role: 'system', content: opts.systemPrompt },
+          ...cleaned,
+        ],
+        max_tokens: opts.maxTokens ?? 1000,
+        temperature: opts.temperature ?? 0.6,
+        enable_thinking: false,
+        reasoning_effort: 'low',
+        stream: true,
+      }),
+    });
+  } catch (err: any) {
+    logger.warn({ err: err.message }, 'Sarvam LLM stream fetch failed');
+    return null;
+  }
+  if (!resp.ok || !resp.body) {
+    const errBody = await resp.text().catch(() => '');
+    logger.warn({ status: resp.status, body: errBody.slice(0, 200) }, 'Sarvam LLM stream non-200');
+    return null;
+  }
+
+  const reader = (resp.body as any).getReader();
+  const decoder = new TextDecoder();
+  let sseAccum = '';        // raw SSE chunks not yet event-split
+  let fullText = '';        // ALL content tokens seen (pre-strip)
+  let cleanBuffer = '';     // text that's already past any </think>
+  let thinkBlocked = false; // true between <think> and </think>
+  let thinkEverSeen = false;
+
+  // Emit complete sentences from cleanBuffer as we accumulate. Latin .!?
+  // + Devanagari ।॥ + optional trailing space/quote.
+  const SENT_BOUNDARY = /^[\s\S]*?[.!?।॥](?=\s|$|["')\]])/u;
+  const flushSentences = (forceFinal: boolean) => {
+    while (true) {
+      const m = cleanBuffer.match(SENT_BOUNDARY);
+      if (!m) break;
+      const sentence = m[0].trim();
+      cleanBuffer = cleanBuffer.slice(m[0].length).replace(/^\s+/, '');
+      if (sentence) onSentence(sentence);
+    }
+    if (forceFinal && cleanBuffer.trim()) {
+      onSentence(cleanBuffer.trim());
+      cleanBuffer = '';
+    }
+  };
+
+  // Whenever new raw text arrives, route it into cleanBuffer accounting
+  // for any open/close <think> markers.
+  const ingest = (delta: string) => {
+    fullText += delta;
+    let s = delta;
+    while (s.length > 0) {
+      if (thinkBlocked) {
+        const closeIdx = s.indexOf('</think>');
+        if (closeIdx === -1) { s = ''; break; }     // still inside think
+        s = s.slice(closeIdx + '</think>'.length);
+        thinkBlocked = false;
+        continue;
+      }
+      const openIdx = s.indexOf('<think>');
+      if (openIdx === -1) {
+        cleanBuffer += s;
+        s = '';
+      } else {
+        // Anything before <think> is clean output.
+        cleanBuffer += s.slice(0, openIdx);
+        s = s.slice(openIdx + '<think>'.length);
+        thinkBlocked = true;
+        thinkEverSeen = true;
+      }
+    }
+    flushSentences(false);
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseAccum += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = sseAccum.indexOf('\n\n')) >= 0) {
+        const evRaw = sseAccum.slice(0, idx);
+        sseAccum = sseAccum.slice(idx + 2);
+        for (const line of evRaw.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(payload) as any;
+            const delta = obj?.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string' && delta.length > 0) {
+              ingest(delta);
+            }
+          } catch { /* malformed SSE — skip */ }
+        }
+      }
+    }
+  } catch (err: any) {
+    logger.warn({ err: err.message }, 'Sarvam LLM stream read error');
+  }
+
+  // Final flush of any remaining content not terminated by punctuation.
+  flushSentences(true);
+
+  // Build the return value: same shape as the buffered callSarvamLLM
+  // (think-blocks stripped, trimmed). Caller may compare against this.
+  const stripped = thinkEverSeen ? stripThinkBlocks(fullText).trim() : fullText.trim();
+  return stripped || null;
+}
+
 // ---- TTS ------------------------------------------------------------------
 
 /**
