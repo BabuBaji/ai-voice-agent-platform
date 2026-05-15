@@ -1,6 +1,8 @@
 import { pool } from '../index';
 import { config } from '../config';
 import { recordCallBilling } from './billing.client';
+import { sendWhatsApp, sendSms } from './communications';
+import { enqueueLeadRecall } from './recallScheduler';
 
 export interface AnalysisResult {
   // Legacy fields (kept for backwards compat with existing UI + columns).
@@ -546,6 +548,27 @@ function parseFollowUpTime(raw: string | null | undefined): Date | null {
   return new Date(now.getTime() + 24 * 3600000);
 }
 
+/** Extract HH:MM (24h) from a free-text follow-up time. Returns null if unsure. */
+function parsePreferredHHmm(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = String(raw).trim().toLowerCase();
+  // "6 PM", "6pm", "18:00", "after 6pm"
+  let m = s.match(/(\d{1,2})\s*[:.]\s*(\d{2})/);
+  if (m) {
+    const h = Math.min(23, parseInt(m[1], 10));
+    const mm = Math.min(59, parseInt(m[2], 10));
+    return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  m = s.match(/(\d{1,2})\s*(am|pm)/);
+  if (m) {
+    let h = parseInt(m[1], 10);
+    if (m[2] === 'pm' && h < 12) h += 12;
+    if (m[2] === 'am' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:00`;
+  }
+  return null;
+}
+
 /**
  * Map LLM-emitted lead_score string to a 0-100 numeric score for the CRM
  * leads table. Falls back to interest_level if lead_score isn't set.
@@ -787,12 +810,33 @@ async function createLeadFromAnalysis(
 
     const ke = result.key_entities || {};
 
+    // CSV-name fallback. If the campaign uploaded a contacts CSV, the target
+    // row carries the lead's name. The LLM doesn't always elicit a name on
+    // the call (caller may volunteer details but not their own name), so we
+    // fall back to the CSV-provided name when key_entities.customer_name is
+    // empty. Without this, named CSV leads silently fail the auto-lead gate.
+    let csvName = '';
+    if (prospectPhone) {
+      try {
+        // Match on digits only — conversations stores called_number without
+        // the leading '+', campaign_targets stores it with. Strip both sides.
+        const tgt = await pool.query(
+          `SELECT name FROM campaign_targets
+           WHERE regexp_replace(phone_number, '\\D', '', 'g') = regexp_replace($1::text, '\\D', '', 'g')
+             AND campaign_id IN (SELECT id FROM campaigns WHERE tenant_id = $2)
+           ORDER BY last_attempt_at DESC NULLS LAST LIMIT 1`,
+          [prospectPhone, tenantId],
+        );
+        csvName = (tgt.rows[0]?.name || '').trim();
+      } catch { /* non-fatal — name fallback is best-effort */ }
+    }
+
     // Auto-lead gate (relaxed per admissions-module spec). Critical fields are
     // name + mobile + interested_course/branch/college + interest_level. Email
     // is NOT critical (callers often don't volunteer it on the phone). Missing
     // non-critical fields → lead is still created, but flagged NEEDS_REVIEW
     // so the team can complete it on follow-up.
-    const rawName = (ke.customer_name || '').trim();
+    const rawName = (ke.customer_name || '').trim() || csvName;
     const rawEmail = (ke.email || '').trim();
     const rawAltPhone = (ke.alt_phone || '').trim();
     const validEmail = rawEmail.includes('@') && rawEmail.includes('.');
@@ -998,6 +1042,68 @@ async function createLeadFromAnalysis(
         [JSON.stringify({ crm_lead_id: leadId }), conversationId, tenantId],
       );
     } catch (_e) { /* non-fatal */ }
+
+    // Auto-send brochure on WhatsApp + SMS in parallel, best-effort. Defaults
+    // come from env (BROCHURE_DEFAULT_URL, BROCHURE_DEFAULT_TEMPLATE) so each
+    // tenant can configure their own brochure without code changes. Disable
+    // entirely by setting AUTO_BROCHURE=off.
+    //
+    // Gate: only fire when this lead is actually a candidate for outreach —
+    // HOT/INTERESTED status OR the post-call analyzer flagged an explicit
+    // ask (brochure / counselor meeting / callback). Avoids spamming
+    // not-interested or wrong-number leads with WhatsApp + SMS.
+    const triggerStatuses = ['HOT_INTERESTED', 'INTERESTED', 'CALLBACK_SCHEDULED', 'COUNSELOR_MEETING_REQUIRED'];
+    const triggerFlag =
+      triggerStatuses.includes(String(extendedStatus || '').toUpperCase()) ||
+      String(ke.brochure_required || '').toLowerCase() === 'true' ||
+      String(ke.counselor_meeting_required || '').toLowerCase() === 'true' ||
+      String(ke.callback_required || '').toLowerCase() === 'true';
+    if (!triggerFlag) {
+      console.info(`[analyzer] auto-brochure skipped — trigger not met (lead=${leadId}, status=${extendedStatus})`);
+    }
+    if (triggerFlag && (process.env.AUTO_BROCHURE || 'on').toLowerCase() !== 'off') {
+      const brochureUrl = process.env.BROCHURE_DEFAULT_URL || 'https://dce.edu.in/';
+      const tpl = process.env.BROCHURE_DEFAULT_TEMPLATE ||
+        'Hi {{name}}, thanks for your interest in B.Tech admissions. Find the brochure here: {{brochure_url}}. Reply with any questions.';
+      const messageBody = tpl
+        .replace(/\{\{\s*name\s*\}\}/g, first_name)
+        .replace(/\{\{\s*brochure_url\s*\}\}/g, brochureUrl);
+      const e164Phone = STRICT_INDIAN_MOBILE_RE.test(mobileFor10)
+        ? `+91${mobileFor10}`
+        : (mobile.startsWith('+') ? mobile : `+${mobileDigits}`);
+      const attachments = [{ name: 'Brochure', url: brochureUrl }];
+      // Fire both channels in parallel — never block the analyzer / lead
+      // creation pipeline on Twilio responses. AFTER the result lands, if at
+      // least one channel actually delivered, enqueue this lead into the
+      // recall queue so we can follow up. We only enqueue for brochured
+      // leads because the recall script is built around "we sent you the
+      // brochure, did you receive it?" — leads that never got a brochure
+      // shouldn't be part of that loop.
+      Promise.allSettled([
+        sendWhatsApp({ tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
+                       recipient: e164Phone, message: messageBody, attachments }),
+        sendSms({ tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
+                  recipient: e164Phone, message: messageBody }),
+      ]).then((results) => {
+        const [waR, smsR] = results;
+        const waOk = waR.status === 'fulfilled' && (waR.value as any)?.ok;
+        const smsOk = smsR.status === 'fulfilled' && (smsR.value as any)?.ok;
+        console.info(`[analyzer] auto-brochure dispatched (lead=${leadId}, whatsapp=${waOk ? 'ok' : 'fail'}, sms=${smsOk ? 'ok' : 'fail'}, to=${e164Phone})`);
+        if (waOk || smsOk) {
+          void enqueueLeadRecall({
+            tenant_id: tenantId,
+            lead_id: leadId,
+            conversation_id: conversationId,
+            agent_id: conv.agent_id || null,
+            phone_number: e164Phone,
+            lead_status: extendedStatus,
+            preferred_callback_time: parsePreferredHHmm(result.recommended_follow_up_time),
+          });
+        } else {
+          console.info(`[analyzer] recall NOT enqueued — brochure failed on all channels (lead=${leadId})`);
+        }
+      });
+    }
 
     // Schedule callback appointment for every interested lead. The interest
     // gate above already ran (we only reach this code for HOT/WARM / 50+

@@ -1649,6 +1649,15 @@ webhookRouter.post('/plivo/status', async (req: Request, res: Response, next: Ne
         mapped === 'COMPLETED' ? 'COMPLETED' : mapped === 'CANCELLED' ? 'CANCELLED' : 'FAILED',
         conversationId
       );
+      // Update lead_recall_queue if this call originated from a recall dial.
+      // Classifies HangupCause → CONNECTED / NO_ANSWER / BUSY / REJECTED so
+      // recallScheduler decides whether to retry or stop.
+      void updateRecallQueueFromCallEnd(
+        CallUUID,
+        mapped,
+        String(HangupCause || ''),
+        Duration ? parseInt(Duration) : 0,
+      );
     }
 
     res.status(200).json({ received: true });
@@ -1677,3 +1686,120 @@ webhookRouter.post('/plivo/recording', async (req: Request, res: Response, next:
     next(err);
   }
 });
+
+/**
+ * POST /webhooks/plivo/sms-status — Plivo posts message-delivery updates here.
+ * Body (form-encoded): MessageUUID, Status, From, To, ErrorCode, etc.
+ * Status flow: queued → sent → delivered (success) | failed | undelivered.
+ * We update communication_logs.status so the brochure modal stops showing a
+ * misleading "sent" when Indian carriers actually rejected for DLT.
+ */
+webhookRouter.post('/plivo/sms-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const uuid = body.MessageUUID || body.message_uuid;
+    const plivoStatus = String(body.Status || body.status || '').toLowerCase();
+    const errCode = body.ErrorCode || body.error_code || null;
+    const errMsg = body.ErrorMessage || body.error_message || null;
+    if (!uuid) {
+      logger.warn({ body }, 'Plivo sms-status webhook missing MessageUUID');
+      res.status(200).json({ received: true });
+      return;
+    }
+    // Map Plivo states to our log states.
+    let logStatus: string | null = null;
+    if (plivoStatus === 'delivered') logStatus = 'delivered';
+    else if (plivoStatus === 'failed' || plivoStatus === 'undelivered' || plivoStatus === 'rejected') logStatus = 'failed';
+    else if (plivoStatus === 'sent') logStatus = 'sent';
+    logger.info({ uuid, plivoStatus, logStatus, errCode, errMsg }, 'Plivo SMS status callback');
+    if (!logStatus) {
+      res.status(200).json({ received: true });
+      return;
+    }
+    // Match the log row by message_uuid stored inside provider_response.
+    // The send helper writes Plivo's response (which contains message_uuid[]).
+    await pool.query(
+      `UPDATE communication_logs
+         SET status = $1::text,
+             delivered_at = CASE WHEN $1::text = 'delivered' THEN NOW() ELSE delivered_at END,
+             last_error = CASE WHEN $1::text = 'failed'
+                                THEN COALESCE($2::text, last_error)
+                                ELSE last_error END
+       WHERE channel = 'sms'
+         AND provider_response->'message_uuid' ? $3`,
+      [logStatus, errCode && errMsg ? `Plivo ${errCode}: ${errMsg}` : (errMsg || errCode || null), uuid]
+    );
+    res.status(200).json({ received: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Classify a Plivo HangupCause + Plivo CallStatus into a recall outcome and
+ * write it into lead_recall_queue. The recall scheduler (in conversation-
+ * service) reads these rows on its 60s tick to decide whether to retry.
+ *
+ * Mapping (Plivo HangupCause docs):
+ *   NORMAL_CLEARING + Duration>0   → CONNECTED (caller talked)
+ *   NO_USER_RESPONSE / NO_ANSWER   → NO_ANSWER
+ *   USER_BUSY                      → BUSY
+ *   CALL_REJECTED                  → REJECTED
+ *   SUBSCRIBER_ABSENT / SWITCHED_OFF → SWITCHED_OFF
+ *   anything else with FAILED      → FAILED
+ */
+async function updateRecallQueueFromCallEnd(
+  providerCallSid: string,
+  mappedStatus: string,
+  hangupCause: string,
+  durationSeconds: number,
+): Promise<void> {
+  try {
+    // Resolve which phone this call dialed so we can find the recall row.
+    const callRow = await pool.query(
+      `SELECT called_number, tenant_id FROM calls WHERE provider_call_sid = $1 LIMIT 1`,
+      [providerCallSid],
+    );
+    if (!callRow.rows.length) return;
+    const phone = callRow.rows[0].called_number;
+    if (!phone) return;
+    const digits = String(phone).replace(/\D/g, '');
+
+    // Decide outcome.
+    const cause = hangupCause.toUpperCase();
+    let outcome: string;
+    if (mappedStatus === 'COMPLETED' && durationSeconds > 5) outcome = 'CONNECTED';
+    else if (cause.includes('NO_USER_RESPONSE') || cause.includes('NO_ANSWER')) outcome = 'NO_ANSWER';
+    else if (cause.includes('USER_BUSY') || cause === 'BUSY') outcome = 'BUSY';
+    else if (cause.includes('CALL_REJECTED') || cause.includes('REJECTED')) outcome = 'REJECTED';
+    else if (cause.includes('SUBSCRIBER_ABSENT') || cause.includes('SWITCHED_OFF')) outcome = 'SWITCHED_OFF';
+    else outcome = mappedStatus === 'COMPLETED' ? 'CONNECTED' : 'FAILED';
+
+    // For CONNECTED → close the recall (stop further retries).
+    if (outcome === 'CONNECTED') {
+      await pool.query(
+        `UPDATE lead_recall_queue
+            SET state = 'COMPLETED', last_call_status = 'CONNECTED',
+                last_attempt_at = NOW(), updated_at = NOW()
+          WHERE regexp_replace(phone_number, '\\D', '', 'g') = $1
+            AND state IN ('PENDING', 'IN_FLIGHT')`,
+        [digits],
+      );
+    } else {
+      // No-answer / busy / rejected etc. — push back to PENDING so the next
+      // tick computes the next slot via computeNextSlot(retry_count).
+      // retry_count was already bumped when we marked IN_FLIGHT.
+      await pool.query(
+        `UPDATE lead_recall_queue
+            SET state = 'PENDING', last_call_status = $2,
+                last_attempt_at = NOW(), retry_reason = $3, updated_at = NOW()
+          WHERE regexp_replace(phone_number, '\\D', '', 'g') = $1
+            AND state = 'IN_FLIGHT'`,
+        [digits, outcome, cause || null],
+      );
+    }
+    logger.info({ providerCallSid, phone, outcome, cause }, 'recall queue updated from call end');
+  } catch (err: any) {
+    logger.warn({ providerCallSid, err: err.message }, 'updateRecallQueueFromCallEnd failed');
+  }
+}

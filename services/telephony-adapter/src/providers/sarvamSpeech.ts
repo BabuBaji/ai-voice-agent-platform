@@ -424,11 +424,19 @@ export async function callSarvamLLM(opts: {
     }
     const data = await resp.json().catch(() => null) as any;
     const raw = data?.choices?.[0]?.message?.content || '';
+    const finishReason = data?.choices?.[0]?.finish_reason;
     // Strip extended-thinking blocks. Sarvam-m emits:
     //   <think> internal reasoning here </think> actual reply here
     // The part we want is everything AFTER the last </think>.
     const stripped = stripThinkBlocks(raw).trim();
-    return stripped || null;
+    if (!stripped) {
+      logger.warn(
+        { finishReason, rawLen: raw.length, rawPreview: raw.slice(0, 80) },
+        'Sarvam LLM returned think-only / empty reply — bump maxTokens',
+      );
+      return null;
+    }
+    return stripped;
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Sarvam LLM error');
     return null;

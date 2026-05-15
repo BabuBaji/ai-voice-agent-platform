@@ -42,6 +42,7 @@ import { LeadsPage } from '@/pages/crm/LeadsPage';
 import { ContactsPage } from '@/pages/crm/ContactsPage';
 import { PipelinePage } from '@/pages/crm/PipelinePage';
 import { LeadDetailPage } from '@/pages/crm/LeadDetailPage';
+import { RecallsPage } from '@/pages/crm/RecallsPage';
 
 // Knowledge
 import { KnowledgeBasePage } from '@/pages/knowledge/KnowledgeBasePage';
@@ -68,6 +69,7 @@ import { GeneralSettingsPage } from '@/pages/settings/GeneralSettingsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { PhoneNumbersPage } from '@/pages/settings/PhoneNumbersPage';
 import { IntegrationsPage } from '@/pages/settings/IntegrationsPage';
+import { WhatsAppIntegrationPage } from '@/pages/settings/WhatsAppIntegrationPage';
 import { TeamPage } from '@/pages/settings/TeamPage';
 import { BillingPage } from '@/pages/settings/BillingPage';
 import { PricingPage } from '@/pages/settings/PricingPage';
@@ -195,6 +197,7 @@ export const routes: RouteObject[] = [
       { path: '/crm/leads/:id', element: <LeadDetailPage /> },
       { path: '/crm/contacts', element: <ContactsPage /> },
       { path: '/crm/pipeline', element: <PipelinePage /> },
+      { path: '/crm/recalls', element: <RecallsPage /> },
       { path: '/knowledge', element: <KnowledgeBasePage /> },
       { path: '/voice-cloning', element: <VoiceCloningPage /> },
       { path: '/chatbots', element: <ChatbotsListPage /> },
@@ -207,6 +210,7 @@ export const routes: RouteObject[] = [
       { path: '/settings/legacy', element: <GeneralSettingsPage /> },
       { path: '/settings/phone-numbers', element: <PhoneNumbersPage /> },
       { path: '/settings/integrations', element: <IntegrationsPage /> },
+      { path: '/settings/whatsapp', element: <WhatsAppIntegrationPage /> },
       { path: '/settings/team', element: <TeamPage /> },
       { path: '/settings/billing', element: <BillingPage /> },
       { path: '/settings/pricing', element: <PricingPage /> },

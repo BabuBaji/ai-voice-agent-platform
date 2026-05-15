@@ -11,6 +11,7 @@ import { webCallInternalRouter } from './routes/webCallsInternal';
 import { userReportRouter, adminReportRouter } from './routes/support';
 import { publicContactRouter, adminContactRouter } from './routes/contact';
 import { postCallLeadRouter } from './routes/postCallLead';
+import { whatsappIntegrationRouter } from './routes/whatsappIntegration';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -44,6 +45,8 @@ app.use('/api/v1', translateRouter);
 // generic /api/v1 root because the router defines its own path prefixes
 // (/follow-ups, /counselors, /college-brochures, /communications/...).
 app.use('/api/v1', postCallLeadRouter);
+// Per-tenant WhatsApp integration (provider creds, encrypted at rest).
+app.use('/api/v1/integrations', whatsappIntegrationRouter);
 
 app.use(errorHandler);
 

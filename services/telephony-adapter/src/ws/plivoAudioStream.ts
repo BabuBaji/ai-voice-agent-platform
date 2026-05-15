@@ -500,8 +500,11 @@ const SHORT_ACK_SET = new Set([
   'fine', 'great', 'nice', 'good', 'cool', 'alright', 'gotcha', 'got it',
   'thanks', 'thank you', 'thank you very much', 'thanks a lot', 'thank you so much',
   'no problem', 'no worries',
-  // Telugu
-  'హలో', 'హా', 'మంచిది', 'బాగుంది', 'థాంక్యూ', 'ధన్యవాదాలు', 'సరే', 'ఓకే', 'ఉమ్', 'అవును', 'అచ్ఛా',
+  // Telugu — note: 'హలో' deliberately NOT here. Callers use "హలో" as an
+  // attention-getting "are you there?" when the agent is silent; if we treat
+  // it as an ack the agent stays silent and the caller hears "హలో, హలో,
+  // హలో" without any reply. Same logic for English "hello".
+  'హా', 'మంచిది', 'బాగుంది', 'థాంక్యూ', 'ధన్యవాదాలు', 'సరే', 'ఓకే', 'ఉమ్', 'అవును', 'అచ్ఛా',
   // Hindi
   'धन्यवाद', 'शुक्रिया', 'ठीक', 'हाँ', 'हां', 'अच्छा', 'ठीक है',
   // Tamil
@@ -1230,17 +1233,36 @@ async function streamLLMReply(
     // still exported for the day Sarvam exposes a non-thinking variant.
     let finalReply = geminiReply;
     if (!finalReply && sarvamConfigured()) {
+      // Sarvam-m still emits a <think> reasoning block even with
+      // enable_thinking:false / reasoning_effort:low. With maxTokens=200 the
+      // whole budget is consumed by the think block (finish_reason:length)
+      // before any user-visible text — stripThinkBlocks() returns '' and we
+      // fall through to say-again. 800 leaves comfortable headroom for both
+      // the think block AND a short conversational reply.
       let sarvamReply = await callSarvamLLM({
         systemPrompt: slimPrompt,
         messages: sarvamHistory,
-        maxTokens: 200,
+        maxTokens: 2500,
         temperature: parseFloat(agent.temperature) || 0.7,
       });
-      if (!sarvamReply && sarvamHistory.length > 4) {
+      // Always retry on empty (think-block consumed budget). Slimming the
+      // history shortens the reasoning Sarvam does and frees up tokens for
+      // the actual reply. Two retries: medium history, then minimal.
+      if (!sarvamReply) {
         sarvamReply = await callSarvamLLM({
           systemPrompt: slimPrompt,
           messages: sarvamHistory.slice(-4),
-          maxTokens: 400,
+          maxTokens: 3500,
+          temperature: parseFloat(agent.temperature) || 0.7,
+        });
+      }
+      if (!sarvamReply) {
+        // Last-ditch: only the latest user turn, gives the model the absolute
+        // smallest reasoning surface so the <think> block can't run away.
+        sarvamReply = await callSarvamLLM({
+          systemPrompt: slimPrompt,
+          messages: sarvamHistory.slice(-1),
+          maxTokens: 4000,
           temperature: parseFloat(agent.temperature) || 0.7,
         });
       }

@@ -10,6 +10,7 @@ import { setupWebSocketServer } from './ws/realtime';
 import { startRetentionSweeper } from './services/privacy';
 import { startStaleSweeper } from './services/staleSweeper';
 import { startCrmRetrySweeper } from './services/crmRetrySweeper';
+import { startRecallScheduler } from './services/recallScheduler';
 import pino from 'pino';
 
 const logger = pino({
@@ -58,6 +59,11 @@ async function start(): Promise<void> {
     // CRM service was down during the inline POST. Without this, calls that
     // ended during a CRM outage lost their leads forever.
     startCrmRetrySweeper();
+
+    // Lead recall scheduler — per-lead follow-up loop (1h / 3h / next-day /
+    // WhatsApp+SMS / UNREACHABLE) for every interested lead post-call.
+    // Disable with AUTO_RECALL=off.
+    startRecallScheduler();
 
     const shutdown = async () => {
       logger.info('Shutting down...');

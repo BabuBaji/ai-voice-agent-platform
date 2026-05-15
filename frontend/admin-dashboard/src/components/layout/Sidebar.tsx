@@ -82,6 +82,7 @@ const navSections: NavSection[] = [
           { label: 'Leads', path: '/crm/leads' },
           { label: 'Contacts', path: '/crm/contacts' },
           { label: 'Pipeline', path: '/crm/pipeline' },
+          { label: 'Recalls', path: '/crm/recalls' },
         ],
       },
     ],

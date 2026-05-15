@@ -215,6 +215,58 @@ export async function initDatabase(pool: Pool): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_brochure_college ON college_brochures (tenant_id, college_name);
       CREATE INDEX IF NOT EXISTS idx_brochure_verified ON college_brochures (verified_status);
+
+      -- Per-lead recall queue (separate from campaign_targets). Tracks the
+      -- multi-attempt followup cadence for every interested lead post-call:
+      --   attempt 1: +1h    attempt 2: +3h    attempt 3: next-day preferred
+      --   attempt 4: WhatsApp + SMS (no dial)   attempt 5: mark UNREACHABLE
+      CREATE TABLE IF NOT EXISTS lead_recall_queue (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        lead_id UUID NOT NULL,              -- CRM lead id
+        conversation_id UUID,               -- last call that touched this lead
+        agent_id UUID,                      -- agent to redial with
+        phone_number VARCHAR(20) NOT NULL,  -- E.164
+        lead_status VARCHAR(40),            -- HOT_INTERESTED / INTERESTED / FOLLOW_UP_REQUIRED
+        retry_count INT NOT NULL DEFAULT 0,
+        last_call_status VARCHAR(30),       -- NO_ANSWER / BUSY / REJECTED / CONNECTED / etc
+        last_attempt_at TIMESTAMPTZ,
+        next_retry_at TIMESTAMPTZ,
+        preferred_callback_time VARCHAR(8), -- 'HH:MM' (24h) from caller's "call after 6pm"
+        state VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                                            -- PENDING / IN_FLIGHT / COMPLETED / UNREACHABLE / CANCELLED
+        retry_reason TEXT,                  -- free text from last classify
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_recall_due ON lead_recall_queue (tenant_id, state, next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_recall_lead ON lead_recall_queue (lead_id);
+      CREATE INDEX IF NOT EXISTS idx_recall_phone ON lead_recall_queue (regexp_replace(phone_number, '\\D', '', 'g'));
+
+      -- Per-tenant WhatsApp integration. Each tenant owns one row holding
+      -- their provider choice and ENCRYPTED credentials. Credentials never
+      -- touch logs in plaintext; only the IV+tag+ciphertext live here.
+      -- Decryption uses INTEGRATION_ENCRYPTION_KEY (AES-256-GCM).
+      CREATE TABLE IF NOT EXISTS tenant_whatsapp_integrations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL UNIQUE,
+        provider VARCHAR(20) NOT NULL,           -- twilio | meta | gupshup | wati | interakt | custom
+        mode VARCHAR(20) NOT NULL DEFAULT 'sandbox', -- sandbox | production
+        encrypted_credentials JSONB NOT NULL,    -- { iv, tag, ct } base64 each
+        sender_number VARCHAR(40),               -- E.164, with or without 'whatsapp:' prefix
+        whatsapp_from VARCHAR(80),               -- explicit 'whatsapp:+91…' override
+        phone_number_id VARCHAR(80),             -- Meta Cloud API
+        business_account_id VARCHAR(80),         -- Meta Cloud API
+        template_config JSONB DEFAULT '{}',      -- { default_template_sid, namespace, … }
+        webhook_secret VARCHAR(120),
+        status VARCHAR(20) NOT NULL DEFAULT 'active', -- active | disabled | error
+        last_tested_at TIMESTAMPTZ,
+        last_test_result TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_wa_status ON tenant_whatsapp_integrations (status);
     `);
     logger.info('Conversation service database tables initialized');
   } finally {

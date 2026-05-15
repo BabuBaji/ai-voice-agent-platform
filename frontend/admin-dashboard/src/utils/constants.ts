@@ -12,6 +12,7 @@ export const NAV_ITEMS = [
       { label: 'Leads', path: '/crm/leads' },
       { label: 'Contacts', path: '/crm/contacts' },
       { label: 'Pipeline', path: '/crm/pipeline' },
+      { label: 'Recalls', path: '/crm/recalls' },
     ],
   },
   { label: 'Knowledge', path: '/knowledge', icon: 'BookOpen' },

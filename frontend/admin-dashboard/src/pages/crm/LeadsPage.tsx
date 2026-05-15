@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, Download, Trash2, Loader2, AlertCircle, ChevronLeft, ChevronRight, X, Phone, Eye, Send, Mail, Building2, FileText, MessageSquare, CheckCircle2 } from 'lucide-react';
+import { Search, Plus, Download, Trash2, Loader2, AlertCircle, ChevronLeft, ChevronRight, X, Phone, Eye, Send, Mail, Building2, FileText, MessageSquare, CheckCircle2, Pencil, Check, Users, Sparkles, Trophy, UserCheck, Inbox, Filter, ListFilter } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
-import { Table } from '@/components/ui/Table';
 import { Input } from '@/components/ui/Input';
 import { formatDate, formatCurrency } from '@/utils/formatters';
 import { crmApi } from '@/services/crm.api';
+import api from '@/services/api';
 import type { Lead } from '@/types';
 
 const mockLeads: Lead[] = [
@@ -201,70 +200,253 @@ export function LeadsPage() {
     { key: 'createdAt', label: 'Created', sortable: true, render: (item: Lead) => <span className="text-sm text-gray-500">{formatDate(item.createdAt)}</span> },
   ];
 
+  // KPI rollup. Counts come from the visible result set — for the full
+  // pagination universe these would ideally be a separate API rollup, but
+  // showing local counts is good enough for a top-of-page glance.
+  const kpis = {
+    total,
+    new: displayed.filter((l) => l.status === 'new').length,
+    qualified: displayed.filter((l) => l.status === 'qualified').length,
+    won: displayed.filter((l) => l.status === 'won').length,
+  };
+
+  const STATUS_PILLS = [
+    { value: 'all',       label: 'All' },
+    { value: 'new',       label: 'New' },
+    { value: 'contacted', label: 'Contacted' },
+    { value: 'qualified', label: 'Qualified' },
+    { value: 'proposal',  label: 'Proposal' },
+    { value: 'won',       label: 'Won' },
+    { value: 'lost',      label: 'Lost' },
+  ];
+
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Leads</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage and track your sales leads</p>
+    <div className="max-w-7xl mx-auto space-y-2">
+      {/* Compact header */}
+      <div className="flex items-center justify-between flex-wrap gap-2 pb-1">
+        <div className="flex items-center gap-2">
+          <Users className="h-4 w-4 text-primary-600" />
+          <h1 className="text-base font-semibold text-gray-900 leading-tight">Leads</h1>
+          <span className="text-[11px] text-gray-400">· auto-scored · brochures + follow-ups automated</span>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="outline" className="rounded-xl"><Download className="h-4 w-4" />Export</Button>
-          <Button variant="gradient" className="rounded-xl" onClick={() => { setAddError(''); setShowAdd(true); }}>
-            <Plus className="h-4 w-4" />Add Lead
+        <div className="flex items-center gap-1.5 shrink-0">
+          <Button variant="outline" size="sm" className="rounded-md h-7 text-xs"><Download className="h-3 w-3" />Export</Button>
+          <Button variant="gradient" size="sm" className="rounded-md h-7 text-xs" onClick={() => { setAddError(''); setShowAdd(true); }}>
+            <Plus className="h-3 w-3" />Add Lead
           </Button>
         </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-700">
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
           <span>Service unavailable: showing demo data. ({error})</span>
-          <button onClick={fetchLeads} className="ml-auto text-warning-800 underline text-xs font-medium">Retry</button>
+          <button onClick={fetchLeads} className="ml-auto text-amber-900 underline text-xs font-medium">Retry</button>
         </div>
       )}
 
-      <div className="flex items-center gap-4 flex-wrap">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-          <input type="text" placeholder="Search by name, email, phone, company..." value={search} onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none transition-all" />
+      {/* KPI strip */}
+      <div className="grid grid-cols-4 gap-2">
+        {[
+          { label: 'Total', value: kpis.total,     icon: Users,     accent: 'text-blue-600 bg-blue-50' },
+          { label: 'New',   value: kpis.new,       icon: Sparkles,  accent: 'text-amber-600 bg-amber-50' },
+          { label: 'Qual.', value: kpis.qualified, icon: UserCheck, accent: 'text-purple-600 bg-purple-50' },
+          { label: 'Won',   value: kpis.won,       icon: Trophy,    accent: 'text-emerald-600 bg-emerald-50' },
+        ].map((k) => {
+          const Icon = k.icon;
+          return (
+            <div key={k.label} className="bg-white rounded-md border border-gray-100 shadow-sm px-2.5 py-1.5 flex items-center justify-between">
+              <div className="leading-tight">
+                <p className="text-[10px] uppercase tracking-wider font-medium text-gray-500">{k.label}</p>
+                <p className="text-base font-semibold text-gray-900">{k.value}</p>
+              </div>
+              <div className={`p-1 rounded ${k.accent}`}><Icon className="h-3.5 w-3.5" /></div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Toolbar — single row, no card chrome */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 max-w-xs min-w-[200px]">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400" />
+          <input type="text" placeholder="Search name, email, phone…" value={search} onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-7 pr-2 py-1 text-xs border border-gray-200 rounded-md bg-white focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none" />
         </div>
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100">
-          <option value="all">All Status</option>
-          <option value="new">New</option><option value="contacted">Contacted</option>
-          <option value="qualified">Qualified</option><option value="proposal">Proposal</option>
-          <option value="won">Won</option><option value="lost">Lost</option>
-        </select>
         <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
-          className="text-sm border border-gray-200 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100">
-          <option value="all">All Sources</option>
-          <option value="inbound-call">Inbound Call</option><option value="website">Website</option>
-          <option value="referral">Referral</option><option value="outbound">Outbound</option>
+          className="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-primary-100 cursor-pointer">
+          <option value="all">All sources</option>
+          <option value="inbound-call">Inbound Call</option>
+          <option value="website">Website</option>
+          <option value="referral">Referral</option>
+          <option value="outbound">Outbound</option>
           <option value="campaign">Campaign</option>
         </select>
+        <Filter className="h-3 w-3 text-gray-400 ml-1" />
+        {STATUS_PILLS.map((s) => {
+          const isActive = statusFilter === s.value;
+          return (
+            <button
+              key={s.value}
+              onClick={() => setStatusFilter(s.value)}
+              className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                isActive
+                  ? 'border-primary-400 bg-primary-600 text-white'
+                  : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {s.label}
+            </button>
+          );
+        })}
+        {(statusFilter !== 'all' || sourceFilter !== 'all' || search) && (
+          <button onClick={() => { setStatusFilter('all'); setSourceFilter('all'); setSearch(''); }}
+            className="text-[11px] text-gray-500 hover:text-gray-800 underline-offset-2 hover:underline">Clear</button>
+        )}
         {selectedIds.length > 0 && (
-          <div className="flex items-center gap-2 ml-auto">
-            <span className="text-sm text-gray-500">{selectedIds.length} selected</span>
-            <Button variant="danger" size="sm" onClick={handleDeleteSelected} className="rounded-lg">
-              <Trash2 className="h-3.5 w-3.5" />Delete
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-[11px] text-gray-600 font-medium">{selectedIds.length} selected</span>
+            <Button variant="danger" size="sm" onClick={handleDeleteSelected} className="rounded-md h-6 text-[11px]">
+              <Trash2 className="h-3 w-3" />Delete
             </Button>
           </div>
         )}
       </div>
 
+      {/* Premium table */}
       {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm py-10 flex items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-primary-600" />
         </div>
       ) : (
-        <Card padding={false} className="shadow-card">
-          <Table columns={columns} data={displayed} onRowClick={(item) => navigate(`/crm/leads/${item.id}`)} />{showAdd && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => !adding && setShowAdd(false)}>
+        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50/80 border-b border-gray-100">
+                  <th className="w-9 px-2 py-1.5 text-left">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.length > 0 && selectedIds.length === displayed.length}
+                      onChange={(e) => setSelectedIds(e.target.checked ? displayed.map((l) => l.id) : [])}
+                      className="rounded border-gray-300 text-primary-600"
+                    />
+                  </th>
+                  <th className="w-14 px-2 py-1.5"></th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Lead</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Mobile</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Email</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Status</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Source</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Score</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Value</th>
+                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayed.length === 0 && (
+                  <tr>
+                    <td colSpan={10} className="px-3 py-10 text-center">
+                      <div className="inline-flex flex-col items-center gap-1.5">
+                        <Inbox className="h-10 w-10 text-gray-300" />
+                        <p className="text-sm font-medium text-gray-600">No leads match your filters</p>
+                        <p className="text-xs text-gray-400 max-w-sm">Adjust the search or add a new lead.</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {displayed.map((item) => {
+                  const isSelected = selectedIds.includes(item.id);
+                  const scoreColor = item.score >= 80 ? 'text-emerald-600' : item.score >= 50 ? 'text-amber-600' : 'text-gray-400';
+                  const scoreBar = item.score >= 80 ? 'bg-emerald-500' : item.score >= 50 ? 'bg-amber-500' : 'bg-gray-300';
+                  return (
+                    <tr
+                      key={item.id}
+                      onClick={() => navigate(`/crm/leads/${item.id}`)}
+                      className={`group border-b border-gray-50 last:border-0 hover:bg-primary-50/30 transition-colors cursor-pointer ${
+                        isSelected ? 'bg-primary-50/20' : ''
+                      }`}
+                    >
+                      <td className="px-2 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(item.id)}
+                          className="rounded border-gray-300 text-primary-600 h-3 w-3"
+                        />
+                      </td>
+                      <td className="px-2 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => setViewLead(item)}
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-primary-50 hover:bg-primary-100 text-primary-700 text-[10px] font-medium transition-colors"
+                          title="View all details"
+                        >
+                          <Eye className="h-2.5 w-2.5" /> View
+                        </button>
+                      </td>
+                      <td className="px-3 py-0.5 align-middle">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 text-primary-700 flex items-center justify-center text-[10px] font-semibold ring-1 ring-primary-100 flex-shrink-0">
+                            {item.name[0]?.toUpperCase()}
+                          </div>
+                          <div className="min-w-0 leading-none">
+                            <p className="font-medium text-gray-900 truncate text-xs">{item.name}</p>
+                            {item.company && <p className="text-[10px] text-gray-400 truncate mt-0.5">{item.company}</p>}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-3 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                        {item.phone ? (
+                          <a href={`tel:${item.phone}`} className="inline-flex items-center gap-1 text-[11px] font-mono text-gray-700 hover:text-primary-600" title="Click to dial">
+                            <Phone className="h-2.5 w-2.5 text-gray-400" />{item.phone}
+                          </a>
+                        ) : <span className="text-xs text-gray-300">—</span>}
+                      </td>
+                      <td className="px-3 py-0.5 align-middle">
+                        {item.email
+                          ? <span className="text-[11px] text-gray-700">{item.email}</span>
+                          : <span className="text-xs text-gray-300">—</span>}
+                      </td>
+                      <td className="px-3 py-0.5 align-middle"><StatusBadge status={item.status} /></td>
+                      <td className="px-3 py-0.5 align-middle"><Badge variant="outline">{sourceLabels[item.source] || item.source}</Badge></td>
+                      <td className="px-3 py-0.5 align-middle">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-8 h-0.5 bg-gray-100 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${scoreBar}`} style={{ width: `${item.score}%` }} />
+                          </div>
+                          <span className={`text-[11px] font-semibold ${scoreColor}`}>{item.score}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-0.5 align-middle">
+                        <span className="text-[11px] font-medium text-gray-800">{item.value > 0 ? formatCurrency(item.value) : <span className="text-gray-300">—</span>}</span>
+                      </td>
+                      <td className="px-3 py-0.5 align-middle"><span className="text-[11px] text-gray-500">{formatDate(item.createdAt)}</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="px-3 py-2 border-t border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <p className="text-xs text-gray-500">Showing <span className="font-medium text-gray-800">{displayed.length}</span> of <span className="font-medium text-gray-800">{total}</span></p>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-md"><ChevronLeft className="h-3.5 w-3.5" /></Button>
+              <span className="text-xs text-gray-700 px-1">Page <span className="font-medium">{page}</span> / <span className="font-medium">{totalPages}</span></span>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-md"><ChevronRight className="h-3.5 w-3.5" /></Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Lead modal — unchanged behavior, slight visual polish */}
+      {showAdd && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !adding && setShowAdd(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">Add Lead</h2>
+              <h2 className="text-lg font-semibold text-gray-900 inline-flex items-center gap-2">
+                <Plus className="h-4 w-4 text-primary-600" /> Add Lead
+              </h2>
               <button onClick={() => setShowAdd(false)} disabled={adding} className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100">
                 <X className="h-5 w-5" />
               </button>
@@ -274,27 +456,17 @@ export function LeadsPage() {
             <Input label="Phone" value={addForm.phone} onChange={(e) => setAddForm({ ...addForm, phone: e.target.value })} placeholder="+91 98xxxxxx21" />
             <Input label="Company" value={addForm.company} onChange={(e) => setAddForm({ ...addForm, company: e.target.value })} placeholder="(optional)" />
             {addError && (
-              <div className="text-sm text-error-600 bg-error-50 border border-error-100 rounded-lg px-3 py-2">{addError}</div>
+              <div className="text-sm text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">{addError}</div>
             )}
             <div className="flex items-center justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowAdd(false)} disabled={adding} className="rounded-xl">Cancel</Button>
               <Button variant="gradient" onClick={handleAddLead} disabled={adding} className="rounded-xl">
                 {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                {adding ? 'Saving...' : 'Save Lead'}
+                {adding ? 'Saving…' : 'Save Lead'}
               </Button>
             </div>
           </div>
         </div>
-      )}
-          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between">
-            <p className="text-sm text-gray-500">Showing {displayed.length} of {total} leads</p>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg"><ChevronLeft className="h-4 w-4" /></Button>
-              <span className="text-sm text-gray-700 px-2">Page {page} of {totalPages}</span>
-              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg"><ChevronRight className="h-4 w-4" /></Button>
-            </div>
-          </div>
-        </Card>
       )}
 
       {viewLead && (
@@ -302,6 +474,10 @@ export function LeadsPage() {
           lead={viewLead}
           onClose={() => setViewLead(null)}
           onSendBrochure={() => setShowBrochure(true)}
+          onLeadUpdated={(updated) => {
+            setViewLead(updated);
+            setLeads((prev) => prev.map((l) => (l.id === updated.id ? { ...l, ...updated } : l)));
+          }}
         />
       )}
 
@@ -317,14 +493,64 @@ export function LeadsPage() {
 
 /* ---------- View Lead modal: all stored fields in one place ---------- */
 
-function ViewLeadModal({ lead, onClose, onSendBrochure }: {
+function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
   lead: Lead;
   onClose: () => void;
   onSendBrochure: () => void;
+  onLeadUpdated?: (updated: Lead) => void;
 }) {
   const cf = (lead as any).customFields || {};
   const notInterested = lead.status === 'lost' || (lead.tags || []).includes('not_interested');
   const followUpDue = !!cf.recommended_follow_up_time || (lead.tags || []).includes('callback_requested');
+
+  // Inline email edit — lets the user correct/add an address before clicking
+  // Send Brochure without leaving this modal.
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [emailDraft, setEmailDraft] = useState(lead.email || '');
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [emailError, setEmailError] = useState('');
+
+  const startEditEmail = () => {
+    setEmailDraft(lead.email || '');
+    setEmailError('');
+    setEditingEmail(true);
+  };
+  const cancelEditEmail = () => {
+    setEditingEmail(false);
+    setEmailError('');
+  };
+  const saveEmail = async (): Promise<boolean> => {
+    const next = emailDraft.trim();
+    if (next && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next)) {
+      setEmailError('Enter a valid email address');
+      return false;
+    }
+    if (next === (lead.email || '')) { setEditingEmail(false); return true; }
+    setSavingEmail(true);
+    setEmailError('');
+    try {
+      const updated = await crmApi.updateLead(lead.id, { email: next } as any);
+      onLeadUpdated?.({ ...lead, ...updated, email: next });
+      setEditingEmail(false);
+      return true;
+    } catch (err: any) {
+      setEmailError(err?.response?.data?.message || err?.message || 'Save failed');
+      return false;
+    } finally {
+      setSavingEmail(false);
+    }
+  };
+
+  // If the user clicks Send Brochure while still editing the email, flush
+  // the edit first so the brochure goes to the address they just typed —
+  // not the stale one stored on the lead.
+  const handleSendBrochure = async () => {
+    if (editingEmail) {
+      const ok = await saveEmail();
+      if (!ok) return;
+    }
+    onSendBrochure();
+  };
 
   // Admissions-specific block — only renders rows when the post-call analyzer
   // actually captured the field. Each row labelled `admission` for visual
@@ -385,9 +611,52 @@ function ViewLeadModal({ lead, onClose, onSendBrochure }: {
     { section: 'contact', label: 'Mobile', icon: <Phone className="h-3.5 w-3.5 text-gray-400" />, value: lead.phone ? (
       <a href={`tel:${lead.phone}`} className="font-mono text-gray-800 hover:text-primary-600">{lead.phone}</a>
     ) : <span className="text-gray-400 italic">not provided</span> },
-    { section: 'contact', label: 'Email', icon: <Mail className="h-3.5 w-3.5 text-gray-400" />, value: lead.email ? (
-      <a href={`mailto:${lead.email}`} className="text-gray-800 hover:text-primary-600">{lead.email}</a>
-    ) : <span className="text-gray-400 italic">not provided</span> },
+    { section: 'contact', label: 'Email', icon: <Mail className="h-3.5 w-3.5 text-gray-400" />, value: editingEmail ? (
+      <div className="flex items-center gap-2">
+        <input
+          type="email"
+          autoFocus
+          value={emailDraft}
+          onChange={(e) => { setEmailDraft(e.target.value); if (emailError) setEmailError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') saveEmail(); if (e.key === 'Escape') cancelEditEmail(); }}
+          disabled={savingEmail}
+          placeholder="name@example.com"
+          className="flex-1 text-sm border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-primary-100"
+        />
+        <button
+          onClick={saveEmail}
+          disabled={savingEmail}
+          className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 disabled:opacity-50"
+          title="Save"
+        >
+          {savingEmail ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+        </button>
+        <button
+          onClick={cancelEditEmail}
+          disabled={savingEmail}
+          className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+          title="Cancel"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+        {emailError && <span className="text-[11px] text-danger-600 ml-1">{emailError}</span>}
+      </div>
+    ) : (
+      <div className="flex items-center gap-2 group">
+        {lead.email ? (
+          <a href={`mailto:${lead.email}`} className="text-gray-800 hover:text-primary-600">{lead.email}</a>
+        ) : (
+          <span className="text-gray-400 italic">not provided</span>
+        )}
+        <button
+          onClick={startEditEmail}
+          className="p-1 rounded text-gray-400 hover:text-primary-600 hover:bg-gray-100 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Edit email"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </div>
+    ) },
     { section: 'contact', label: 'Company', icon: <Building2 className="h-3.5 w-3.5 text-gray-400" />, value: lead.company || dash },
     { section: 'contact', label: 'City', value: cf.city || dash },
     ...admissionRows,
@@ -465,8 +734,14 @@ function ViewLeadModal({ lead, onClose, onSendBrochure }: {
 
         <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-2">
           <Button variant="outline" onClick={onClose} className="rounded-xl">Close</Button>
-          <Button variant="gradient" onClick={onSendBrochure} className="rounded-xl" disabled={!lead.email && !lead.phone}>
-            <Send className="h-4 w-4" /> Send Brochure
+          <Button
+            variant="gradient"
+            onClick={handleSendBrochure}
+            className="rounded-xl"
+            disabled={savingEmail || (!lead.email && !lead.phone && !emailDraft.trim())}
+          >
+            {savingEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            Send Brochure
           </Button>
         </div>
       </div>
@@ -507,7 +782,8 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
   const [cfg, setCfg] = useState<BrochureConfig>(loadBrochureConfig);
   const [saved, setSaved] = useState(false);
   const [sending, setSending] = useState(false);
-  const [sendResult, setSendResult] = useState<'success' | 'pending' | null>(null);
+  const [sendResult, setSendResult] = useState<'success' | 'pending' | 'error' | null>(null);
+  const [sendError, setSendError] = useState<string>('');
 
   const save = () => {
     try { localStorage.setItem(BROCHURE_CONFIG_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
@@ -517,17 +793,72 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
 
   const channelAvailable = cfg.channel === 'email' ? !!lead.email : !!lead.phone;
 
+  const renderTemplate = (tpl: string) =>
+    tpl
+      .replace(/\{\{\s*name\s*\}\}/g, lead.name || 'there')
+      .replace(/\{\{\s*brochure_url\s*\}\}/g, cfg.brochure_url || '');
+
   const send = async () => {
     save();
     setSending(true);
     setSendResult(null);
-    // Placeholder send — when the user wires the real brochure delivery
-    // (SendGrid / Twilio WhatsApp / Plivo SMS), this is where the API call
-    // goes. For now we simulate and surface a "pending — settings saved"
-    // confirmation so the flow is wired end-to-end in the UI.
-    await new Promise((r) => setTimeout(r, 700));
-    setSending(false);
-    setSendResult('pending');
+    setSendError('');
+    try {
+      const body = renderTemplate(cfg.message_template);
+      if (cfg.channel === 'email') {
+        if (!lead.email) throw new Error('Lead has no email address');
+        const { data } = await api.post('/communications/email/brochure', {
+          lead_id: lead.id,
+          recipient: lead.email,
+          subject: cfg.subject || 'Information you requested',
+          body,
+          attachments: cfg.brochure_url ? [{ name: 'Brochure', url: cfg.brochure_url }] : [],
+        });
+        setSendResult(data?.ok ? 'success' : 'error');
+        if (!data?.ok) setSendError('Email provider rejected the send. Check SMTP credentials.');
+      } else if (cfg.channel === 'whatsapp') {
+        if (!lead.phone) throw new Error('Lead has no phone number');
+        const { data } = await api.post('/communications/whatsapp/send', {
+          lead_id: lead.id,
+          recipient: lead.phone,
+          message: body,
+          attachments: cfg.brochure_url ? [{ name: 'Brochure', url: cfg.brochure_url }] : [],
+        });
+        setSendResult(data?.ok ? 'success' : 'error');
+        if (!data?.ok) {
+          const raw = String(data?.error || '');
+          if (/channel.*from address/i.test(raw)) {
+            setSendError(`Twilio WhatsApp sandbox isn't enabled on this account. Open Twilio Console → Messaging → Try it out → Send a WhatsApp message, click "Confirm" to activate the sandbox, then have the recipient send the 2-word "join …" code to +1 415 523 8886 from their WhatsApp. Raw: ${raw}`);
+          } else if (/63007|24h|session|opt[- ]?in/i.test(raw)) {
+            setSendError(`Recipient hasn't sent the Twilio sandbox join code yet (or 24h session expired). Ask them to WhatsApp the "join …" code to +1 415 523 8886. Raw: ${raw}`);
+          } else {
+            setSendError(`WhatsApp send rejected by Twilio: ${raw || 'unknown error'}`);
+          }
+        }
+      } else {
+        // SMS
+        if (!lead.phone) throw new Error('Lead has no phone number');
+        const { data } = await api.post('/communications/sms/send', {
+          lead_id: lead.id,
+          recipient: lead.phone,
+          message: body,
+        });
+        setSendResult(data?.ok ? 'success' : 'error');
+        if (!data?.ok) {
+          const raw = String(data?.error || '');
+          if (/dlt|160/i.test(raw)) {
+            setSendError(`Plivo can't deliver to Indian numbers without DLT registration. Register the sender + template on console.plivo.com → Messaging → DLT. Raw: ${raw}`);
+          } else {
+            setSendError(`SMS send rejected: ${raw || 'unknown error'}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      setSendResult('error');
+      setSendError(err?.response?.data?.message || err?.message || 'Send failed');
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -605,15 +936,29 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
           </p>
         </div>
 
+        {sendResult === 'success' && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+            <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+            <span>Brochure sent to {cfg.channel === 'email' ? lead.email : lead.phone} via {cfg.channel}.</span>
+          </div>
+        )}
         {sendResult === 'pending' && (
           <div className="flex items-start gap-2 p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-800">
             <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
             <span>
-              Settings saved. Brochure delivery isn't wired yet — provide the SendGrid/WhatsApp/SMS credentials and the send-handler will fire automatically.
+              {cfg.channel === 'email'
+                ? "Settings saved. Brochure delivery isn't wired yet — provide the SendGrid/WhatsApp/SMS credentials and the send-handler will fire automatically."
+                : `${cfg.channel.toUpperCase()} provider not configured — message queued, no real send happened. Wire a provider to enable delivery.`}
             </span>
           </div>
         )}
-        {saved && sendResult !== 'pending' && (
+        {sendResult === 'error' && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-danger-50 border border-danger-200 text-xs text-danger-800">
+            <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+            <span>{sendError || 'Send failed.'}</span>
+          </div>
+        )}
+        {saved && !sendResult && (
           <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700">
             <CheckCircle2 className="h-3.5 w-3.5" /> Settings saved.
           </div>

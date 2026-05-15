@@ -119,6 +119,15 @@ proxyRouter.all('/api/v1/campaigns', authMiddleware, forwardRequest(config.servi
 // --- Conversation service ---
 proxyRouter.all('/api/v1/conversations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 proxyRouter.all('/api/v1/conversations', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Brochure / WhatsApp / SMS sends, follow-up tasks, counselors, college-brochures, comm logs
+proxyRouter.all('/api/v1/communications/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/communication-logs', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Lead-recall queue (per-lead followup loop)
+proxyRouter.all('/api/v1/recalls/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/recalls', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Per-tenant WhatsApp integration config (encrypted creds at rest)
+proxyRouter.all('/api/v1/integrations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/integrations', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 // Public GET for recording playback — <audio src="..."> can't send bearer tokens.
 // call_id is an unguessable UUID so this is safe; anything mutating the call
 // still flows through the authed /web-calls/* route below.
