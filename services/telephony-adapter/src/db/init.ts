@@ -96,6 +96,21 @@ export async function initDatabase(pool: Pool): Promise<void> {
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS campaign_instruction TEXT;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS deployed_agent_config_id UUID;
 
+      -- Multi-channel campaigns. 'PHONE' (default) keeps every existing voice
+      -- campaign exactly as it was; 'SMS' / 'WHATSAPP' campaigns reuse the
+      -- same CSV upload + DND filter + retry queue + analytics but dispatch
+      -- through conversation-service's /communications/* endpoints instead
+      -- of dialing. message_body is the templated text ({{name}} / {{var}}
+      -- placeholders interpolated from campaign_targets.variables JSONB at
+      -- dispatch time); template_id pins a tenant-approved WA/DLT template.
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS channel VARCHAR(20) NOT NULL DEFAULT 'PHONE';
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS message_body TEXT;
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS template_id VARCHAR(64);
+      -- agent_id was NOT NULL when only voice campaigns existed. SMS/WhatsApp
+      -- campaigns don't need an agent, so relax the constraint. DROP NOT NULL
+      -- is a no-op if it's already nullable, so this is safe to re-run.
+      ALTER TABLE campaigns ALTER COLUMN agent_id DROP NOT NULL;
+
       -- Tenant-scoped do-not-call list. Outbound runner skips any target whose
       -- phone_number matches an entry for the tenant.
       CREATE TABLE IF NOT EXISTS do_not_call_numbers (

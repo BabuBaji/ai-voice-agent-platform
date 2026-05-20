@@ -267,6 +267,50 @@ export async function initDatabase(pool: Pool): Promise<void> {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_tenant_wa_status ON tenant_whatsapp_integrations (status);
+
+      -- Per-tenant Plivo integration. One row per tenant covers BOTH SMS and
+      -- WhatsApp (Plivo's API uses the same auth credentials for both). DLT
+      -- fields are India-specific (TRAI mandate) — entity_id is the principal-
+      -- entity registration; template_config holds per-template DLT IDs.
+      -- encrypted_auth_token uses the same AES-256-GCM scheme as
+      -- tenant_whatsapp_integrations (INTEGRATION_ENCRYPTION_KEY).
+      CREATE TABLE IF NOT EXISTS tenant_plivo_integrations (
+        tenant_id UUID PRIMARY KEY,
+        auth_id VARCHAR(64) NOT NULL,
+        encrypted_auth_token JSONB NOT NULL,        -- { iv, tag, ct }
+        sms_sender_id VARCHAR(40),                  -- E.164 sender OR DLT header (e.g. 'VOICEAI')
+        whatsapp_sender VARCHAR(40),                -- E.164 WhatsApp Business sender
+        dlt_entity_id VARCHAR(32),                  -- TRAI principal-entity ID
+        dlt_template_config JSONB DEFAULT '{}',     -- { default_template_id, templates: [{id, content, dlt_id}] }
+        sms_enabled BOOLEAN NOT NULL DEFAULT true,
+        whatsapp_enabled BOOLEAN NOT NULL DEFAULT true,
+        status VARCHAR(20) NOT NULL DEFAULT 'active', -- active | disabled | error
+        last_tested_at TIMESTAMPTZ,
+        last_test_result TEXT,
+        webhook_secret VARCHAR(64),                 -- HMAC verification (optional)
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_plivo_status ON tenant_plivo_integrations (status);
+
+      -- Audit trail for tenant Plivo integration changes. Captures who edited
+      -- the credentials / sender / DLT fields and what changed, so a tenant
+      -- admin can answer "why did SMS stop landing on Tuesday?". Diffs are
+      -- stored as { field: { from: <old>, to: <new> } } in field_changes;
+      -- the encrypted_auth_token field is NEVER diffed (only "rotated:true"
+      -- gets recorded) so plaintext can't leak through audit history.
+      CREATE TABLE IF NOT EXISTS tenant_plivo_audit (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        actor_user_id UUID,
+        actor_email VARCHAR(255),
+        action VARCHAR(40) NOT NULL,        -- created | updated | disconnected | tested
+        field_changes JSONB DEFAULT '{}',
+        ip VARCHAR(64),
+        user_agent VARCHAR(255),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tenant_plivo_audit_tenant ON tenant_plivo_audit (tenant_id, created_at DESC);
     `);
     logger.info('Conversation service database tables initialized');
   } finally {

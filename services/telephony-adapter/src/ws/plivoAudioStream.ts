@@ -33,6 +33,7 @@ import { buildVoiceAgentPrompt, buildVoiceAgentPromptSlim } from '../prompts/voi
 import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, callSarvamLLMStream, SarvamSttHandle } from '../providers/sarvamSpeech';
+import { startWhisperStt, whisperConfigured, WhisperSttHandle } from '../providers/whisperSpeech';
 import { plivoProvider } from '../providers/plivo.provider';
 import { resolveDeployedAgent } from '../services/deployedAgentResolver';
 import { updateTargetFromCallEnd } from '../routes/campaigns';
@@ -40,6 +41,99 @@ import { updateTargetFromCallEnd } from '../routes/campaigns';
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
 });
+
+/**
+ * Structured event emitter for the live-call pipeline. Every state-machine
+ * transition flows through this so the live-monitor script and ops dashboards
+ * can grep one canonical shape:
+ *
+ *   { event: 'CALL_CONNECTED', call_sid: '…', ts_ms: 17792…, … }
+ *
+ * Replaces ad-hoc log strings ("Stream: backends chosen", "barge-in
+ * requested") which were inconsistent + hard to alert on. Existing string
+ * logs stay as-is for backward compat with the live-monitor.sh script;
+ * structured events sit alongside them under `evt` key.
+ */
+type LiveEvent =
+  | 'CALL_CONNECTED'
+  | 'STT_STARTED'
+  | 'STT_FINAL'
+  | 'STT_PARTIAL'
+  | 'SPEECH_STARTED'
+  | 'UTTERANCE_END'
+  | 'INTERRUPT_DETECTED'
+  | 'TTS_STARTED'
+  | 'TTS_STOPPED'
+  | 'TTS_CANCELLED'
+  | 'LISTENING_RESUMED'
+  | 'STATE_FORCED_RECOVERY'
+  | 'LLM_RESPONSE_STARTED'
+  | 'LLM_RESPONSE_COMPLETED'
+  | 'WEBSOCKET_RECONNECTED'
+  | 'WEBSOCKET_DEAD'
+  | 'INFLIGHT_WATCHDOG_FIRED'
+  | 'SARVAM_FALLBACK_TRIGGERED'
+  | 'CALL_ENDED'
+  | 'STATE_CHANGE';
+
+/**
+ * High-level conversation states for the live-call pipeline. Layered ON TOP
+ * of the existing boolean flags (isAgentSpeaking, inFlightReply, callEnded)
+ * so no downstream call sites need to change — `setCallState` mutates the
+ * derived state field + emits STATE_CHANGE for visibility.
+ */
+type CallState =
+  | 'IDLE'           // ws connected, before any greeting
+  | 'LISTENING'      // agent quiet, waiting for caller
+  | 'USER_SPEAKING'  // SpeechStarted but no final yet
+  | 'THINKING'       // STT final received, LLM call pending
+  | 'AGENT_SPEAKING' // TTS playback active
+  | 'ENDED';         // session torn down
+
+function setCallState(session: any, next: CallState, reason?: string): void {
+  if (session.callState === next) return;
+  const prev = session.callState || 'IDLE';
+  session.callState = next;
+  emit(session, 'STATE_CHANGE', { from: prev, to: next, reason: reason || null });
+}
+
+/**
+ * Per-call barge-in grace window. Defaults differ by language because Indic
+ * speakers' natural pauses (~700-900ms) are noticeably longer than English
+ * (~300-400ms); 1.5s cuts Hindi/Telugu callers off mid-thought too often.
+ *
+ * Overrides (highest first):
+ *   1. session.agentBargeInGraceMs (set from agent.voice_config.barge_in_grace_ms)
+ *   2. BARGE_IN_GRACE_MS_EN / BARGE_IN_GRACE_MS_INDIC env vars
+ *   3. Language defaults: 1500ms English, 2000ms Indic
+ */
+const INDIC_LANG_PREFIXES = ['hi', 'te', 'ta', 'kn', 'ml', 'mr', 'bn', 'gu', 'pa', 'or', 'as'];
+function bargeInGraceMs(session: { language?: string; agentBargeInGraceMs?: number | null }): number {
+  if (session.agentBargeInGraceMs && session.agentBargeInGraceMs > 0) {
+    return session.agentBargeInGraceMs;
+  }
+  const lang = String(session.language || 'en').toLowerCase();
+  const isIndic = INDIC_LANG_PREFIXES.some((p) => lang === p || lang.startsWith(p + '-'));
+  if (isIndic) {
+    const envIndic = Number(process.env.BARGE_IN_GRACE_MS_INDIC);
+    return Number.isFinite(envIndic) && envIndic > 0 ? envIndic : 2000;
+  }
+  const envEn = Number(process.env.BARGE_IN_GRACE_MS_EN);
+  return Number.isFinite(envEn) && envEn > 0 ? envEn : 1500;
+}
+
+function emit(session: { callSid?: string; conversationId?: string | null } | null, event: LiveEvent, fields: Record<string, any> = {}): void {
+  logger.info(
+    {
+      evt: event,
+      call_sid: session?.callSid || null,
+      conv_id: session?.conversationId || null,
+      ts_ms: Date.now(),
+      ...fields,
+    },
+    `evt:${event}`,
+  );
+}
 
 // ---- module state ----------------------------------------------------------
 
@@ -1237,22 +1331,25 @@ async function streamLLMReply(
       // enable_thinking:false / reasoning_effort:low. With maxTokens=200 the
       // whole budget is consumed by the think block (finish_reason:length)
       // before any user-visible text — stripThinkBlocks() returns '' and we
-      // fall through to say-again. 800 leaves comfortable headroom for both
-      // the think block AND a short conversational reply.
+      // fall through to say-again. Each retry trims history (less reasoning
+      // surface) while bumping budget so the conversational reply still has
+      // room after <think>. All three values stay under Sarvam's starter-tier
+      // cap of 2048 — going above it returns HTTP 400. Tightened from
+      // 1500/1800/2000 → 800/1200/1500 because the prompt mandates ≤25-word
+      // replies — leaving ~600 tokens of room for the think block AND a 25-
+      // word reply, while making it impossible for Sarvam-M to monologue
+      // for 2000 tokens and get truncated mid-sentence.
       let sarvamReply = await callSarvamLLM({
         systemPrompt: slimPrompt,
         messages: sarvamHistory,
-        maxTokens: 2500,
+        maxTokens: 800,
         temperature: parseFloat(agent.temperature) || 0.7,
       });
-      // Always retry on empty (think-block consumed budget). Slimming the
-      // history shortens the reasoning Sarvam does and frees up tokens for
-      // the actual reply. Two retries: medium history, then minimal.
       if (!sarvamReply) {
         sarvamReply = await callSarvamLLM({
           systemPrompt: slimPrompt,
           messages: sarvamHistory.slice(-4),
-          maxTokens: 3500,
+          maxTokens: 1200,
           temperature: parseFloat(agent.temperature) || 0.7,
         });
       }
@@ -1262,7 +1359,7 @@ async function streamLLMReply(
         sarvamReply = await callSarvamLLM({
           systemPrompt: slimPrompt,
           messages: sarvamHistory.slice(-1),
-          maxTokens: 4000,
+          maxTokens: 1500,
           temperature: parseFloat(agent.temperature) || 0.7,
         });
       }
@@ -1482,17 +1579,86 @@ interface StreamSession {
   // modifying the agent record.
   campaignContext: CampaignContext;
   language: string;          // agent voice_config.language, normalized
-  sttBackend: 'deepgram' | 'azure' | 'sarvam' | null;
+  sttBackend: 'deepgram' | 'azure' | 'sarvam' | 'whisper' | null;
   ttsBackend: 'deepgram' | 'azure' | 'sarvam';
   dgWs: WebSocket | null;
+  /** Mulaw frame batcher — accumulates incoming 20ms frames and flushes
+   *  every ~60ms (3 frames). Cuts WebSocket overhead ~3x under high
+   *  concurrency without adding meaningful STT latency. Deepgram's docs
+   *  recommend 20-100ms chunks; 60ms sits inside that window. */
+  dgFrameBatch: Buffer[];
+  dgBatchFlushTimer?: NodeJS.Timeout | null;
+  /** Keepalive timer (NodeJS.Timeout) pinging Deepgram every 8s to prevent
+   *  silent idle-disconnect when caller is quiet for >12s. */
+  dgKeepaliveTimer?: NodeJS.Timeout | null;
+  /** Reconnect attempt counter — exponential backoff 1s/2s/4s capped at 3.
+   *  Resets to 0 on successful 'open'. */
+  dgReconnectAttempts: number;
+  /** Ring-buffer of mulaw frames received while the Deepgram WS was
+   *  closed/reconnecting. Replayed on reopen so we don't miss speech that
+   *  arrived during the gap. Cap ~3s = 150 frames @ 20ms each. */
+  dgReplayBuffer: Buffer[];
+  /** Once we've exhausted reconnect attempts, set this flag so frames stop
+   *  trying to write to a dead WS and the session can downshift cleanly. */
+  dgDead: boolean;
+  /** The validated Deepgram language code in use. Stashed so reconnect can
+   *  reopen with the same model+language pair without re-deriving it. */
+  dgLang?: string;
   azureStt: AzureSttHandle | null;
   sarvamStt: SarvamSttHandle | null;
+  /** Whisper STT handle — only opened when the silent-failure watchdog
+   *  swaps to Whisper, OR when default_provider=whisper from agent config. */
+  whisperStt: WhisperSttHandle | null;
   /** Set once when Sarvam STT hits a quota/429 error and we permanently
    * downshift this session to Deepgram. Prevents repeat downshift attempts. */
   sarvamSttDownshifted?: boolean;
   plivoWs: WebSocket | null;
   history: Array<{ role: string; content: string }>;
   inFlightReply: boolean;
+  /** Watchdog timer that clears inFlightReply if the LLM call doesn't
+   *  complete within 15s. Without this a hung Gemini/Sarvam request
+   *  leaves the session deaf forever — utterances queue in history but
+   *  no new reply ever fires. Cleared on normal LLM completion. */
+  inFlightWatchdog?: NodeJS.Timeout | null;
+  /** Wall-clock timestamps for the most recent turn. Used to log
+   *  ttft (STT-final → LLM start) and ttfa (LLM start → first TTS audio)
+   *  on LLM_RESPONSE_COMPLETED / TTS_STARTED events. */
+  turn: {
+    sttFinalAt: number;
+    llmStartAt: number;
+    ttsStartAt: number;
+    audioFirstByteAt: number;
+  };
+  /** Set by Deepgram's `SpeechStarted` VAD event. Used for early barge-in:
+   *  if the agent is mid-TTS and the user starts speaking past the grace
+   *  window, we abort playback BEFORE waiting for a full final transcript,
+   *  shaving 400-600ms off interrupt latency. */
+  userSpeechStartedAt: number;
+  /** High-level conversation state — derived from the existing boolean
+   *  flags (isAgentSpeaking, inFlightReply, callEnded) via setCallState().
+   *  STATE_CHANGE events surface every transition so ops can spot stuck
+   *  states (e.g. THINKING for >15s = LLM hang). */
+  callState: CallState;
+  /** Per-agent barge-in grace override (ms). Falls back to language-default
+   *  via bargeInGraceMs() when null. Set once from agent.voice_config. */
+  agentBargeInGraceMs?: number | null;
+  /** Provider preference from agent.voice_config.default_provider:
+   *  "deepgram" (default) | "sarvam" | "auto" (legacy Indic→Sarvam). */
+  providerPref?: string;
+  /** True when voice_config.enable_auto_fallback is set — armed-only
+   *  silent-failure watchdog will swap STT to Sarvam mid-call. */
+  enableAutoFallback?: boolean;
+  /** Wall-clock of the most recent SUBSTANTIVE STT event (non-empty partial
+   *  or non-empty final). SpeechStarted does NOT reset this — that's a VAD
+   *  signal, not a sign Deepgram is actually transcribing. */
+  lastSttEventAt?: number;
+  /** Timer that periodically checks how long since lastSttEventAt; fires the
+   *  Sarvam/Whisper fallback when threshold crossed. */
+  sttSilenceWatchdog?: NodeJS.Timeout | null;
+  /** Rolling count of empty Deepgram partials in the last 3s. Each emit pushes
+   *  current ts; entries older than 3s are pruned. ≥3 → fallback fires
+   *  (Deepgram is "speaking" but producing junk — common on unsupported langs). */
+  dgEmptyPartials?: number[];
   closed: boolean;
   // Recording: Plivo doesn't record calls that use <Stream> XML (their
   // carrier-level recording is only triggered by <Record>, which is
@@ -1583,11 +1749,28 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       sttBackend: null,
       ttsBackend: 'deepgram',
       dgWs: null,
+      dgFrameBatch: [],
+      dgBatchFlushTimer: null,
+      dgKeepaliveTimer: null,
+      dgReconnectAttempts: 0,
+      dgReplayBuffer: [],
+      dgDead: false,
       azureStt: null,
       sarvamStt: null,
+      whisperStt: null,
       plivoWs: plivoWs,
       history: [],
       inFlightReply: false,
+      inFlightWatchdog: null,
+      turn: { sttFinalAt: 0, llmStartAt: 0, ttsStartAt: 0, audioFirstByteAt: 0 },
+      userSpeechStartedAt: 0,
+      callState: 'IDLE',
+      agentBargeInGraceMs: null,
+      providerPref: 'deepgram',
+      enableAutoFallback: false,
+      lastSttEventAt: 0,
+      sttSilenceWatchdog: null,
+      dgEmptyPartials: [],
       closed: false,
       callerMulaw: [],
       callerBytes: 0,
@@ -1601,6 +1784,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
     };
 
     logger.info({ agentId, tenantId }, 'Plivo audio stream WS connected');
+    emit(session, 'CALL_CONNECTED', { agent_id: agentId, tenant_id: tenantId });
 
     plivoWs.on('message', async (data: RawData) => {
       let msg: any;
@@ -1631,11 +1815,22 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
           session.callerMulaw.push(audioBuf);
           session.callerBytes += audioBuf.length;
           if (session.sttBackend === 'deepgram' && session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
-            session.dgWs.send(audioBuf);
+            pushDeepgramFrame(session, audioBuf);
+          } else if (session.sttBackend === 'deepgram' && !session.dgDead) {
+            // Deepgram WS is reconnecting — buffer this frame to replay on
+            // reopen so we don't lose mid-disconnect speech. Cap the ring
+            // buffer at ~150 frames (~3s) to avoid unbounded growth if
+            // reconnect never succeeds.
+            const MAX_REPLAY_FRAMES = 150;
+            if (session.dgReplayBuffer.length < MAX_REPLAY_FRAMES) {
+              session.dgReplayBuffer.push(audioBuf);
+            }
           } else if (session.sttBackend === 'azure' && session.azureStt) {
             session.azureStt.push(audioBuf);
           } else if (session.sttBackend === 'sarvam' && session.sarvamStt) {
             session.sarvamStt.push(audioBuf);
+          } else if (session.sttBackend === 'whisper' && session.whisperStt) {
+            session.whisperStt.push(audioBuf);
           }
         }
       } else if (event === 'stop') {
@@ -1747,31 +1942,82 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     );
   }
   session.language = lang;
-  // Backend selection priority:
-  //   - English / non-Indic           → Deepgram (Aura is English-trained)
-  //   - Indic (hi/te/ta/kn/ml/mr/bn/gu/pa/or/as) → Sarvam if configured
-  //                                                 (bulbul:v2 has native Indic voices,
-  //                                                 Aura sounds English-accented in Hindi)
-  //   - Indic without Sarvam          → Azure if configured, else Deepgram fallback
-  // We do NOT defer to Deepgram just because it nominally supports Hindi —
-  // its Hindi TTS is markedly worse than Sarvam's, and that's the symptom
-  // callers complain about ("aapka accent achha nahi hai").
-  const isIndicLang = sarvamCanHandle(lang) && !/^en/i.test(lang);
+  // Honor per-agent barge-in override (voice_config.barge_in_grace_ms). When
+  // unset, bargeInGraceMs() falls back to language-default 1500/2000ms.
+  const agentGraceRaw =
+    session.agent.voice_config?.barge_in_grace_ms ??
+    session.agent.voiceConfig?.barge_in_grace_ms ??
+    null;
+  const agentGrace = Number(agentGraceRaw);
+  session.agentBargeInGraceMs = Number.isFinite(agentGrace) && agentGrace > 0 ? agentGrace : null;
+  // ── Provider selection ───────────────────────────────────────────────────
+  // Driven by agent.voice_config.default_provider:
+  //   - "deepgram" (default)  → Deepgram STT + Aura TTS for EVERY language.
+  //                             Lower latency, better interruption handling,
+  //                             cleaner bulk-call scaling. Non-DG languages
+  //                             (Telugu/Tamil/etc.) fall back to en-IN
+  //                             approximation inside connectDeepgram.
+  //   - "sarvam"              → Sarvam STT + Sarvam TTS for EVERY language.
+  //                             Use when native Indic voice quality matters
+  //                             more than latency.
+  //   - "auto" (legacy)       → Indic languages → Sarvam, else Deepgram.
+  //                             Preserved so existing agents keep working
+  //                             exactly as before if they opt in.
+  // Plus enable_auto_fallback: when Deepgram emits no transcripts for 8s of
+  // audio (silent-failure watchdog), we switch the live session to Sarvam
+  // without dropping the call. See deepgramSilentFailureWatchdog.
+  const voiceCfg: any = session.agent.voice_config || session.agent.voiceConfig || {};
+  const providerPref = String(voiceCfg.default_provider || 'deepgram').toLowerCase();
+  const enableAutoFallback = voiceCfg.enable_auto_fallback === true;
+  session.providerPref = providerPref;
+  session.enableAutoFallback = enableAutoFallback;
+
   let stt: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
   let tts: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
-  if (isIndicLang && sarvamConfigured()) {
+
+  if (providerPref === 'sarvam' && sarvamConfigured()) {
+    // Force-Sarvam: tenant explicitly chose Sarvam for native voice quality.
     stt = 'sarvam'; tts = 'sarvam';
-  } else if (!deepgramCanHandle(lang)) {
-    if (sarvamConfigured() && sarvamCanHandle(lang)) {
+  } else if (providerPref === 'auto') {
+    // Legacy auto-routing — Indic gets Sarvam, else Deepgram. Same as the
+    // pre-change behavior; kept so existing agents that depended on it
+    // (e.g. a tenant explicitly chose Sarvam-for-Telugu) keep working.
+    const isIndicLang = sarvamCanHandle(lang) && !/^en/i.test(lang);
+    if (isIndicLang && sarvamConfigured()) {
       stt = 'sarvam'; tts = 'sarvam';
-    } else if (azureSpeechConfigured()) {
-      stt = 'azure'; tts = 'azure';
+    } else if (!deepgramCanHandle(lang)) {
+      if (sarvamConfigured() && sarvamCanHandle(lang)) {
+        stt = 'sarvam'; tts = 'sarvam';
+      } else if (azureSpeechConfigured()) {
+        stt = 'azure'; tts = 'azure';
+      }
     }
-    // else: falls through to deepgram (en-IN approximation)
   }
+  // Else providerPref === "deepgram" (new default) → both already 'deepgram'.
+
+  // TTS-only override for Indic languages: Deepgram Aura has no native
+  // Telugu/Tamil/Kannada/Malayalam/Hindi/etc. voices — if we let it speak
+  // those, Aura tries to pronounce the script as English, producing
+  // unintelligible gibberish (caller stays silent → Plivo MEDIA_TIMEOUT).
+  // So when the call language is Indic AND Sarvam is configured, we always
+  // route TTS through Sarvam regardless of providerPref. STT routing stays
+  // untouched — Deepgram STT can still be primary with Whisper/Sarvam
+  // fallback handling the Indic STT problem separately.
+  const isIndicForTts = /^(hi|te|ta|kn|ml|mr|bn|gu|pa|or|as|ur|ne)/i.test(lang);
+  if (isIndicForTts && sarvamConfigured() && tts === 'deepgram') {
+    tts = 'sarvam';
+    logger.info(
+      { callSid: session.callSid, lang, stt, tts },
+      'TTS routed to Sarvam for Indic language (Aura has no native Indic voices)',
+    );
+  }
+
   session.sttBackend = stt;
   session.ttsBackend = tts;
-  logger.info({ callSid: session.callSid, language: lang, stt, tts }, 'Stream: backends chosen');
+  logger.info(
+    { callSid: session.callSid, language: lang, stt, tts, providerPref, autoFallback: enableAutoFallback },
+    'Stream: backends chosen',
+  );
 
   // Create conversation + insert call row so transcripts + recording land in
   // the same places as the <GetInput> path.
@@ -1994,9 +2240,14 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
 async function onStop(session: StreamSession): Promise<void> {
   if (session.closed) return;
   session.closed = true;
+  setCallState(session, 'ENDED', 'on_stop');
+  emit(session, 'CALL_ENDED', { history_turns: session.history.length });
+  if (session.dgKeepaliveTimer) { clearInterval(session.dgKeepaliveTimer); session.dgKeepaliveTimer = null; }
+  // Clear any pending LLM watchdog so it doesn't fire after teardown.
+  if (session.inFlightWatchdog) { clearTimeout(session.inFlightWatchdog); session.inFlightWatchdog = null; }
   if (session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
     try { session.dgWs.send(JSON.stringify({ type: 'CloseStream' })); } catch { /* ignore */ }
-    try { session.dgWs.close(); } catch { /* ignore */ }
+    try { session.dgWs.close(1000, 'session-end'); } catch { /* ignore */ }
   }
   session.dgWs = null;
   if (session.azureStt) {
@@ -2006,6 +2257,10 @@ async function onStop(session: StreamSession): Promise<void> {
   if (session.sarvamStt) {
     try { session.sarvamStt.close(); } catch { /* ignore */ }
     session.sarvamStt = null;
+  }
+  if (session.whisperStt) {
+    try { session.whisperStt.close(); } catch { /* ignore */ }
+    session.whisperStt = null;
   }
 
   // Bridge the in-memory slot store → conversations.metadata so the
@@ -2079,14 +2334,38 @@ async function connectDeepgram(session: StreamSession, language: string): Promis
       logger.info({ callSid: session.callSid, requested: raw, using: dgLang }, 'Deepgram: falling back to supported language');
     }
   }
+  session.dgLang = dgLang;
+  await openDeepgramSocket(session, apiKey);
+}
+
+/**
+ * Open (or re-open) a Deepgram WS for an existing session. Self-contained so
+ * the reconnect path can call it directly. Wires:
+ *   - 8s keepalive ping to stop carrier-side idle disconnects
+ *   - SpeechStarted VAD event → early barge-in onset timestamp
+ *   - Final-results handler that forwards to dispatchUserUtterance
+ *   - Close/error handlers that schedule exponential-backoff reconnect
+ *
+ * Replay buffer: if we have queued mulaw frames from a brief disconnect
+ * window, replay them as soon as the new socket is open so we don't lose
+ * the caller's mid-disconnect speech.
+ */
+async function openDeepgramSocket(session: StreamSession, apiKey: string): Promise<void> {
+  const lang = session.dgLang || 'en-IN';
   const qs = new URLSearchParams({
     model: 'nova-2',
     encoding: 'mulaw',
     sample_rate: '8000',
-    interim_results: 'false',  // we only care about finals here — lower latency overall
+    // Interim results ON — partials are emitted as STT_PARTIAL events for
+    // live transcript visibility AND used to enrich early-barge-in decisions
+    // mid-TTS. Dispatch into the conversation history stays gated on
+    // `is_final:true` so we never trigger duplicate LLM turns from partials.
+    interim_results: 'true',
     smart_format: 'true',
     endpointing: '600',         // ms of silence before finalising an utterance
-    language: dgLang,
+    utterance_end_ms: '1000',   // emit UtteranceEnd 1s after speech stops (extra signal)
+    vad_events: 'true',         // emit SpeechStarted — used for early barge-in detection
+    language: lang,
     punctuate: 'true',
   });
   const dgUrl = `wss://api.deepgram.com/v1/listen?${qs.toString()}`;
@@ -2094,37 +2373,402 @@ async function connectDeepgram(session: StreamSession, language: string): Promis
     headers: { Authorization: `Token ${apiKey}` },
   });
 
+  // Keepalive: Deepgram closes idle sockets after ~12s. Sending a 1-byte
+  // "KeepAlive" message every 8s keeps the carrier path warm without
+  // burning bandwidth. Clear on close to avoid orphan timers.
+  const startKeepalive = () => {
+    if (session.dgKeepaliveTimer) clearInterval(session.dgKeepaliveTimer);
+    session.dgKeepaliveTimer = setInterval(() => {
+      try {
+        if (dg.readyState === WebSocket.OPEN) {
+          dg.send(JSON.stringify({ type: 'KeepAlive' }));
+        }
+      } catch { /* swallow — close handler will reconnect */ }
+    }, 8000);
+  };
+  const stopKeepalive = () => {
+    if (session.dgKeepaliveTimer) {
+      clearInterval(session.dgKeepaliveTimer);
+      session.dgKeepaliveTimer = null;
+    }
+  };
+
   dg.on('open', () => {
-    logger.info({ callSid: session.callSid }, 'Deepgram STT WS opened');
+    logger.info({ callSid: session.callSid, lang, attempt: session.dgReconnectAttempts }, 'Deepgram STT WS opened');
+    if (session.dgReconnectAttempts > 0) {
+      emit(session, 'WEBSOCKET_RECONNECTED', { provider: 'deepgram', attempts: session.dgReconnectAttempts });
+    } else {
+      emit(session, 'STT_STARTED', { provider: 'deepgram', lang });
+    }
+    session.dgReconnectAttempts = 0;
+    session.dgDead = false;
+    session.lastSttEventAt = Date.now();
+    startKeepalive();
+    armDeepgramSilentFailureWatchdog(session);
+
+    // Replay any frames buffered during the disconnect window. Frame-by-frame
+    // so the upstream encoding/VAD sees a continuous stream.
+    if (session.dgReplayBuffer.length > 0) {
+      const replay = session.dgReplayBuffer.splice(0, session.dgReplayBuffer.length);
+      logger.info({ callSid: session.callSid, frames: replay.length }, 'Deepgram: replaying buffered frames');
+      for (const frame of replay) {
+        try { dg.send(frame); } catch { break; }
+      }
+    }
   });
 
   dg.on('message', async (raw: RawData) => {
     try {
       const data = JSON.parse(raw.toString());
+
+      // SpeechStarted VAD event → record onset so dispatchUserUtterance can
+      // do early-interrupt before waiting for a full final transcript. Also
+      // logs the event for live-monitor visibility.
+      if (data.type === 'SpeechStarted') {
+        session.userSpeechStartedAt = Date.now();
+        // NOTE: do NOT update lastSttEventAt here. SpeechStarted is a
+        // VAD-only event — Deepgram emits it even when it can't transcribe
+        // the audio (e.g. Telugu speech against the en-IN model). If we
+        // counted it as STT activity, the silent-failure watchdog would
+        // never fire on Indic calls (caller keeps speaking → SpeechStarted
+        // keeps firing → idleMs stays at 0). Only real partials/finals
+        // prove the transcription pipeline is healthy.
+        emit(session, 'SPEECH_STARTED', {});
+        if (!session.isAgentSpeaking) setCallState(session, 'USER_SPEAKING', 'vad_speech_started');
+        // Early barge-in: caller started talking while agent mid-TTS, past
+        // the grace window. Set the flag immediately; the chunk loop will
+        // abort on next tick and flush Plivo's queued audio.
+        if (
+          session.isAgentSpeaking &&
+          !session.bargeInRequested &&
+          Date.now() >= session.bargeInAllowedAt
+        ) {
+          session.bargeInRequested = true;
+          emit(session, 'INTERRUPT_DETECTED', { trigger: 'vad_speech_started' });
+        }
+        return;
+      }
+
+      if (data.type === 'UtteranceEnd') {
+        emit(session, 'UTTERANCE_END', {});
+        return;
+      }
+
       if (data.type !== 'Results') return;
       const alt = data.channel?.alternatives?.[0];
       const text = (alt?.transcript || '').trim();
+      const confidence = typeof alt?.confidence === 'number' ? alt.confidence : 1;
       const isFinal = !!data.is_final;
-      if (!text || !isFinal) return;
-      // ALWAYS capture the utterance — even if the agent is mid-reply —
-      // so the transcript is a complete record of what the caller said.
-      // The dispatcher decides whether to also trigger a new LLM reply.
+
+      if (!text) {
+        // Empty transcript — Deepgram thinks it heard speech but couldn't
+        // resolve any words. On a non-supported language (e.g. Telugu hitting
+        // the en-IN model) we get a burst of these. Track the burst; trip
+        // the fallback when 3 land in a 3s window.
+        if (session.enableAutoFallback && session.sttBackend === 'deepgram') {
+          const now = Date.now();
+          session.dgEmptyPartials = (session.dgEmptyPartials || []).filter(
+            (t) => now - t < EMPTY_PARTIAL_BURST_WINDOW_MS,
+          );
+          session.dgEmptyPartials.push(now);
+          if (session.dgEmptyPartials.length >= EMPTY_PARTIAL_BURST_COUNT) {
+            const voiceCfg: any = session.agent?.voice_config || session.agent?.voiceConfig || {};
+            const target = String(voiceCfg.fallback_provider || 'sarvam').toLowerCase();
+            emit(session, 'SARVAM_FALLBACK_TRIGGERED', {
+              reason: 'empty_partial_burst',
+              empty_count: session.dgEmptyPartials.length,
+              target,
+            });
+            clearSttSilenceWatchdog(session);
+            session.dgEmptyPartials = [];
+            void switchToFallbackMidCall(session);
+          }
+        }
+        return;
+      }
+
+      // Low-confidence final → treat as silent (don't pollute history with
+      // misheard noise) AND nudge the watchdog by not updating lastSttEventAt.
+      if (isFinal && confidence < LOW_CONFIDENCE_THRESHOLD) {
+        emit(session, 'STT_FINAL', { len: text.length, preview: text.slice(0, 60), confidence, dropped: true });
+        return;
+      }
+
+      if (!isFinal) {
+        // Real partial — Deepgram IS transcribing, reset the empty-burst
+        // counter and update the silence watchdog reference.
+        session.dgEmptyPartials = [];
+        session.lastSttEventAt = Date.now();
+        emit(session, 'STT_PARTIAL', { len: text.length, preview: text.slice(0, 60) });
+
+        // Mid-TTS escalation: a long substantive partial (≥4 words OR a
+        // question-mark) means the caller is clearly speaking over the
+        // agent — stop the agent NOW instead of waiting for endpointing
+        // (600ms more silence) to produce a final. Past the grace window
+        // only; the early-onset SpeechStarted handler already covers the
+        // first-word case.
+        if (
+          session.isAgentSpeaking &&
+          !session.bargeInRequested &&
+          Date.now() >= session.bargeInAllowedAt
+        ) {
+          const wordCount = text.split(/\s+/).filter(Boolean).length;
+          const isQuestion = /[?]\s*$/.test(text);
+          if (wordCount >= 4 || isQuestion) {
+            session.bargeInRequested = true;
+            emit(session, 'INTERRUPT_DETECTED', { trigger: 'partial_substantive', word_count: wordCount });
+          }
+        }
+        return;
+      }
+
+      // Final: stamp the latency timestamp, log the event, and dispatch into
+      // the conversation history. ALWAYS persist the utterance even if the
+      // agent is mid-reply so the recording↔transcript alignment is complete.
+      session.turn.sttFinalAt = Date.now();
+      session.lastSttEventAt = Date.now();
+      emit(session, 'STT_FINAL', { len: text.length, preview: text.slice(0, 60) });
       await dispatchUserUtterance(session, text);
     } catch {
       /* ignore malformed frames */
     }
   });
 
-  dg.on('close', () => {
-    logger.info({ callSid: session.callSid }, 'Deepgram STT WS closed');
+  dg.on('close', (code, reason) => {
+    stopKeepalive();
+    logger.info({ callSid: session.callSid, code, reason: reason?.toString().slice(0, 80) }, 'Deepgram STT WS closed');
+    // Only attempt reconnect if the session is still live and the close
+    // wasn't requested by us (e.g., onStop). 1000 = normal closure (us).
+    if (session.closed || session.callEnded || code === 1000) return;
+
+    // If the agent has auto-fallback armed, prefer skipping the 3-attempt
+    // reconnect ladder entirely — every reconnect delay is dead air for the
+    // caller. Go straight to Whisper/Sarvam so the conversation continues.
+    if (session.enableAutoFallback && session.sttBackend === 'deepgram') {
+      const voiceCfg: any = session.agent?.voice_config || session.agent?.voiceConfig || {};
+      const target = String(voiceCfg.fallback_provider || 'sarvam').toLowerCase();
+      emit(session, 'SARVAM_FALLBACK_TRIGGERED', {
+        reason: 'websocket_error',
+        ws_close_code: code,
+        target,
+      });
+      clearSttSilenceWatchdog(session);
+      void switchToFallbackMidCall(session);
+      return;
+    }
+    scheduleDeepgramReconnect(session, apiKey);
   });
 
   dg.on('error', (err) => {
     logger.warn({ callSid: session.callSid, err: err.message }, 'Deepgram STT WS error');
+    // Don't reconnect here — 'close' fires right after 'error' and that's
+    // where the reconnect ladder lives. Two reconnects would race.
   });
 
   session.dgWs = dg;
 }
+
+/**
+ * Push a mulaw frame into the per-session batch. Flushes when the batch hits
+ * 3 frames (~60ms) OR after a 60ms timer fires (so trailing single frames
+ * don't get stuck in the buffer when the caller goes silent).
+ */
+function pushDeepgramFrame(session: StreamSession, frame: Buffer): void {
+  if (!session.dgWs || session.dgWs.readyState !== WebSocket.OPEN) return;
+  session.dgFrameBatch.push(frame);
+  // Flush eagerly at 3 frames — keeps Deepgram fed in the 60ms cadence its
+  // streaming pipeline expects.
+  if (session.dgFrameBatch.length >= 3) {
+    flushDeepgramBatch(session);
+    return;
+  }
+  // Otherwise, schedule a deferred flush so a lone trailing frame still
+  // arrives within ~60ms (e.g., end of an utterance with no follow-up).
+  if (!session.dgBatchFlushTimer) {
+    session.dgBatchFlushTimer = setTimeout(() => {
+      session.dgBatchFlushTimer = null;
+      flushDeepgramBatch(session);
+    }, 60);
+  }
+}
+
+function flushDeepgramBatch(session: StreamSession): void {
+  if (session.dgBatchFlushTimer) {
+    clearTimeout(session.dgBatchFlushTimer);
+    session.dgBatchFlushTimer = null;
+  }
+  if (session.dgFrameBatch.length === 0) return;
+  if (!session.dgWs || session.dgWs.readyState !== WebSocket.OPEN) {
+    session.dgFrameBatch.length = 0;
+    return;
+  }
+  const merged = Buffer.concat(session.dgFrameBatch);
+  session.dgFrameBatch.length = 0;
+  try { session.dgWs.send(merged); } catch { /* close handler will reconnect */ }
+}
+
+/**
+ * Exponential-backoff reconnect ladder. 1s → 2s → 4s; cap at 3 attempts.
+ * On exhaustion, mark dgDead and let the session keep running (Plivo path
+ * still works for outbound TTS; STT just goes silent until call ends).
+ */
+function scheduleDeepgramReconnect(session: StreamSession, apiKey: string): void {
+  if (session.dgDead) return;
+  const attempt = session.dgReconnectAttempts + 1;
+  if (attempt > 3) {
+    session.dgDead = true;
+    logger.warn({ callSid: session.callSid }, 'Deepgram STT WS dead after 3 reconnect attempts');
+    emit(session, 'WEBSOCKET_DEAD', { provider: 'deepgram' });
+    return;
+  }
+  session.dgReconnectAttempts = attempt;
+  const delayMs = Math.pow(2, attempt - 1) * 1000;  // 1s, 2s, 4s
+  logger.info({ callSid: session.callSid, attempt, delayMs }, 'Deepgram STT: scheduling reconnect');
+  setTimeout(() => {
+    if (session.closed || session.callEnded) return;
+    void openDeepgramSocket(session, apiKey);
+  }, delayMs);
+}
+
+/**
+ * Silent-failure watchdog. Polls every 2s; if voice_config.enable_auto_fallback
+ * is on AND we've sent caller audio but Deepgram has emitted no STT events
+ * (no partials, no SpeechStarted, no finals) for 8s, swap STT/TTS to Sarvam
+ * for the rest of the call. Common trigger: nova-2's Telugu/Tamil approximation
+ * produces only empty transcripts → user is talking but nothing comes back.
+ *
+ * Only one watchdog per session — arming is idempotent.
+ */
+// Lowered from 8s → 5s per spec section 3. Whisper round-trip ~1s, so total
+// time from "Deepgram failing" → "Whisper producing transcripts" stays under
+// 6s — within the conversational tolerance for "still feels responsive".
+const SILENT_FAILURE_THRESHOLD_MS = 5000;
+// If Deepgram emits 3+ empty partials in a 3s window it's "talking" but
+// producing nothing usable — common when the language isn't supported.
+const EMPTY_PARTIAL_BURST_WINDOW_MS = 3000;
+const EMPTY_PARTIAL_BURST_COUNT = 3;
+// Final transcripts below this confidence score are treated as silent —
+// Deepgram occasionally emits low-confidence finals for noise that pollute
+// the conversation history if forwarded to the LLM.
+const LOW_CONFIDENCE_THRESHOLD = 0.3;
+function armDeepgramSilentFailureWatchdog(session: StreamSession): void {
+  if (!session.enableAutoFallback) return;
+  if (session.sttSilenceWatchdog) return;  // already armed
+  session.sttSilenceWatchdog = setInterval(() => {
+    if (session.closed || session.callEnded) {
+      clearSttSilenceWatchdog(session);
+      return;
+    }
+    // Only consider switching when DG is the active STT AND we've received
+    // some caller audio (callerBytes grows as Plivo streams). If the caller
+    // hasn't talked at all yet, silence is expected, not a failure.
+    if (session.sttBackend !== 'deepgram') {
+      clearSttSilenceWatchdog(session);
+      return;
+    }
+    const since = session.lastSttEventAt || 0;
+    const idleMs = since ? Date.now() - since : 0;
+    const hasAudio = session.callerBytes > 8000; // ≈1s of caller speech
+    if (hasAudio && idleMs > SILENT_FAILURE_THRESHOLD_MS) {
+      logger.warn(
+        { callSid: session.callSid, idleMs, callerBytes: session.callerBytes },
+        'Deepgram STT silent for >8s with audio — falling back to Sarvam',
+      );
+      const voiceCfg: any = session.agent?.voice_config || session.agent?.voiceConfig || {};
+      const target = String(voiceCfg.fallback_provider || 'sarvam').toLowerCase();
+      emit(session, 'SARVAM_FALLBACK_TRIGGERED', {
+        reason: 'deepgram_silent_failure',
+        idle_ms: idleMs,
+        target,
+      });
+      clearSttSilenceWatchdog(session);
+      void switchToFallbackMidCall(session);
+    }
+  }, 2000);
+}
+
+function clearSttSilenceWatchdog(session: StreamSession): void {
+  if (session.sttSilenceWatchdog) {
+    clearInterval(session.sttSilenceWatchdog);
+    session.sttSilenceWatchdog = null;
+  }
+}
+
+/**
+ * Swap the active STT off Deepgram to the configured fallback (Whisper or
+ * Sarvam) on a live call. Reads voice_config.fallback_provider — defaults to
+ * 'sarvam' for back-compat with the original auto-fallback behaviour. When
+ * the fallback target's API key isn't set, no-ops (Deepgram stays dead and
+ * the call continues without STT until end — better than crashing).
+ *
+ * For Indic languages where Deepgram Aura also doesn't produce native TTS,
+ * we additionally flip ttsBackend → 'sarvam' so the caller hears proper
+ * Telugu/Tamil/Hindi instead of English-accented Aura. Whisper is STT-only;
+ * TTS stays on Sarvam (or Aura for non-Indic).
+ */
+async function switchToFallbackMidCall(session: StreamSession): Promise<void> {
+  const voiceCfg: any = session.agent?.voice_config || session.agent?.voiceConfig || {};
+  const target = String(voiceCfg.fallback_provider || 'sarvam').toLowerCase();
+
+  // Tear down Deepgram cleanly regardless of target.
+  try {
+    if (session.dgKeepaliveTimer) { clearInterval(session.dgKeepaliveTimer); session.dgKeepaliveTimer = null; }
+    if (session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
+      try { session.dgWs.send(JSON.stringify({ type: 'CloseStream' })); } catch { /* ignore */ }
+      try { session.dgWs.close(1000, `switching-to-${target}`); } catch { /* ignore */ }
+    }
+  } catch { /* non-fatal */ }
+  session.dgDead = true;
+
+  const lang = session.language || 'en-IN';
+  const isIndic = /^(hi|te|ta|kn|ml|mr|bn|gu|pa|or|as|ur|ne)/i.test(lang);
+
+  const onFinal = async (text: string, provider: string) => {
+    session.lastSttEventAt = Date.now();
+    session.turn.sttFinalAt = Date.now();
+    emit(session, 'STT_FINAL', { len: text.length, preview: text.slice(0, 60), provider });
+    await dispatchUserUtterance(session, text);
+  };
+
+  try {
+    if (target === 'whisper') {
+      if (!whisperConfigured()) {
+        logger.warn({ callSid: session.callSid }, 'Whisper fallback requested but OPENAI_API_KEY not set');
+        return;
+      }
+      session.whisperStt = startWhisperStt({
+        language: lang,
+        onFinal: (text) => onFinal(text, 'whisper'),
+      });
+      session.sttBackend = 'whisper';
+      // For Indic langs, also switch TTS to Sarvam so the agent's reply
+      // sounds native — Deepgram Aura has no Telugu/Tamil voices.
+      if (isIndic && sarvamConfigured()) session.ttsBackend = 'sarvam';
+      emit(session, 'STT_STARTED', { provider: 'whisper', lang, source: 'fallback' });
+      logger.info({ callSid: session.callSid, lang, isIndic }, 'Switched STT to Whisper mid-call');
+      return;
+    }
+
+    // Default / 'sarvam' branch.
+    if (!sarvamConfigured()) {
+      logger.warn({ callSid: session.callSid }, 'Sarvam fallback requested but SARVAM_API_KEY not set');
+      return;
+    }
+    session.sarvamStt = startSarvamStt({
+      language: lang,
+      onFinal: (text) => onFinal(text, 'sarvam'),
+    });
+    session.sttBackend = 'sarvam';
+    session.ttsBackend = 'sarvam';
+    emit(session, 'STT_STARTED', { provider: 'sarvam', lang, source: 'fallback' });
+    logger.info({ callSid: session.callSid, lang }, 'Switched STT to Sarvam mid-call');
+  } catch (err: any) {
+    logger.warn({ callSid: session.callSid, target, err: err?.message }, 'Fallback open failed');
+  }
+}
+
+/** Back-compat alias — older callers refer to switchToSarvamMidCall. */
+const switchToSarvamMidCall = switchToFallbackMidCall;
 
 // ---- turn handling ---------------------------------------------------------
 
@@ -2783,7 +3427,37 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     return;
   }
   session.inFlightReply = true;
-  handleUserUtterance(session).finally(() => { session.inFlightReply = false; });
+  session.turn.llmStartAt = Date.now();
+  setCallState(session, 'THINKING', 'llm_dispatch');
+  // Compute ttft (time-to-first-token) once the LLM kicks off — measures
+  // how long Deepgram→dispatch took to hand off.
+  const ttftFromStt = session.turn.sttFinalAt ? Date.now() - session.turn.sttFinalAt : null;
+  emit(session, 'LLM_RESPONSE_STARTED', {
+    history_len: session.history.length,
+    ttft_from_stt_ms: ttftFromStt,
+  });
+
+  // Watchdog: clear inFlightReply if LLM hangs for >15s so the next user
+  // utterance can still fire a fresh turn. Without this a hung Gemini /
+  // Sarvam request silently kills the conversation.
+  if (session.inFlightWatchdog) clearTimeout(session.inFlightWatchdog);
+  session.inFlightWatchdog = setTimeout(() => {
+    if (!session.inFlightReply) return;  // completed normally before timeout
+    session.inFlightReply = false;
+    session.inFlightWatchdog = null;
+    emit(session, 'INFLIGHT_WATCHDOG_FIRED', { elapsed_ms: 15000 });
+    logger.warn({ callSid: session.callSid }, 'inFlightReply watchdog fired — clearing stuck flag');
+  }, 15000);
+
+  handleUserUtterance(session).finally(() => {
+    session.inFlightReply = false;
+    if (session.inFlightWatchdog) {
+      clearTimeout(session.inFlightWatchdog);
+      session.inFlightWatchdog = null;
+    }
+    const totalMs = session.turn.llmStartAt ? Date.now() - session.turn.llmStartAt : null;
+    emit(session, 'LLM_RESPONSE_COMPLETED', { total_ms: totalMs });
+  });
 }
 
 /**
@@ -2898,8 +3572,10 @@ async function streamAndPlayReply(
   // utterances that trigger barge-in are ≥3 words / ≥15 chars, so at most
   // ~100ms of agent audio plays past the interrupt — imperceptible).
   const CHUNK_BYTES = 800;        // 100ms mulaw 8kHz
-  const BARGE_IN_GRACE_MS = 1200; // same value as playText — protects against
-                                  // the start-of-reply echo loop on Plivo's
+  const BARGE_IN_GRACE_MS = bargeInGraceMs(session);
+  // Grace tuned per language (1500ms English / 2000ms Indic by default;
+  // overridable via env or agent.voice_config.barge_in_grace_ms). Protects
+                                  // against the start-of-reply echo loop on Plivo's
                                   // carrier path. Real barge-ins and stop
                                   // keywords still bypass.
   const BACKPRESSURE_BYTES = 256 * 1024;
@@ -2908,6 +3584,24 @@ async function streamAndPlayReply(
   session.bargeInRequested = false;
   session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
   session.currentAgentText = '';
+  session.turn.ttsStartAt = Date.now();
+  setCallState(session, 'AGENT_SPEAKING', 'tts_start');
+  // ttfa here measures STT-final → first TTS byte. We don't have the first
+  // byte yet (still synthesising) — record start so playback can compute it.
+  const ttsFromLlm = session.turn.llmStartAt ? Date.now() - session.turn.llmStartAt : null;
+  emit(session, 'TTS_STARTED', { mode: 'stream', ttsFromLlm_ms: ttsFromLlm });
+
+  // Stuck-state recovery: if AGENT_SPEAKING for >60s (TTS pipeline hang,
+  // network stall, deadlock), force back to LISTENING so the next user
+  // utterance can fire. Cleared on normal TTS completion.
+  const agentSpeakingWatchdog = setTimeout(() => {
+    if (!session.isAgentSpeaking) return;
+    logger.warn({ callSid: session.callSid }, 'AGENT_SPEAKING stuck >60s — forcing recovery');
+    emit(session, 'STATE_FORCED_RECOVERY', { from: 'AGENT_SPEAKING', reason: 'tts_stuck' });
+    session.isAgentSpeaking = false;
+    session.bargeInRequested = false;
+    setCallState(session, 'LISTENING', 'stuck_state_recovery');
+  }, 60000);
 
   // For each sentence we kick off synthesis immediately and keep the promise
   // in `synthPromises`. The playback loop awaits them in order so audio
@@ -3008,10 +3702,21 @@ async function streamAndPlayReply(
       if (aborted) break;
     }
   } finally {
+    const wasInterrupted = session.bargeInRequested;
+    clearTimeout(agentSpeakingWatchdog);
     session.isAgentSpeaking = false;
     session.currentAgentText = '';
+    if (wasInterrupted) emit(session, 'TTS_CANCELLED', { duration_ms: Date.now() - session.turn.ttsStartAt });
+    emit(session, 'TTS_STOPPED', {
+      reason: wasInterrupted ? 'interrupted' : 'completed',
+      duration_ms: session.turn.ttsStartAt ? Date.now() - session.turn.ttsStartAt : null,
+    });
+    if (!session.callEnded) {
+      setCallState(session, 'LISTENING', wasInterrupted ? 'tts_interrupted' : 'tts_completed');
+      emit(session, 'LISTENING_RESUMED', { after: wasInterrupted ? 'interrupt' : 'reply' });
+    }
     // Drain any remaining synth promises so we don't leave dangling fetches.
-    if (session.bargeInRequested) {
+    if (wasInterrupted) {
       Promise.allSettled(synthPromises).catch(() => {});
     }
   }
@@ -3056,7 +3761,9 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   // 800 bytes = 100ms of mulaw 8kHz. See streamAndPlayReply for the
   // rationale on chunk size — kept in sync between both playback paths.
   const CHUNK_BYTES = 800;        // 100ms of mulaw 8kHz
-  const BARGE_IN_GRACE_MS = 1200; // 1.2s grace — only protects against the
+  const BARGE_IN_GRACE_MS = bargeInGraceMs(session);
+  // Grace tuned per language (1500ms English / 2000ms Indic by default).
+                                  // Only protects against the
                                   // start-of-reply echo loop (carrier
                                   // playback of agent's own audio leaking
                                   // into caller channel). Real interrupts
@@ -3710,9 +4417,14 @@ async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLan
   logger.info({ callSid: session.callSid, oldLang, newLang, stt, tts }, 'Stream: switching language mid-call');
 
   // Tear down whichever STT was active.
+  if (session.dgBatchFlushTimer) { clearTimeout(session.dgBatchFlushTimer); session.dgBatchFlushTimer = null; }
+  if (session.dgKeepaliveTimer) { clearInterval(session.dgKeepaliveTimer); session.dgKeepaliveTimer = null; }
+  clearSttSilenceWatchdog(session);
   if (session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
+    // Flush any pending frames before closing so a trailing utterance isn't lost.
+    flushDeepgramBatch(session);
     try { session.dgWs.send(JSON.stringify({ type: 'CloseStream' })); } catch { /* ignore */ }
-    try { session.dgWs.close(); } catch { /* ignore */ }
+    try { session.dgWs.close(1000, 'session-end'); } catch { /* ignore */ }
   }
   session.dgWs = null;
   if (session.azureStt) {
@@ -3722,6 +4434,10 @@ async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLan
   if (session.sarvamStt) {
     try { session.sarvamStt.close(); } catch { /* ignore */ }
     session.sarvamStt = null;
+  }
+  if (session.whisperStt) {
+    try { session.whisperStt.close(); } catch { /* ignore */ }
+    session.whisperStt = null;
   }
 
   // Update session state BEFORE opening the new STT so any race with

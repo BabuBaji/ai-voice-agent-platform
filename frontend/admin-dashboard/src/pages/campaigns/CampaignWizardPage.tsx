@@ -3,8 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import {
   Check, ChevronRight, ChevronLeft, Phone, AlertCircle, Upload, FileText,
   Calendar, Clock, RefreshCw, Loader2, CheckCircle2, Trash2, Sparkles,
-  Bot, BookOpen, Mic, Globe, Brain, MessageSquare, Wrench, Rocket,
+  Bot, BookOpen, Mic, Globe, Brain, MessageSquare, Wrench, Rocket, Send,
 } from 'lucide-react';
+
+type CampaignChannel = 'PHONE' | 'SMS' | 'WHATSAPP';
+
+const CHANNEL_OPTIONS: Array<{ value: CampaignChannel; label: string; description: string; icon: any }> = [
+  { value: 'PHONE',    label: 'Phone Call', description: 'AI voice agent dials each contact and runs the conversation.', icon: Phone },
+  { value: 'SMS',      label: 'SMS',        description: 'Bulk text via tenant Plivo. DLT-aware for India delivery.',     icon: Send },
+  { value: 'WHATSAPP', label: 'WhatsApp',   description: 'Template + session messages via Plivo WhatsApp Business.',     icon: MessageSquare },
+];
 
 // datetime-local values are naive ("2026-05-11T16:10" with no offset). Server
 // stores them as UTC by default — so 16:10 in the user's head becomes 16:10
@@ -89,8 +97,18 @@ export function CampaignWizardPage() {
   const [parseError, setParseError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Channel — picked at the very top of step 1. Defaults to PHONE so the
+  // existing voice-only wizard flow is the default for tenants who haven't
+  // touched Plivo yet. SMS / WHATSAPP relax the agent + voice gates and
+  // surface a Message field on step 4 instead of the voice instruction overlay.
+  const [channel, setChannel] = useState<CampaignChannel>('PHONE');
+  const isMessageChannel = channel !== 'PHONE';
+
   // Step 4 — campaign-level instruction (free-form, runtime-only overlay)
   const [campaignInstruction, setCampaignInstruction] = useState('');
+  // Step 4 (message channels) — body + optional template id
+  const [messageBody, setMessageBody] = useState('');
+  const [messageTemplateId, setMessageTemplateId] = useState('');
 
   // Step 5 — call settings (concurrency, retry, calling window, schedule)
   const [concurrency, setConcurrency] = useState(3);
@@ -194,10 +212,14 @@ export function CampaignWizardPage() {
   const validateStep = (s: number): string | null => {
     if (s === 1) {
       if (!name.trim()) return 'Campaign name is required';
-      if (!selectedAgentId) return 'Pick an agent for this campaign';
-      if (!selectedAgent) return 'Agent is still loading — please wait';
-      const status = String((selectedAgent as any).status || '').toUpperCase();
-      if (status !== 'PUBLISHED') return 'This agent is not deployed. Deploy it from the agent page before launching a campaign.';
+      // Agent is voice-only. SMS/WHATSAPP campaigns dispatch through tenant
+      // Plivo creds and don't need an agent at all.
+      if (channel === 'PHONE') {
+        if (!selectedAgentId) return 'Pick an agent for this campaign';
+        if (!selectedAgent) return 'Agent is still loading — please wait';
+        const status = String((selectedAgent as any).status || '').toUpperCase();
+        if (status !== 'PUBLISHED') return 'This agent is not deployed. Deploy it from the agent page before launching a campaign.';
+      }
     }
     if (s === 2) {
       if (!phoneNumberId) return 'Pick a phone number for this campaign';
@@ -208,6 +230,11 @@ export function CampaignWizardPage() {
     }
     if (s === 3) {
       if (targets.length === 0) return 'Upload or paste at least one contact';
+    }
+    if (s === 4 && isMessageChannel) {
+      const hasBody = messageBody.trim().length > 0;
+      const hasTpl  = messageTemplateId.trim().length > 0;
+      if (!hasBody && !hasTpl) return 'Enter a message body or pick a template — recipients won\'t receive an empty message.';
     }
     if (s === 5) {
       if (enforceWindow && callWindowStart === callWindowEnd) return 'Calling-hours start and end cannot be the same';
@@ -225,15 +252,14 @@ export function CampaignWizardPage() {
 
   // ── Final create flow ─────────────────────────────────────────
   const handleCreate = async () => {
-    if (!selectedAgentId) { setError('No agent selected'); return; }
+    if (channel === 'PHONE' && !selectedAgentId) { setError('No agent selected'); return; }
     if (!selectedPhone) { setError('No phone number selected'); return; }
     setSubmitting(true);
     setError(null);
     try {
       // Auto-reassign the chosen number to this agent if it isn't already.
-      // Without this the runner's deploy-gate would refuse to dial because
-      // calls.agent_id wouldn't match the number's attached agent.
-      if (selectedPhone.agent_id !== selectedAgentId) {
+      // Voice campaigns only — message channels don't bind a number to an agent.
+      if (channel === 'PHONE' && selectedPhone.agent_id !== selectedAgentId) {
         try {
           await phoneNumberApi.assignAgent(selectedPhone.id, selectedAgentId, { bypass_verification: true });
         } catch (assignErr: any) {
@@ -248,7 +274,7 @@ export function CampaignWizardPage() {
 
       const created = await campaignApi.create({
         name: name.trim(),
-        agent_id: selectedAgentId,
+        agent_id: channel === 'PHONE' ? selectedAgentId : undefined,
         from_number: selectedPhone.phone_number,
         provider,
         concurrency,
@@ -258,7 +284,11 @@ export function CampaignWizardPage() {
         timezone: enforceWindow ? timezone : undefined,
         call_window_start: enforceWindow ? callWindowStart : undefined,
         call_window_end: enforceWindow ? callWindowEnd : undefined,
-        campaign_instruction: campaignInstruction.trim() ? campaignInstruction.trim() : undefined,
+        campaign_instruction: channel === 'PHONE' && campaignInstruction.trim() ? campaignInstruction.trim() : undefined,
+        // Multi-channel additions — backend ignores these for PHONE campaigns.
+        channel,
+        message_body: isMessageChannel && messageBody.trim() ? messageBody.trim() : undefined,
+        template_id: isMessageChannel && messageTemplateId.trim() ? messageTemplateId.trim() : undefined,
       } as any);
 
       // Upload contacts
@@ -315,21 +345,58 @@ export function CampaignWizardPage() {
         </div>
       )}
 
-      {/* ─── Step 1: Select Agent ─── */}
+      {/* ─── Step 1: Channel + Campaign + Agent ─── */}
       {step === 1 && (
         <div className="space-y-4">
           <Card>
+            <h3 className="text-base font-semibold text-gray-900">Channel</h3>
+            <p className="text-sm text-gray-500 mb-4">How do you want to reach contacts?</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              {CHANNEL_OPTIONS.map((c) => {
+                const Icon = c.icon;
+                const active = channel === c.value;
+                return (
+                  <button
+                    key={c.value}
+                    type="button"
+                    onClick={() => setChannel(c.value)}
+                    className={`text-left p-4 rounded-xl border transition-colors ${
+                      active
+                        ? 'border-primary-400 bg-primary-50 ring-2 ring-primary-100'
+                        : 'border-gray-200 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Icon className={`h-4 w-4 ${active ? 'text-primary-600' : 'text-gray-500'}`} />
+                      <div className="text-sm font-semibold text-gray-900">{c.label}</div>
+                    </div>
+                    <div className="text-[12px] text-gray-500 leading-snug">{c.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+            {isMessageChannel && (
+              <p className="text-[12px] text-gray-500 mt-3 flex items-start gap-1.5">
+                <Sparkles className="h-3.5 w-3.5 mt-0.5 text-primary-500 flex-shrink-0" />
+                Message campaigns route through your tenant's Plivo integration.
+                Configure it at <a href="/settings/plivo" className="text-primary-600 hover:underline">Settings → Plivo</a> before launching.
+              </p>
+            )}
+          </Card>
+
+          <Card>
             <h3 className="text-base font-semibold text-gray-900">Campaign Details</h3>
-            <p className="text-sm text-gray-500 mb-4">Give your bulk call campaign a name</p>
+            <p className="text-sm text-gray-500 mb-4">Give your campaign a name</p>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Campaign Name</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Q2 Outbound — Karnataka Leads"
+              placeholder={channel === 'PHONE' ? 'e.g., Q2 Outbound — Karnataka Leads' : 'e.g., Q2 BTech brochure — Telangana SMS blast'}
               className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-primary-100"
             />
           </Card>
 
+          {!isMessageChannel && (
           <Card>
             <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
               <Bot className="h-4 w-4 text-primary-500" /> Agent
@@ -369,11 +436,12 @@ export function CampaignWizardPage() {
               </>
             )}
           </Card>
+          )}
 
           {/* Agent details preview — shown as soon as one is picked. Same content
               as the old standalone "Confirm Agent" step, just inline here so the
               user verifies what they're picking without an extra click. */}
-          {selectedAgentId && (
+          {!isMessageChannel && selectedAgentId && (
             <ConfirmAgentStep
               selectedAgent={selectedAgent}
               loading={loadingAgent}
@@ -576,9 +644,58 @@ export function CampaignWizardPage() {
         </div>
       )}
 
-      {/* ─── Step 4: Campaign Instructions (runtime overlay) ─── */}
+      {/* ─── Step 4: Campaign Instructions (PHONE) OR Message body (SMS/WHATSAPP) ─── */}
       {step === 4 && (
         <div className="space-y-4">
+          {isMessageChannel ? (
+            <Card>
+              <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                {channel === 'WHATSAPP'
+                  ? <MessageSquare className="h-4 w-4 text-emerald-600" />
+                  : <Send className="h-4 w-4 text-primary-500" />}
+                {channel === 'WHATSAPP' ? 'WhatsApp Message' : 'SMS Message'}
+              </h3>
+              <p className="text-sm text-gray-500 mb-4">
+                Body is the same for everyone, but <code className="text-[11px] bg-gray-100 px-1 rounded">{'{{name}}'}</code>,
+                <code className="text-[11px] bg-gray-100 px-1 rounded">{'{{course}}'}</code>, and any other CSV column
+                interpolate per recipient at send time.
+              </p>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Message body</label>
+              <textarea
+                value={messageBody}
+                onChange={(e) => setMessageBody(e.target.value.slice(0, 4000))}
+                placeholder={channel === 'WHATSAPP'
+                  ? 'Hi {{name}},\nThanks for showing interest in {{course}} at our institute. Your brochure is attached.\nReply YES if you\'d like a counsellor to call.'
+                  : 'Hi {{name}}, thanks for your interest in {{course}}. Reply YES to receive the brochure.'}
+                rows={6}
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 resize-none font-mono focus:outline-none focus:ring-2 focus:ring-primary-100"
+              />
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-[11px] text-gray-500">
+                  {channel === 'SMS' && /^[\x00-\x7F]*$/.test(messageBody)
+                    ? `${messageBody.length} chars — ${Math.max(1, Math.ceil(messageBody.length / 160))} GSM-7 segment(s)`
+                    : `${messageBody.length} chars`}
+                </p>
+                <span className="text-xs text-gray-400">{messageBody.length}/4000</span>
+              </div>
+
+              <div className="mt-5 pt-4 border-t border-gray-100">
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Template ID <span className="text-gray-400 font-normal">(optional, required for first-contact WhatsApp + India DLT SMS)</span>
+                </label>
+                <input
+                  type="text"
+                  value={messageTemplateId}
+                  onChange={(e) => setMessageTemplateId(e.target.value)}
+                  placeholder={channel === 'WHATSAPP' ? 'brochure_intro_v1' : '1107161234567890123  (DLT template id)'}
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-primary-100 font-mono"
+                />
+                <p className="text-[11px] text-gray-500 mt-1.5">
+                  Pulls from <a href="/settings/plivo" className="text-primary-600 hover:underline">your Plivo tenant config</a> — leave blank to use the default template if one is set.
+                </p>
+              </div>
+            </Card>
+          ) : (
           <Card>
             <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-primary-500" /> Campaign Instructions
@@ -596,6 +713,7 @@ export function CampaignWizardPage() {
             />
             <div className="text-right text-xs text-gray-400 mt-1">{campaignInstruction.length}/4000</div>
           </Card>
+          )}
 
           {/* CSV-derived variables — show what {{vars}} the agent will see per contact */}
           <Card>
@@ -803,25 +921,35 @@ export function CampaignWizardPage() {
           <h3 className="text-base font-semibold text-gray-900 mb-4">Review & Create</h3>
           <dl className="grid grid-cols-2 gap-y-3 gap-x-6 text-sm">
             <Row label="Campaign name" value={name} />
-            <Row label="Phone number" value={selectedPhone ? `${selectedPhone.phone_number} (${selectedPhone.provider})` : '—'} />
-            <Row
-              label="Agent"
-              value={(() => {
-                const kbCount = Array.isArray((selectedAgent as any)?.knowledge_base_ids) ? (selectedAgent as any).knowledge_base_ids.length : 0;
-                const stat = String((selectedAgent as any)?.status || '').toUpperCase();
-                return selectedAgentName
-                  ? `${selectedAgentName} · ${stat || '—'} · ${kbCount} KB${kbCount === 1 ? '' : 's'}`
-                  : '—';
-              })()}
-            />
-            <Row label="Concurrent calls" value={String(concurrency)} />
-            <Row label="Contacts to call" value={String(targets.length)} />
+            <Row label="Channel" value={CHANNEL_OPTIONS.find((c) => c.value === channel)?.label || channel} />
+            <Row label={channel === 'PHONE' ? 'Phone number' : 'Sender'} value={selectedPhone ? `${selectedPhone.phone_number} (${selectedPhone.provider})` : '—'} />
+            {!isMessageChannel && (
+              <Row
+                label="Agent"
+                value={(() => {
+                  const kbCount = Array.isArray((selectedAgent as any)?.knowledge_base_ids) ? (selectedAgent as any).knowledge_base_ids.length : 0;
+                  const stat = String((selectedAgent as any)?.status || '').toUpperCase();
+                  return selectedAgentName
+                    ? `${selectedAgentName} · ${stat || '—'} · ${kbCount} KB${kbCount === 1 ? '' : 's'}`
+                    : '—';
+                })()}
+              />
+            )}
+            <Row label={isMessageChannel ? 'Concurrent sends' : 'Concurrent calls'} value={String(concurrency)} />
+            <Row label={isMessageChannel ? 'Contacts to message' : 'Contacts to call'} value={String(targets.length)} />
             <Row label="Max attempts" value={String(maxAttempts)} />
             <Row label="Retry delay" value={`${Math.round(retryDelay / 60)} min`} />
             <Row label="Provider" value={provider} />
             <Row label="Scheduled start" value={scheduleStartAt ? new Date(scheduleStartAt).toLocaleString() : 'Immediately'} />
-            <Row label="Calling hours" value={enforceWindow ? `${callWindowStart}–${callWindowEnd} ${timezone}` : '24×7 (no window)'} />
-            <Row label="Campaign instruction" value={campaignInstruction.trim() ? `${campaignInstruction.trim().slice(0, 80)}${campaignInstruction.length > 80 ? '…' : ''}` : '(none)'} />
+            <Row label={isMessageChannel ? 'Send window' : 'Calling hours'} value={enforceWindow ? `${callWindowStart}–${callWindowEnd} ${timezone}` : '24×7 (no window)'} />
+            {isMessageChannel ? (
+              <>
+                <Row label="Message body" value={messageBody.trim() ? `${messageBody.trim().slice(0, 80)}${messageBody.length > 80 ? '…' : ''}` : '(none)'} />
+                <Row label="Template ID" value={messageTemplateId.trim() || '(default)'} />
+              </>
+            ) : (
+              <Row label="Campaign instruction" value={campaignInstruction.trim() ? `${campaignInstruction.trim().slice(0, 80)}${campaignInstruction.length > 80 ? '…' : ''}` : '(none)'} />
+            )}
           </dl>
 
           <div className="mt-6 p-3 rounded-lg bg-primary-50 border border-primary-100 text-xs text-primary-800 flex items-start gap-2">

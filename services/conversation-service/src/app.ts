@@ -12,6 +12,7 @@ import { userReportRouter, adminReportRouter } from './routes/support';
 import { publicContactRouter, adminContactRouter } from './routes/contact';
 import { postCallLeadRouter } from './routes/postCallLead';
 import { whatsappIntegrationRouter } from './routes/whatsappIntegration';
+import { plivoIntegrationRouter } from './routes/plivoIntegration';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -47,6 +48,8 @@ app.use('/api/v1', translateRouter);
 app.use('/api/v1', postCallLeadRouter);
 // Per-tenant WhatsApp integration (provider creds, encrypted at rest).
 app.use('/api/v1/integrations', whatsappIntegrationRouter);
+// Per-tenant Plivo integration (SMS + WhatsApp via one Plivo account, DLT-aware).
+app.use('/api/v1/integrations', plivoIntegrationRouter);
 
 app.use(errorHandler);
 

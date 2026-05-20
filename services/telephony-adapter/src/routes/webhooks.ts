@@ -1736,6 +1736,104 @@ webhookRouter.post('/plivo/sms-status', async (req: Request, res: Response, next
 });
 
 /**
+ * POST /webhooks/plivo/whatsapp-status — Plivo WhatsApp delivery callbacks.
+ * Same wire format as sms-status but channel='whatsapp' in our log table.
+ * Plivo WhatsApp adds a `read` state when the recipient opens the message,
+ * which we map to communication_logs.read_at.
+ */
+webhookRouter.post('/plivo/whatsapp-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const uuid = body.MessageUUID || body.message_uuid;
+    const plivoStatus = String(body.Status || body.status || '').toLowerCase();
+    const errCode = body.ErrorCode || body.error_code || null;
+    const errMsg = body.ErrorMessage || body.error_message || null;
+    if (!uuid) {
+      logger.warn({ body }, 'Plivo whatsapp-status webhook missing MessageUUID');
+      res.status(200).json({ received: true });
+      return;
+    }
+    let logStatus: string | null = null;
+    let setReadAt = false;
+    if (plivoStatus === 'delivered') logStatus = 'delivered';
+    else if (plivoStatus === 'read') { logStatus = 'read'; setReadAt = true; }
+    else if (plivoStatus === 'failed' || plivoStatus === 'undelivered' || plivoStatus === 'rejected') logStatus = 'failed';
+    else if (plivoStatus === 'sent') logStatus = 'sent';
+    logger.info({ uuid, plivoStatus, logStatus, errCode, errMsg }, 'Plivo WhatsApp status callback');
+    if (!logStatus) {
+      res.status(200).json({ received: true });
+      return;
+    }
+    await pool.query(
+      `UPDATE communication_logs
+         SET status = $1::text,
+             delivered_at = CASE WHEN $1::text IN ('delivered','read') THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+             read_at = CASE WHEN $4::boolean THEN NOW() ELSE read_at END,
+             last_error = CASE WHEN $1::text = 'failed'
+                                THEN COALESCE($2::text, last_error)
+                                ELSE last_error END
+       WHERE channel = 'whatsapp'
+         AND provider_response->'message_uuid' ? $3`,
+      [logStatus, errCode && errMsg ? `Plivo ${errCode}: ${errMsg}` : (errMsg || errCode || null), uuid, setReadAt]
+    );
+    res.status(200).json({ received: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /webhooks/plivo/whatsapp-inbound — incoming WhatsApp message from a
+ * contact. We log it as an inbound row in communication_logs so the CRM
+ * lead-detail view can show the conversation thread. The recipient (us) is
+ * the tenant's WhatsApp sender; the From is the lead's phone.
+ *
+ * NOTE — we don't auto-route replies into the AI agent here. That's a
+ * Phase 2 item (chatbot inbox). For now this is a passive record so nothing
+ * is lost while we ship the rest of the comms stack.
+ */
+webhookRouter.post('/plivo/whatsapp-inbound', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const from = body.From || body.from || '';        // lead's phone
+    const to = body.To || body.to || '';              // tenant's WA sender
+    const text = body.Text || body.text || body.Body || '';
+    const uuid = body.MessageUUID || body.message_uuid || null;
+    if (!from || !to) {
+      logger.warn({ body }, 'Plivo whatsapp-inbound webhook missing From/To');
+      res.status(200).json({ received: true });
+      return;
+    }
+    // Find which tenant owns this WA sender — look up tenant_plivo_integrations
+    // by whatsapp_sender match. Stripped digits comparison so '+91…' vs '91…'
+    // both work.
+    const toDigits = String(to).replace(/\D/g, '');
+    const tenantRow = await pool.query(
+      `SELECT tenant_id FROM tenant_plivo_integrations
+        WHERE regexp_replace(COALESCE(whatsapp_sender, ''), '\\D', '', 'g') = $1
+        LIMIT 1`,
+      [toDigits],
+    );
+    if (!tenantRow.rows.length) {
+      logger.warn({ to, toDigits }, 'Plivo whatsapp-inbound: no tenant matched WhatsApp sender');
+      res.status(200).json({ received: true });
+      return;
+    }
+    const tenantId = tenantRow.rows[0].tenant_id;
+    await pool.query(
+      `INSERT INTO communication_logs
+         (tenant_id, channel, provider, recipient, message, status, provider_response, sent_at)
+       VALUES ($1, 'whatsapp_inbound', 'plivo', $2, $3, 'received', $4::jsonb, NOW())`,
+      [tenantId, from, text, JSON.stringify({ message_uuid: uuid, from, to })],
+    );
+    logger.info({ tenantId, from, len: text.length }, 'Plivo WhatsApp inbound logged');
+    res.status(200).json({ received: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * Classify a Plivo HangupCause + Plivo CallStatus into a recall outcome and
  * write it into lead_recall_queue. The recall scheduler (in conversation-
  * service) reads these rows on its 60s tick to decide whether to retry.

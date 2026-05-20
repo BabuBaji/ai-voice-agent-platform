@@ -23,6 +23,10 @@ const API_BASE = 'https://api.sarvam.ai';
 const STT_MODEL = 'saarika:v2.5';
 // Sarvam's TTS model. `bulbul:v2` is the latest stable at time of writing.
 const TTS_MODEL = 'bulbul:v2';
+// Hard cap enforced by Sarvam's starter-tier subscription on sarvam-m.
+// Requests with max_tokens above this return HTTP 400 "exceeds the maximum
+// allowed". Override via env when on a paid plan with a higher cap.
+const SARVAM_MAX_TOKENS_CAP = Number(process.env.SARVAM_MAX_TOKENS_CAP) || 2048;
 
 export function sarvamConfigured(): boolean {
   return !!process.env.SARVAM_API_KEY;
@@ -109,8 +113,9 @@ function pcm16ToMulawSample(pcm: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-/** Wrap mulaw-8kHz bytes into a complete WAV file (PCM16) for Sarvam STT. */
-function mulawToWav(mulaw: Buffer): Buffer {
+/** Wrap mulaw-8kHz bytes into a complete WAV file (PCM16) for Sarvam STT.
+ *  Exported so Whisper (and any future REST-batch STT) can reuse it. */
+export function mulawToWav(mulaw: Buffer): Buffer {
   const sampleCount = mulaw.length;
   const dataBytes = sampleCount * 2;
   const header = Buffer.alloc(44);
@@ -211,8 +216,8 @@ function wavToMulaw8kBase64(wav: Buffer): string | null {
 
 // ---- STT with energy-based VAD -------------------------------------------
 
-/** Per-frame RMS of mulaw bytes, normalised 0..1. */
-function frameEnergy(mulaw: Buffer): number {
+/** Per-frame RMS of mulaw bytes, normalised 0..1. Exported for reuse. */
+export function frameEnergy(mulaw: Buffer): number {
   if (mulaw.length === 0) return 0;
   let sum = 0;
   for (let i = 0; i < mulaw.length; i++) {
@@ -246,7 +251,9 @@ export function startSarvamStt(opts: SarvamSttOptions): SarvamSttHandle {
   // Tuning: each Plivo frame is ~20ms / 160 bytes. Silence threshold is
   // empirical; 0.008 catches the quiet floor of a typical mobile line.
   const SILENCE_THRESHOLD = 0.008;
-  const MIN_SPEECH_FRAMES = 8;        // ≥160ms of speech to even consider an utterance
+  // Lowered 8 → 4 (160ms → 80ms) so short Indic affirmations like "ha",
+  // "avunu", "haan", "okay" — typically 100-200ms — aren't dropped as noise.
+  const MIN_SPEECH_FRAMES = 4;
   const SILENCE_FRAMES_TO_FINALIZE = 30; // 600ms of silence after speech
   const MAX_BUFFER_BYTES = 8000 * 20;    // safety cap: 20s of audio per utterance
 
@@ -411,7 +418,7 @@ export async function callSarvamLLM(opts: {
         // the API ignores enable_thinking and still emits <think>.
         // stripThinkBlocks() runs on the response so any leftover think
         // never reaches the caller.
-        max_tokens: opts.maxTokens ?? 1000,
+        max_tokens: Math.min(opts.maxTokens ?? 1000, SARVAM_MAX_TOKENS_CAP),
         temperature: opts.temperature ?? 0.6,
         enable_thinking: false,
         reasoning_effort: 'low',
@@ -435,6 +442,22 @@ export async function callSarvamLLM(opts: {
         'Sarvam LLM returned think-only / empty reply — bump maxTokens',
       );
       return null;
+    }
+    // Truncation guard: when finish_reason === 'length' AND the reply doesn't
+    // end with a sentence terminator (. ? ! । ॥ — covers Latin + Devanagari +
+    // Telugu danda), Sarvam ran out of tokens MID-SENTENCE. Sending that to
+    // TTS produces the "voice breaking, sentence incomplete" issue callers
+    // were reporting. Return null so the caller's retry chain (smaller
+    // history, larger budget) can land a complete reply.
+    if (finishReason === 'length') {
+      const TERMINATORS = /[.?!।॥]\s*["'’”)\]]*\s*$/u;
+      if (!TERMINATORS.test(stripped)) {
+        logger.warn(
+          { finishReason, rawLen: raw.length, replyLen: stripped.length, tailPreview: stripped.slice(-60) },
+          'Sarvam LLM reply truncated mid-sentence — discarding for retry',
+        );
+        return null;
+      }
     }
     return stripped;
   } catch (err: any) {
@@ -518,7 +541,7 @@ export async function callSarvamLLMStream(opts: {
           { role: 'system', content: opts.systemPrompt },
           ...cleaned,
         ],
-        max_tokens: opts.maxTokens ?? 1000,
+        max_tokens: Math.min(opts.maxTokens ?? 1000, SARVAM_MAX_TOKENS_CAP),
         temperature: opts.temperature ?? 0.6,
         enable_thinking: false,
         reasoning_effort: 'low',

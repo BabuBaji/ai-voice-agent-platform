@@ -114,11 +114,33 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       retry_delay_seconds = 900, schedule_start_at,
       timezone, call_window_start, call_window_end,
       campaign_instruction,
+      // Multi-channel additions (default to PHONE so the existing wizard
+      // payload — no channel field — keeps creating voice campaigns).
+      channel, message_body, template_id,
     } = req.body || {};
 
-    if (!name || !agent_id || !from_number) {
-      res.status(400).json({ error: 'Bad Request', message: 'name, agent_id, from_number required' });
+    const channelUpper = String(channel || 'PHONE').toUpperCase();
+    if (!['PHONE', 'SMS', 'WHATSAPP'].includes(channelUpper)) {
+      res.status(400).json({ error: 'Bad Request', message: 'channel must be PHONE | SMS | WHATSAPP' });
       return;
+    }
+    const isMessageChannel = channelUpper === 'SMS' || channelUpper === 'WHATSAPP';
+
+    if (!name || !from_number) {
+      res.status(400).json({ error: 'Bad Request', message: 'name, from_number required' });
+      return;
+    }
+    if (channelUpper === 'PHONE' && !agent_id) {
+      res.status(400).json({ error: 'Bad Request', message: 'agent_id required for PHONE campaigns' });
+      return;
+    }
+    if (isMessageChannel) {
+      const hasBody = typeof message_body === 'string' && message_body.trim().length > 0;
+      const hasTpl  = typeof template_id  === 'string' && template_id.trim().length  > 0;
+      if (!hasBody && !hasTpl) {
+        res.status(400).json({ error: 'Bad Request', message: 'message_body or template_id required for SMS/WHATSAPP campaigns' });
+        return;
+      }
     }
 
     const tz = sanitizeTimezone(timezone);
@@ -173,16 +195,21 @@ campaignRouter.post('/', async (req: Request, res: Response, next: NextFunction)
       `INSERT INTO campaigns (tenant_id, agent_id, name, description, from_number, provider,
                               concurrency, max_attempts, retry_delay_seconds, schedule_start_at,
                               timezone, call_window_start, call_window_end, status,
-                              campaign_instruction, deployed_agent_config_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'DRAFT',$14,$15)
+                              campaign_instruction, deployed_agent_config_id,
+                              channel, message_body, template_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'DRAFT',$14,$15,$16,$17,$18)
        RETURNING *`,
-      [tenantId, agent_id, name, description || null, from_number, provider,
+      [tenantId, isMessageChannel ? (agent_id || null) : agent_id,
+       name, description || null, from_number, provider,
        Math.max(1, Math.min(10, concurrency)),
        Math.max(1, Math.min(5, max_attempts)),
        Math.max(60, Math.min(86400, retry_delay_seconds)),
        schedule_start_at || null,
        tz || 'Asia/Kolkata', winStart, winEnd,
-       instructionTrimmed, snapshotId]
+       instructionTrimmed, snapshotId,
+       channelUpper,
+       isMessageChannel ? (message_body ? String(message_body).slice(0, 4000) : null) : null,
+       isMessageChannel ? (template_id  ? String(template_id).slice(0, 64)   : null) : null]
     );
     res.status(201).json(inserted.rows[0]);
   } catch (err) { next(err); }
@@ -677,6 +704,124 @@ campaignRouter.post('/:id/pause', async (req: Request, res: Response, next: Next
  * Dial up to `concurrency` pending targets for the campaign. Self-reschedules
  * every 5s while the campaign is RUNNING and pending targets remain.
  */
+/**
+ * Interpolate {{var}} placeholders in a message body using the target's
+ * variables JSONB (+ `name` as a top-level convenience). Unknown placeholders
+ * are left as-is so the operator can spot them in communication_logs and
+ * fix the CSV. Empty string variables become empty, not "undefined".
+ */
+function interpolateMessage(body: string, target: { name?: string | null; variables?: Record<string, any> | null }): string {
+  if (!body) return '';
+  const bag: Record<string, any> = { name: target.name || '', ...(target.variables || {}) };
+  return body.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => {
+    const v = bag[key];
+    return v === undefined || v === null ? match : String(v);
+  });
+}
+
+/**
+ * Dispatch a batch of SMS / WhatsApp campaign targets. Posts to
+ * conversation-service's /api/v1/communications/{sms|whatsapp}/send for each
+ * target so all the per-tenant provider resolution + DLT enforcement +
+ * communication_logs writes happen in one place. Honors the same status state
+ * machine as the voice flow (PENDING → IN_PROGRESS → COMPLETED/FAILED).
+ * Retry semantics + DND + concurrency are governed by the caller — this
+ * function just transmits one tick's worth of targets in parallel.
+ */
+async function dispatchMessageBatch(
+  campaign: any,
+  targets: any[],
+  channel: 'SMS' | 'WHATSAPP',
+): Promise<void> {
+  const convUrl = process.env.CONVERSATION_SERVICE_URL || 'http://localhost:3003/api/v1';
+  const channelPath = channel === 'SMS' ? 'sms' : 'whatsapp';
+  await Promise.all(targets.map(async (t: any) => {
+    await pool.query(
+      `UPDATE campaign_targets SET status = 'IN_PROGRESS', attempts = attempts + 1, last_attempt_at = NOW() WHERE id = $1`,
+      [t.id],
+    );
+    try {
+      const message = interpolateMessage(campaign.message_body || '', { name: t.name, variables: t.variables });
+      // Empty rendered message after interpolation is almost always a CSV/column
+      // mismatch — fail fast so the operator can fix it rather than burning
+      // provider credits on blanks.
+      if (!message.trim()) {
+        await pool.query(
+          `UPDATE campaign_targets SET status='FAILED', last_error=$1, outcome='failed' WHERE id=$2`,
+          ['Rendered message body is empty (check {{var}} placeholders vs CSV columns)', t.id],
+        );
+        return;
+      }
+      const resp = await fetch(`${convUrl}/communications/${channelPath}/send`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': campaign.tenant_id,
+        },
+        body: JSON.stringify({
+          recipient: t.phone_number,
+          message,
+          template_id: campaign.template_id || null,
+          from_number: campaign.from_number || null,
+          // No lead_id here — campaign targets aren't always CRM leads.
+        }),
+      });
+      const body: any = await resp.json().catch(() => ({}));
+      if (!resp.ok || body?.ok === false) {
+        const errMsg = body?.error || body?.message || `HTTP ${resp.status}`;
+        // Retry vs fail — same logic as the voice path. Re-read campaign
+        // status so a PAUSE mid-batch can't resurrect the target.
+        const live = await pool.query(`SELECT status FROM campaigns WHERE id = $1`, [campaign.id]);
+        const liveStatus = String(live.rows[0]?.status || '').toUpperCase();
+        const maxAttempts = campaign.max_attempts || 1;
+        const isStopped = liveStatus === 'PAUSED' || liveStatus === 'CANCELED' || liveStatus === 'CANCELLED' || liveStatus === 'COMPLETED' || liveStatus === 'FAILED';
+        if (isStopped || t.attempts + 1 >= maxAttempts) {
+          await pool.query(
+            `UPDATE campaign_targets SET status='FAILED', last_error=$1, outcome='failed' WHERE id=$2`,
+            [errMsg.slice(0, 500), t.id],
+          );
+        } else {
+          const delay = campaign.retry_delay_seconds || 900;
+          await pool.query(
+            `UPDATE campaign_targets
+             SET status='PENDING', last_error=$1, next_attempt_after = NOW() + ($2 || ' seconds')::interval
+             WHERE id=$3`,
+            [errMsg.slice(0, 500), String(delay), t.id],
+          );
+        }
+        return;
+      }
+      // Provider accepted the send. Communication_logs holds the granular
+      // delivered/read state; campaign_target is just "did we hand it off?"
+      await pool.query(
+        `UPDATE campaign_targets
+         SET status='COMPLETED', outcome='answered', last_error=NULL, conversation_id=NULL
+         WHERE id=$1`,
+        [t.id],
+      );
+      logger.info({ campaignId: campaign.id, targetId: t.id, to: t.phone_number, channel, logId: body?.log_id }, 'campaign message dispatched');
+    } catch (err: any) {
+      const msg = err?.message || `${channel} send failed`;
+      logger.warn({ campaignId: campaign.id, targetId: t.id, channel, err: msg }, 'campaign message threw');
+      const maxAttempts = campaign.max_attempts || 1;
+      if (t.attempts + 1 >= maxAttempts) {
+        await pool.query(
+          `UPDATE campaign_targets SET status='FAILED', last_error=$1, outcome='failed' WHERE id=$2`,
+          [msg.slice(0, 500), t.id],
+        );
+      } else {
+        const delay = campaign.retry_delay_seconds || 900;
+        await pool.query(
+          `UPDATE campaign_targets
+           SET status='PENDING', last_error=$1, next_attempt_after = NOW() + ($2 || ' seconds')::interval
+           WHERE id=$3`,
+          [msg.slice(0, 500), String(delay), t.id],
+        );
+      }
+    }
+  }));
+}
+
 async function processCampaign(campaignId: string): Promise<void> {
   const c = await pool.query(`SELECT * FROM campaigns WHERE id = $1`, [campaignId]);
   if (!c.rows.length) return;
@@ -816,6 +961,21 @@ async function processCampaign(campaignId: string): Promise<void> {
       );
     }
   } catch { /* non-fatal — fall back to stored campaign.provider */ }
+
+  // ── Channel branch ───────────────────────────────────────────────────────
+  // Voice (PHONE, default) keeps the entire downstream block — agent gate,
+  // initiateCall, calls-row insert, webhook-driven target finalize. SMS and
+  // WHATSAPP run a message-dispatch path that hits conversation-service per
+  // target and finalizes the target inline (no calls row, no agent needed).
+  const channel = String(campaign.channel || 'PHONE').toUpperCase();
+  if (channel === 'SMS' || channel === 'WHATSAPP') {
+    await dispatchMessageBatch(campaign, targets.rows, channel as 'SMS' | 'WHATSAPP');
+    // Pace the next tick the same way the voice path does — gives delivery
+    // webhooks a beat to land and keeps the runner responsive to pause/edit.
+    setTimeout(() => void processCampaign(campaignId), 5000);
+    return;
+  }
+
   const provider = getProvider(providerName);
 
   // Look up voicemail detection setting on the agent (per-call carrier flag).

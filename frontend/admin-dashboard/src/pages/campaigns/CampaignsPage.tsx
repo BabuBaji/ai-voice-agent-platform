@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2, Eye, Trash2 } from 'lucide-react';
+import { Inbox, Plus, Search, Loader2, AlertCircle, CheckCircle2, Eye, Trash2, Phone, Send, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
@@ -221,6 +221,7 @@ export function CampaignsPage() {
                 />
               </th>
               <th className="text-left px-4 py-3 font-medium">Name</th>
+              <th className="text-left px-4 py-3 font-medium">Channel</th>
               <th className="text-left px-4 py-3 font-medium">Status</th>
               <th className="text-left px-4 py-3 font-medium">Bot</th>
               <th className="text-left px-4 py-3 font-medium">From Number</th>
@@ -233,13 +234,13 @@ export function CampaignsPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={9} className="text-center py-12">
+                <td colSpan={10} className="text-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-primary-600 mx-auto" />
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} className="text-center py-12">
+                <td colSpan={10} className="text-center py-12">
                   <Inbox className="h-10 w-10 text-gray-300 mx-auto mb-3" />
                   <p className="text-sm font-medium text-gray-700">No bulk call campaigns found.</p>
                   <p className="text-xs text-gray-400 mt-1">Try creating a new campaign to get started.</p>
@@ -267,11 +268,19 @@ export function CampaignsPage() {
                     {c.description && <div className="text-xs text-gray-500 line-clamp-1">{c.description}</div>}
                   </td>
                   <td className="px-4 py-3">
+                    {(() => {
+                      const ch = String((c as any).channel || 'PHONE').toUpperCase();
+                      if (ch === 'WHATSAPP') return <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><MessageSquare className="h-3.5 w-3.5" /> WhatsApp</span>;
+                      if (ch === 'SMS')      return <span className="inline-flex items-center gap-1 text-xs text-blue-700"><Send className="h-3.5 w-3.5" /> SMS</span>;
+                      return <span className="inline-flex items-center gap-1 text-xs text-gray-700"><Phone className="h-3.5 w-3.5" /> Phone</span>;
+                    })()}
+                  </td>
+                  <td className="px-4 py-3">
                     <span className={`inline-block px-2.5 py-1 rounded-md text-xs font-medium ${pill.bg} ${pill.fg}`}>
                       {pill.label}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-700">{agentName(c.agent_id)}</td>
+                  <td className="px-4 py-3 text-gray-700">{agentName(c.agent_id) || <span className="text-gray-400">—</span>}</td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-700">{c.from_number}</td>
                   <td className="px-4 py-3 min-w-[180px]">
                     <div className="flex items-center justify-between text-xs mb-1">

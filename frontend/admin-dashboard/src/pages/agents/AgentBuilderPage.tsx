@@ -134,6 +134,14 @@ export function AgentBuilderPage() {
   const [voiceProvider, setVoiceProvider] = useState('elevenlabs');
   const [voiceId, setVoiceId] = useState('rachel');
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
+  // Real-time voice-pipeline provider. Drives the STT/TTS picker in
+  // telephony-adapter (services/.../plivoAudioStream.ts).
+  //   "deepgram"        → Deepgram everywhere, fastest path (new default)
+  //   "sarvam"          → Sarvam everywhere (native Indic voice quality)
+  //   "auto"            → Legacy: Indic → Sarvam, else Deepgram
+  //   "deepgram_with_fallback" → Deepgram first; auto-switch to Sarvam after
+  //                              8s of silent failure
+  const [defaultProvider, setDefaultProvider] = useState<'deepgram' | 'sarvam' | 'auto' | 'deepgram_with_sarvam' | 'deepgram_with_whisper'>('deepgram');
   const [sttProvider, setSttProvider] = useState('deepgram');
   const [sttModel, setSttModel] = useState('nova-2');
   const [llmProvider, setLlmProvider] = useState('mock');
@@ -222,6 +230,14 @@ export function AgentBuilderPage() {
           setVoiceId(vc.voice_id || 'rachel');
           setVoiceSpeed(vc.speed ?? 1.0);
           setLanguage(vc.language || 'en-US');
+          // Compute effective provider mode from the stored flags so the
+          // dropdown round-trips through saves correctly.
+          const dp = String(vc.default_provider || 'deepgram').toLowerCase();
+          const fp = String(vc.fallback_provider || 'sarvam').toLowerCase();
+          if (dp === 'sarvam') setDefaultProvider('sarvam');
+          else if (dp === 'auto') setDefaultProvider('auto');
+          else if (vc.enable_auto_fallback) setDefaultProvider(fp === 'whisper' ? 'deepgram_with_whisper' : 'deepgram_with_sarvam');
+          else setDefaultProvider('deepgram');
           const sc = a.stt_config || {};
           setSttProvider(sc.provider || 'deepgram');
           setSttModel(sc.model || 'nova-2');
@@ -283,7 +299,23 @@ export function AgentBuilderPage() {
     greeting_message: greeting.trim() || undefined,
     welcome_dynamic: welcomeDynamic,
     welcome_interruptible: welcomeInterruptible,
-    voice_config: { provider: voiceProvider, voice_id: voiceId, speed: voiceSpeed, language },
+    voice_config: {
+      provider: voiceProvider,
+      voice_id: voiceId,
+      speed: voiceSpeed,
+      language,
+      // Real-time pipeline provider selector. Telephony-adapter reads these.
+      default_provider:
+        defaultProvider === 'deepgram_with_sarvam' || defaultProvider === 'deepgram_with_whisper'
+          ? 'deepgram'
+          : defaultProvider,
+      enable_auto_fallback:
+        defaultProvider === 'deepgram_with_sarvam' || defaultProvider === 'deepgram_with_whisper',
+      fallback_provider:
+        defaultProvider === 'deepgram_with_whisper' ? 'whisper'
+        : defaultProvider === 'deepgram_with_sarvam' ? 'sarvam'
+        : undefined,
+    },
     stt_config: { provider: sttProvider, model: sttModel, language },
     tools_config: enabledTools.map((t) => ({ name: t, enabled: true })),
     knowledge_base_ids: attachedKBs,
@@ -588,6 +620,46 @@ export function AgentBuilderPage() {
                 subtitle={currentSttLabel}
                 onClick={() => setShowSttModal(true)}
               />
+            </div>
+          </div>
+
+          {/* Real-time voice pipeline provider — drives the STT+TTS picker on
+              live calls (telephony-adapter). Defaults to Deepgram for low
+              latency + clean bulk-call scaling; Sarvam stays available as an
+              opt-in for native Indic voice quality. */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-sm font-semibold text-gray-900">Voice Pipeline</h3>
+              <span className="text-[11px] text-gray-400">Live-call STT + TTS engine</span>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">
+              Default is Deepgram for the fastest, most interruption-safe path. Override per agent if you need native Indic voice quality.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {([
+                { value: 'deepgram',                label: 'Deepgram Only',                  hint: 'Lowest latency. Best for English / Hinglish / Hindi callers.' },
+                { value: 'deepgram_with_whisper',   label: 'Deepgram + Whisper Fallback',    hint: 'Recommended. Deepgram first; Whisper takes over after 8s silent STT — covers every Indian language.' },
+                { value: 'deepgram_with_sarvam',    label: 'Deepgram + Sarvam Fallback',     hint: 'Deepgram first; Sarvam takes over after 8s silent STT — native Indic TTS too.' },
+                { value: 'sarvam',                  label: 'Sarvam Only',                    hint: 'Native Telugu/Hindi/Tamil voice quality end-to-end. Slower (3-4s/turn).' },
+                { value: 'auto',                    label: 'Auto (Legacy)',                  hint: 'Indic → Sarvam, else Deepgram. Pre-2026 behavior.' },
+              ] as const).map((opt) => {
+                const active = defaultProvider === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setDefaultProvider(opt.value as any)}
+                    className={`text-left p-3 rounded-xl border transition-colors ${
+                      active
+                        ? 'border-primary-400 bg-primary-50 ring-2 ring-primary-100'
+                        : 'border-gray-200 bg-white hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="text-sm font-semibold text-gray-900">{opt.label}</div>
+                    <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">{opt.hint}</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 

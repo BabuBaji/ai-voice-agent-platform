@@ -260,18 +260,113 @@ postCallLeadRouter.get('/communication-logs', async (req: Request, res: Response
     const channel = (req.query.channel as string) || '';
     const leadId = (req.query.lead_id as string) || '';
     const status = (req.query.status as string) || '';
+    const provider = (req.query.provider as string) || '';
+    const search = (req.query.search as string) || '';
+    const since = (req.query.since as string) || '';   // ISO datetime
+    const until = (req.query.until as string) || '';   // ISO datetime
     const limit = Math.min(parseInt(String(req.query.limit || '50'), 10) || 50, 200);
+    const offset = Math.max(parseInt(String(req.query.offset || '0'), 10) || 0, 0);
     const wheres: string[] = ['tenant_id = $1'];
     const params: any[] = [tenantId];
-    if (channel) { params.push(channel); wheres.push(`channel = $${params.length}`); }
-    if (leadId) { params.push(leadId); wheres.push(`lead_id = $${params.length}::uuid`); }
-    if (status) { params.push(status); wheres.push(`status = $${params.length}`); }
+    if (channel)  { params.push(channel);  wheres.push(`channel = $${params.length}`); }
+    if (leadId)   { params.push(leadId);   wheres.push(`lead_id = $${params.length}::uuid`); }
+    if (status)   { params.push(status);   wheres.push(`status = $${params.length}`); }
+    if (provider) { params.push(provider); wheres.push(`provider = $${params.length}`); }
+    if (since)    { params.push(since);    wheres.push(`created_at >= $${params.length}::timestamptz`); }
+    if (until)    { params.push(until);    wheres.push(`created_at <= $${params.length}::timestamptz`); }
+    if (search) {
+      params.push(`%${search}%`);
+      wheres.push(`(recipient ILIKE $${params.length} OR message ILIKE $${params.length} OR subject ILIKE $${params.length})`);
+    }
+    const whereSql = wheres.join(' AND ');
+    const [listResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, tenant_id, lead_id, conversation_id, channel, provider, recipient,
+                subject, message, template_id, attachments, status, last_error,
+                sent_at, delivered_at, read_at, created_at
+           FROM communication_logs WHERE ${whereSql}
+           ORDER BY created_at DESC
+           LIMIT ${limit} OFFSET ${offset}`,
+        params,
+      ),
+      pool.query(`SELECT COUNT(*)::int AS total FROM communication_logs WHERE ${whereSql}`, params),
+    ]);
+    res.json({
+      data: listResult.rows,
+      pagination: {
+        total: countResult.rows[0].total,
+        limit,
+        offset,
+        has_more: offset + listResult.rows.length < countResult.rows[0].total,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Aggregate counters for the comms-logs page header. Returns:
+ *   - by_status: { queued, sent, delivered, read, failed }      across all-time
+ *   - by_channel: { email, sms, whatsapp, whatsapp_inbound }    across all-time
+ *   - last_24h / last_7d / last_30d: { total, delivered, failed }
+ * One round-trip; the page renders KPI cards from a single response.
+ */
+postCallLeadRouter.get('/communication-logs/stats', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    // Three independent aggregates run in parallel — simpler + faster than a
+    // single union-tagged CTE, and easier to evolve when new fields are added.
+    const [statusRows, channelRows, windowRows] = await Promise.all([
+      pool.query(
+        `SELECT status, COUNT(*)::int AS cnt
+           FROM communication_logs WHERE tenant_id = $1 GROUP BY status`,
+        [tenantId],
+      ),
+      pool.query(
+        `SELECT channel, COUNT(*)::int AS cnt
+           FROM communication_logs WHERE tenant_id = $1 GROUP BY channel`,
+        [tenantId],
+      ),
+      pool.query(
+        `SELECT
+           label,
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE status IN ('delivered','read'))::int AS delivered,
+           COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+         FROM (
+           SELECT '24h' AS label, status FROM communication_logs
+             WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '24 hours'
+           UNION ALL
+           SELECT '7d',  status FROM communication_logs
+             WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '7 days'
+           UNION ALL
+           SELECT '30d', status FROM communication_logs
+             WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '30 days'
+         ) w
+         GROUP BY label`,
+        [tenantId],
+      ),
+    ]);
+    const by_status: Record<string, number> = {};
+    for (const r of statusRows.rows) by_status[r.status || 'unknown'] = r.cnt;
+    const by_channel: Record<string, number> = {};
+    for (const r of channelRows.rows) by_channel[r.channel || 'unknown'] = r.cnt;
+    const windows: Record<string, { total: number; delivered: number; failed: number }> = {};
+    for (const r of windowRows.rows) windows[r.label] = { total: r.total, delivered: r.delivered, failed: r.failed };
+    res.json({ by_status, by_channel, windows });
+  } catch (err) { next(err); }
+});
+
+postCallLeadRouter.get('/communication-logs/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
     const r = await pool.query(
-      `SELECT * FROM communication_logs WHERE ${wheres.join(' AND ')}
-       ORDER BY created_at DESC LIMIT ${limit}`,
-      params,
+      `SELECT * FROM communication_logs WHERE id = $1::uuid AND tenant_id = $2 LIMIT 1`,
+      [req.params.id, tenantId],
     );
-    res.json({ data: r.rows });
+    if (!r.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
+    res.json(r.rows[0]);
   } catch (err) { next(err); }
 });
 
@@ -284,6 +379,158 @@ const emailSendSchema = z.object({
   template_id: z.string().optional(),
   attachments: z.array(z.object({ name: z.string(), url: z.string().url() })).optional(),
 });
+
+/**
+ * GET /api/v1/communications/lead-context/:leadId
+ *
+ * One-stop endpoint that gathers every variable the brochure modal (or any
+ * outbound message template) might interpolate for this lead:
+ *   - name, college, course, branch, location (from CRM custom_fields)
+ *   - callback_time (custom_fields.recommended_follow_up_time — what the agent
+ *     verbally promised)
+ *   - next_call_time (lead_recall_queue.next_retry_at — what the recall
+ *     scheduler will actually act on; falls back to the earliest pending
+ *     follow_up_tasks.scheduled_at; falls back to callback_time)
+ *   - agent_name (looked up from the most recent conversation for this lead)
+ *   - lead_status, parent_name, parent_mobile
+ *
+ * Returns ALL keys (null for missing) so the frontend can drive a stable
+ * variable-chip palette regardless of which fields populated.
+ */
+postCallLeadRouter.get('/communications/lead-context/:leadId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const leadId = req.params.leadId;
+    if (!leadId) { res.status(400).json({ error: 'Bad Request', message: 'leadId required' }); return; }
+
+    // 1. Pull the lead from crm-service (which owns the leads table). Best-
+    //    effort — if CRM is down the modal still works with the in-DB data.
+    let leadRow: any = null;
+    try {
+      const crmUrl = process.env.CRM_SERVICE_URL || 'http://localhost:8081';
+      const r = await fetch(`${crmUrl}/leads/${leadId}`, { headers: { 'x-tenant-id': tenantId } });
+      if (r.ok) {
+        const body: any = await r.json();
+        leadRow = body?.data || body;
+      }
+    } catch { /* non-fatal */ }
+
+    const cf = (leadRow?.custom_fields || {}) as Record<string, any>;
+    const name = leadRow
+      ? [leadRow.first_name, leadRow.last_name].filter(Boolean).join(' ').trim()
+      : null;
+
+    // 2. Earliest pending recall for this lead — that's the next call time the
+    //    system will actually act on. We sort by next_retry_at ASC + state
+    //    filter so cancelled / completed rows don't surface.
+    let recallRow: any = null;
+    try {
+      const r = await pool.query(
+        `SELECT next_retry_at, retry_count, last_call_status, state
+           FROM lead_recall_queue
+          WHERE tenant_id = $1 AND lead_id = $2 AND state = 'PENDING'
+          ORDER BY next_retry_at ASC NULLS LAST
+          LIMIT 1`,
+        [tenantId, leadId],
+      );
+      recallRow = r.rows[0] || null;
+    } catch { /* non-fatal */ }
+
+    // 3. Earliest pending follow-up task — covers cases where the team
+    //    scheduled a manual call without a recall queue row.
+    let followUpRow: any = null;
+    try {
+      const r = await pool.query(
+        `SELECT scheduled_at, priority, notes
+           FROM follow_up_tasks
+          WHERE tenant_id = $1 AND lead_id = $2 AND status = 'pending'
+          ORDER BY scheduled_at ASC
+          LIMIT 1`,
+        [tenantId, leadId],
+      );
+      followUpRow = r.rows[0] || null;
+    } catch { /* non-fatal */ }
+
+    // 4. Agent name from the most recent conversation that touched this lead.
+    //    Most lead-detail UIs already show this; included here so the message
+    //    template can sign off as the agent ("— Priya from Admissions").
+    let agentName: string | null = null;
+    try {
+      const r = await pool.query(
+        `SELECT agent_id FROM conversations
+          WHERE tenant_id = $1 AND lead_id = $2
+          ORDER BY created_at DESC LIMIT 1`,
+        [tenantId, leadId],
+      );
+      const agentId = r.rows[0]?.agent_id;
+      if (agentId) {
+        // agent-service lookup is async + non-critical. Skip the network hop
+        // when the agent-service URL isn't reachable.
+        const agentUrl = process.env.AGENT_SERVICE_URL || 'http://localhost:3001/api/v1';
+        const a = await fetch(`${agentUrl}/agents/${agentId}`, { headers: { 'x-tenant-id': tenantId } });
+        if (a.ok) {
+          const ag: any = await a.json();
+          agentName = ag?.name || null;
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // Pick the "next call time" with a clear priority order:
+    //   1. Recall queue (system will dial automatically)
+    //   2. Follow-up task (operator scheduled manually)
+    //   3. Recommended follow-up time from analyzer (agent's verbal promise)
+    const nextCallIso: string | null =
+      recallRow?.next_retry_at?.toISOString?.() ||
+      (recallRow?.next_retry_at ? new Date(recallRow.next_retry_at).toISOString() : null) ||
+      followUpRow?.scheduled_at?.toISOString?.() ||
+      (followUpRow?.scheduled_at ? new Date(followUpRow.scheduled_at).toISOString() : null) ||
+      (cf.recommended_follow_up_time ? null : null);  // analyzer value is free-text, see below
+
+    // Pretty-print for the message body. Format: "Thursday, May 21 at 4:30 PM".
+    const nextCallHuman = nextCallIso
+      ? new Date(nextCallIso).toLocaleString('en-IN', {
+          weekday: 'long', month: 'long', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true,
+        })
+      : (cf.recommended_follow_up_time || null);  // analyzer text is already human
+
+    res.json({
+      lead_id: leadId,
+      name: name || cf.name || null,
+      first_name: leadRow?.first_name || null,
+      last_name: leadRow?.last_name || null,
+      email: leadRow?.email || null,
+      phone: leadRow?.phone || null,
+      lead_status: leadRow?.status || null,
+
+      // Admissions-specific. `city` is the candidate's home city; `location`
+      // is their preferred study location — surfaced separately so templates
+      // can say "We've seen many students from Gujarat enrol at our Chennai
+      // campus." without conflating the two.
+      college: cf.interested_university || null,
+      course: cf.interested_course || null,
+      branch: cf.interested_branch || null,
+      location: cf.preferred_location || null,
+      city: cf.city || null,
+      parent_name: cf.parent_name || null,
+      parent_mobile: cf.parent_mobile || null,
+
+      // Call scheduling
+      next_call_time: nextCallHuman,                          // human string for {{next_call_time}}
+      next_call_time_iso: nextCallIso,                        // ISO for the UI to format
+      next_call_source: recallRow ? 'recall_queue'
+                       : followUpRow ? 'follow_up_task'
+                       : cf.recommended_follow_up_time ? 'agent_promise'
+                       : null,
+      callback_requested: !!cf.callback_required,
+
+      // Agent identity for sign-off
+      agent_name: agentName,
+    });
+  } catch (err) { next(err); }
+});
+
 postCallLeadRouter.post('/communications/email/brochure', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const tenantId = getTenantId(req, res);

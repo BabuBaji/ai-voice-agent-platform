@@ -773,9 +773,38 @@ function defaultBrochureConfig(): BrochureConfig {
     channel: 'email',
     brochure_url: '',
     subject: 'Information you requested',
+    // Default body weaves the lead's admissions context in conversationally.
+    // Every {{*_clause}} placeholder is a smart fragment: if the underlying
+    // field is empty, the clause (and any surrounding punctuation it owns)
+    // vanishes — so a sparse lead doesn't produce orphan commas or "at ."
     message_template:
-      "Hi {{name}},\n\nThanks for your interest. Please find the brochure attached: {{brochure_url}}.\n\nFeel free to reply with any questions.\n\nBest regards",
+      "Hi {{name}},\n\n" +
+      "Thanks for your interest in {{course}}{{branch_clause}}{{college_clause}}. " +
+      "Please find the brochure attached: {{brochure_url}}.\n\n" +
+      "{{next_call_clause}}" +
+      "Feel free to reply with any questions.\n\n" +
+      "Best regards",
   };
+}
+
+interface LeadContext {
+  name: string | null;
+  first_name: string | null;
+  email: string | null;
+  phone: string | null;
+  college: string | null;
+  course: string | null;
+  branch: string | null;
+  location: string | null;
+  city: string | null;
+  parent_name: string | null;
+  parent_mobile: string | null;
+  next_call_time: string | null;
+  next_call_time_iso: string | null;
+  next_call_source: 'recall_queue' | 'follow_up_task' | 'agent_promise' | null;
+  callback_requested: boolean;
+  agent_name: string | null;
+  lead_status: string | null;
 }
 
 function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => void }) {
@@ -784,6 +813,26 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<'success' | 'pending' | 'error' | null>(null);
   const [sendError, setSendError] = useState<string>('');
+  const [ctx, setCtx] = useState<LeadContext | null>(null);
+  const [ctxLoading, setCtxLoading] = useState(true);
+  // `liveMessage` is the WYSIWYG textarea content — what the user sees and
+  // what gets sent. The saved template in `cfg.message_template` keeps its
+  // {{placeholders}} so it stays reusable across leads; we resolve them into
+  // `liveMessage` once ctx arrives. User edits go straight into liveMessage.
+  const [liveMessage, setLiveMessage] = useState<string>('');
+  const [liveMessageDirty, setLiveMessageDirty] = useState(false);
+
+  // Fetch the merged lead context (CRM custom_fields + recall queue + agent)
+  // on open so the message template has real values to interpolate.
+  useEffect(() => {
+    let cancelled = false;
+    setCtxLoading(true);
+    api.get(`/communications/lead-context/${lead.id}`)
+      .then((r: any) => { if (!cancelled) setCtx(r.data as LeadContext); })
+      .catch(() => { if (!cancelled) setCtx(null); })
+      .finally(() => { if (!cancelled) setCtxLoading(false); });
+    return () => { cancelled = true; };
+  }, [lead.id]);
 
   const save = () => {
     try { localStorage.setItem(BROCHURE_CONFIG_KEY, JSON.stringify(cfg)); } catch { /* ignore */ }
@@ -791,12 +840,78 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
     setTimeout(() => setSaved(false), 1800);
   };
 
+  // As soon as ctx lands (or the saved template changes via "Reset"), bake
+  // the lead-specific placeholders into the textarea content. `{{brochure_url}}`
+  // stays a placeholder so it tracks edits to the URL input live.
+  // We do NOT clobber user edits — the moment they type, `liveMessageDirty`
+  // flips true and this effect stops overwriting their work.
+  useEffect(() => {
+    if (liveMessageDirty) return;
+    if (ctxLoading) return;
+    setLiveMessage(renderTemplate(cfg.message_template, { skipBrochureUrl: true }));
+    // renderTemplate depends on ctx + cfg.brochure_url + cfg.message_template;
+    // we re-run when any of those change so the textarea keeps reflecting the
+    // current lead's data (until the user starts editing).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx, ctxLoading, cfg.message_template, liveMessageDirty]);
+
   const channelAvailable = cfg.channel === 'email' ? !!lead.email : !!lead.phone;
 
-  const renderTemplate = (tpl: string) =>
-    tpl
-      .replace(/\{\{\s*name\s*\}\}/g, lead.name || 'there')
-      .replace(/\{\{\s*brochure_url\s*\}\}/g, cfg.brochure_url || '');
+  /**
+   * Resolve every supported placeholder. `*_clause` variants are smart fragments
+   * that gracefully omit themselves (and any surrounding punctuation) when the
+   * underlying value is missing — so a lead with no scheduled callback doesn't
+   * end up with "I'll call you back at ." in their inbox.
+   *
+   * `skipBrochureUrl` keeps `{{brochure_url}}` as-is so the textarea can render
+   * with the lead's name + admissions data baked in while the brochure URL
+   * input above stays the live source for the URL itself.
+   */
+  const renderTemplate = (tpl: string, opts: { skipBrochureUrl?: boolean } = {}): string => {
+    const name = ctx?.name || lead.name || 'there';
+    const college = ctx?.college || '';
+    const course = ctx?.course || (cfg.channel === 'email' ? 'our program' : 'the course');
+    const branch = ctx?.branch || '';
+    const location = ctx?.location || '';
+    const city = ctx?.city || '';
+    const phone = ctx?.phone || lead.phone || '';
+    const email = ctx?.email || lead.email || '';
+    const nextCall = ctx?.next_call_time || '';
+    const agentName = ctx?.agent_name || 'the Admissions team';
+
+    const collegeClause = college ? ` at ${college}` : '';
+    const branchClause = branch ? ` (${branch})` : '';
+    const cityClause = city ? ` in ${city}` : '';
+    // The next-call value can be either a scheduled timestamp ("Wednesday,
+    // 20 May at 4:23 pm") or a free-text agent promise ("within 24h",
+    // "tomorrow morning"). For timestamps we prefix "on"; for phrases we
+    // leave it standalone so we don't get "on within 24h".
+    const looksLikeTimestamp = /^[A-Z][a-z]+day,?\s|at\s\d{1,2}[:.]/.test(nextCall);
+    const nextCallClause = nextCall
+      ? looksLikeTimestamp
+        ? `I'll personally follow up with you on ${nextCall}.\n\n`
+        : `I'll personally follow up with you ${nextCall}.\n\n`
+      : '';
+
+    let out = tpl.replace(/\{\{\s*name\s*\}\}/g, name);
+    if (!opts.skipBrochureUrl) {
+      out = out.replace(/\{\{\s*brochure_url\s*\}\}/g, cfg.brochure_url || '');
+    }
+    return out
+      .replace(/\{\{\s*college\s*\}\}/g, college || 'your preferred college')
+      .replace(/\{\{\s*college_clause\s*\}\}/g, collegeClause)
+      .replace(/\{\{\s*course\s*\}\}/g, course)
+      .replace(/\{\{\s*branch\s*\}\}/g, branch || '')
+      .replace(/\{\{\s*branch_clause\s*\}\}/g, branchClause)
+      .replace(/\{\{\s*location\s*\}\}/g, location || '')
+      .replace(/\{\{\s*city\s*\}\}/g, city || '')
+      .replace(/\{\{\s*city_clause\s*\}\}/g, cityClause)
+      .replace(/\{\{\s*phone\s*\}\}/g, phone)
+      .replace(/\{\{\s*email\s*\}\}/g, email)
+      .replace(/\{\{\s*next_call_time\s*\}\}/g, nextCall || 'soon')
+      .replace(/\{\{\s*next_call_clause\s*\}\}/g, nextCallClause)
+      .replace(/\{\{\s*agent_name\s*\}\}/g, agentName);
+  };
 
   const send = async () => {
     save();
@@ -804,7 +919,10 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
     setSendResult(null);
     setSendError('');
     try {
-      const body = renderTemplate(cfg.message_template);
+      // liveMessage has all lead-specific placeholders already baked in (it's
+      // what the user sees in the textarea). Final pass only resolves
+      // {{brochure_url}} which is tied live to the URL input above.
+      const body = renderTemplate(liveMessage);
       if (cfg.channel === 'email') {
         if (!lead.email) throw new Error('Lead has no email address');
         const { data } = await api.post('/communications/email/brochure', {
@@ -924,15 +1042,17 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1.5">Message template</label>
           <textarea
-            value={cfg.message_template}
-            onChange={(e) => setCfg({ ...cfg, message_template: e.target.value })}
+            value={liveMessage}
+            onChange={(e) => { setLiveMessage(e.target.value); setLiveMessageDirty(true); }}
             rows={5}
             className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 font-mono focus:outline-none focus:ring-2 focus:ring-primary-100"
-            placeholder="Use {{name}} and {{brochure_url}} placeholders"
+            placeholder="Loading message…"
           />
           <p className="text-[11px] text-gray-400 mt-1 inline-flex items-center gap-1">
             <FileText className="h-3 w-3" />
-            Placeholders <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700">{'{{name}}'}</code> and <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700">{'{{brochure_url}}'}</code> are auto-filled per lead.
+            {ctxLoading
+              ? <>Loading <strong>{lead.name}</strong>'s details…</>
+              : <>Personalised for <strong>{ctx?.name || lead.name}</strong>. <code className="px-1 py-0.5 rounded bg-gray-100 text-gray-700">{'{{brochure_url}}'}</code> auto-fills from the URL above on send.</>}
           </p>
         </div>
 

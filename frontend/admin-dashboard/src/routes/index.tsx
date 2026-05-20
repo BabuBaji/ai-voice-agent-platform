@@ -37,6 +37,9 @@ import { CampaignsPage } from '@/pages/campaigns/CampaignsPage';
 import { CampaignDetailPage } from '@/pages/campaigns/CampaignDetailPage';
 import { CampaignWizardPage } from '@/pages/campaigns/CampaignWizardPage';
 
+// Communications
+import { CommunicationsPage } from '@/pages/communications/CommunicationsPage';
+
 // CRM
 import { LeadsPage } from '@/pages/crm/LeadsPage';
 import { ContactsPage } from '@/pages/crm/ContactsPage';
@@ -70,6 +73,7 @@ import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { PhoneNumbersPage } from '@/pages/settings/PhoneNumbersPage';
 import { IntegrationsPage } from '@/pages/settings/IntegrationsPage';
 import { WhatsAppIntegrationPage } from '@/pages/settings/WhatsAppIntegrationPage';
+import { PlivoIntegrationPage } from '@/pages/settings/PlivoIntegrationPage';
 import { TeamPage } from '@/pages/settings/TeamPage';
 import { BillingPage } from '@/pages/settings/BillingPage';
 import { PricingPage } from '@/pages/settings/PricingPage';
@@ -198,6 +202,7 @@ export const routes: RouteObject[] = [
       { path: '/crm/contacts', element: <ContactsPage /> },
       { path: '/crm/pipeline', element: <PipelinePage /> },
       { path: '/crm/recalls', element: <RecallsPage /> },
+      { path: '/communications', element: <CommunicationsPage /> },
       { path: '/knowledge', element: <KnowledgeBasePage /> },
       { path: '/voice-cloning', element: <VoiceCloningPage /> },
       { path: '/chatbots', element: <ChatbotsListPage /> },
@@ -211,6 +216,7 @@ export const routes: RouteObject[] = [
       { path: '/settings/phone-numbers', element: <PhoneNumbersPage /> },
       { path: '/settings/integrations', element: <IntegrationsPage /> },
       { path: '/settings/whatsapp', element: <WhatsAppIntegrationPage /> },
+      { path: '/settings/plivo', element: <PlivoIntegrationPage /> },
       { path: '/settings/team', element: <TeamPage /> },
       { path: '/settings/billing', element: <BillingPage /> },
       { path: '/settings/pricing', element: <PricingPage /> },

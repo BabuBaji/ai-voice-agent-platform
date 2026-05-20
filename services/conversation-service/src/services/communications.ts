@@ -2,6 +2,21 @@ import { pool } from '../index';
 import pino from 'pino';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { loadTenantWhatsAppConfig } from './tenantWhatsappConfig';
+import { loadTenantPlivoConfig } from './tenantPlivoConfig';
+import { TenantPlivoMessageProvider } from './plivoTenantProvider';
+import type {
+  CommunicationProvider as CommunicationProviderT,
+  EmailSendOptions as EmailSendOptionsT,
+  WhatsAppSendOptions as WhatsAppSendOptionsT,
+  SmsSendOptions as SmsSendOptionsT,
+} from './communications.types';
+
+// Re-export the canonical types so downstream callers can pick them up from
+// this module (back-compat) OR from communications.types.ts (provider files).
+export type EmailSendOptions = EmailSendOptionsT;
+export type WhatsAppSendOptions = WhatsAppSendOptionsT;
+export type SmsSendOptions = SmsSendOptionsT;
+export type CommunicationProvider = CommunicationProviderT;
 
 const logger = pino({ name: 'communications' });
 
@@ -19,41 +34,10 @@ const logger = pino({ name: 'communications' });
  * (e.g. `smtpEmailProvider.ts`, `whatsappCloudProvider.ts`) and call its
  * methods from this module's `sendEmail`/`sendWhatsApp` entry points.
  */
-export interface EmailSendOptions {
-  tenant_id: string;
-  lead_id?: string | null;
-  conversation_id?: string | null;
-  recipient: string;
-  subject: string;
-  body: string;
-  attachments?: Array<{ name: string; url: string }>;
-  template_id?: string | null;
-}
-
-export interface WhatsAppSendOptions {
-  tenant_id: string;
-  lead_id?: string | null;
-  conversation_id?: string | null;
-  recipient: string;            // E.164 phone with + prefix
-  message: string;
-  template_id?: string | null;
-  attachments?: Array<{ name: string; url: string }>;
-  /** Optional sender override (E.164). When set, providers use this as
-   *  the From identity instead of the static env-configured number. The
-   *  brochure-send flow injects the agent number that called this lead. */
-  from_number?: string | null;
-}
-
-export interface SmsSendOptions {
-  tenant_id: string;
-  lead_id?: string | null;
-  conversation_id?: string | null;
-  recipient: string;            // E.164 phone with + prefix
-  message: string;
-  template_id?: string | null;
-  /** Optional sender override (E.164). See WhatsAppSendOptions.from_number. */
-  from_number?: string | null;
-}
+// EmailSendOptions / WhatsAppSendOptions / SmsSendOptions are defined in
+// ./communications.types.ts and re-exported above. Importing here would
+// create a circular reference because plivoTenantProvider.ts imports the
+// types file directly.
 
 /**
  * Look up the agent's caller-ID for this recipient. For outbound calls,
@@ -85,12 +69,8 @@ export async function getAgentNumberForRecipient(
   }
 }
 
-export interface CommunicationProvider {
-  name: string;
-  sendEmail(opts: EmailSendOptions): Promise<{ ok: boolean; provider_response?: any; error?: string }>;
-  sendWhatsApp(opts: WhatsAppSendOptions): Promise<{ ok: boolean; provider_response?: any; error?: string }>;
-  sendSms?(opts: SmsSendOptions): Promise<{ ok: boolean; provider_response?: any; error?: string }>;
-}
+// CommunicationProvider interface lives in ./communications.types.ts and is
+// re-exported at the top of this file.
 
 /**
  * StubProvider — logs the attempted send to `communication_logs` and
@@ -426,6 +406,33 @@ function pickSmsProvider(_fromNumber?: string | null, _toNumber?: string | null)
   return new StubProvider();
 }
 
+/**
+ * Per-tenant SMS resolver. Mirrors pickWhatsAppProviderForTenant: when the
+ * tenant has Plivo configured (sms_enabled=true, readable token), route their
+ * SMS through a TenantPlivoMessageProvider so the sender ID + DLT compliance
+ * comes from THEIR account. Otherwise fall through to the env-default
+ * pickSmsProvider() (Twilio/Plivo platform creds, today's behavior).
+ *
+ * Returns the picked provider PLUS an optional sender override taken from
+ * the tenant's configured sms_sender_id so the SMS caller-ID matches what
+ * they registered with the carrier (important for DLT-registered headers).
+ */
+async function pickSmsProviderForTenant(tenantId: string): Promise<{
+  provider: CommunicationProvider;
+  fromOverride: string | null;
+  source: 'tenant_plivo' | 'env_default';
+}> {
+  const plivoCfg = await loadTenantPlivoConfig(tenantId);
+  if (plivoCfg && plivoCfg.status === 'active' && plivoCfg.sms_enabled && plivoCfg.auth_token) {
+    return {
+      provider: new TenantPlivoMessageProvider(plivoCfg),
+      fromOverride: plivoCfg.sms_sender_id,
+      source: 'tenant_plivo',
+    };
+  }
+  return { provider: pickSmsProvider(), fromOverride: null, source: 'env_default' };
+}
+
 /** WhatsApp always routes through Twilio today (Plivo has no WhatsApp API on this account). */
 const whatsappProvider: CommunicationProvider = twilioProvider || new StubProvider();
 
@@ -479,13 +486,14 @@ export async function sendEmail(opts: EmailSendOptions): Promise<{ ok: boolean; 
 
 /**
  * Resolve which WhatsApp provider handles this tenant's send. The order is:
- *  1) tenant_whatsapp_integrations row with provider=twilio + valid creds
+ *  1) tenant_plivo_integrations row with whatsapp_enabled=true + readable token
+ *     → instantiate TenantPlivoMessageProvider bound to those creds (preferred
+ *     when tenant has configured Plivo, since one Plivo account covers SMS too)
+ *  2) tenant_whatsapp_integrations row with provider=twilio + valid creds
  *     → instantiate a one-off TwilioMessageProvider bound to those creds
- *  2) tenant_whatsapp_integrations row with another provider (meta/gupshup/wati/interakt)
- *     → return a Stub adapter that errors with TODO_NOT_IMPLEMENTED so the
- *     UI shows the right "provider adapter not built yet" message instead
- *     of silently picking the wrong Twilio account
- *  3) no tenant config → fall back to the global env-configured Twilio (current
+ *  3) tenant_whatsapp_integrations row with another provider (meta/gupshup/wati/interakt)
+ *     → return a Stub adapter that errors with TODO_NOT_IMPLEMENTED
+ *  4) no tenant config → fall back to the global env-configured Twilio (current
  *     behavior, preserves backwards compat)
  *
  * NOTE — credentials are NEVER logged. The instantiated provider holds them
@@ -496,8 +504,22 @@ async function pickWhatsAppProviderForTenant(tenantId: string): Promise<{
   modeOverride?: 'sandbox' | 'production';
   whatsAppFromOverride?: string | null;
   templateOverride?: string | null;
-  source: 'tenant_twilio' | 'tenant_other' | 'env_default';
+  source: 'tenant_plivo' | 'tenant_twilio' | 'tenant_other' | 'env_default';
 }> {
+  // Plivo takes priority — when a tenant has configured Plivo with WhatsApp
+  // enabled and a sender, route through it. Twilio remains the fallback for
+  // tenants on the legacy integration, AND for tenants who have Plivo but
+  // explicitly disabled WhatsApp.
+  const plivoCfg = await loadTenantPlivoConfig(tenantId);
+  if (plivoCfg && plivoCfg.status === 'active' && plivoCfg.whatsapp_enabled && plivoCfg.auth_token) {
+    return {
+      provider: new TenantPlivoMessageProvider(plivoCfg),
+      whatsAppFromOverride: plivoCfg.whatsapp_sender,
+      templateOverride: plivoCfg.dlt_template_config?.default_template_id || null,
+      source: 'tenant_plivo',
+    };
+  }
+
   const cfg = await loadTenantWhatsAppConfig(tenantId);
   if (!cfg || cfg.status === 'disabled') {
     return { provider: whatsappProvider, source: 'env_default' };
@@ -619,17 +641,26 @@ async function sendWhatsAppWithProvider(
 
 /** Same shape as sendWhatsApp but for SMS. */
 export async function sendSms(opts: SmsSendOptions): Promise<{ ok: boolean; log_id: string | null; error?: string }> {
-  // If no explicit agent-number override, look up the number that called this
-  // recipient most recently so the SMS shows the same caller-ID as the call.
-  let from = opts.from_number || null;
+  // Per-tenant SMS resolution. When the tenant has Plivo configured the
+  // returned provider is THEIR TenantPlivoMessageProvider (own auth + DLT
+  // entity); otherwise pickSmsProviderForTenant falls through to the env-
+  // configured platform provider (Twilio/Plivo) so legacy tenants are intact.
+  const picked = await pickSmsProviderForTenant(opts.tenant_id);
+  const provider = picked.provider;
+
+  // Sender resolution order:
+  //   1) explicit opts.from_number (caller's choice — campaign-set override)
+  //   2) tenant-configured sms_sender_id (DLT-registered header, etc.)
+  //   3) most-recent agent caller-ID for this recipient (continuity with the
+  //      voice call so the SMS lands from the same identity)
+  //   4) provider-level env default (Twilio/Plivo platform numbers)
+  let from = opts.from_number || picked.fromOverride || null;
   if (!from) from = await getAgentNumberForRecipient(opts.tenant_id, opts.recipient);
-  const provider = pickSmsProvider(from, opts.recipient);
-  // Default the sender to the provider's configured number when no per-call
-  // override was found, so the recipient sees a stable identity.
-  if (!from && provider.name === 'plivo') from = process.env.PLIVO_PHONE_NUMBER || null;
+  if (!from && provider.name === 'plivo' && picked.source === 'env_default') from = process.env.PLIVO_PHONE_NUMBER || null;
   if (!from && provider.name === 'twilio') from = process.env.TWILIO_PHONE_NUMBER || null;
-  // For Twilio, ignore Indian agent caller-IDs (e.g. Plivo's +91 voice number)
-  // because Twilio won't recognise them as a Twilio-owned sender and rejects.
+  // For platform Twilio, ignore Indian agent caller-IDs (e.g. Plivo's +91 voice
+  // number) because Twilio won't recognise them as a Twilio-owned sender.
+  // Tenant Plivo sends are fine — they own their +91 sender.
   if (provider.name === 'twilio' && from && from.replace(/\D/g, '').startsWith('91')) {
     from = process.env.TWILIO_PHONE_NUMBER || from;
   }
