@@ -756,9 +756,27 @@ interface BrochureConfig {
   brochure_url: string;
   message_template: string;
   subject: string;
+  /** When channel='whatsapp', the operator picks one of the tenant's
+   *  synced Meta templates. Free-text sends are only allowed in the 24h
+   *  window after the recipient has messaged us; otherwise the empty
+   *  value here means "no template" → Meta returns RE_ENGAGEMENT_WINDOW_CLOSED. */
+  whatsapp_template_id?: string;
 }
 
-const BROCHURE_CONFIG_KEY = 'crm.brochure.config';
+/** One row from /whatsapp/templates. We only need the fields shown in the
+ *  picker dropdown + the variable_mapping (for the optional preview). */
+interface WaTemplateOption {
+  id: string;
+  name: string;
+  language: string;
+  status: string;
+  variable_count: number;
+}
+
+// Bump the version suffix when changing defaultBrochureConfig() — old
+// browser-saved configs under the previous key get ignored, so all users
+// pick up the new default without manually clicking Reset.
+const BROCHURE_CONFIG_KEY = 'crm.brochure.config.v2';
 
 function loadBrochureConfig(): BrochureConfig {
   try {
@@ -779,10 +797,10 @@ function defaultBrochureConfig(): BrochureConfig {
     // vanishes — so a sparse lead doesn't produce orphan commas or "at ."
     message_template:
       "Hi {{name}},\n\n" +
-      "Thanks for your interest in {{course}}{{branch_clause}}{{college_clause}}. " +
-      "Please find the brochure attached: {{brochure_url}}.\n\n" +
-      "{{next_call_clause}}" +
-      "Feel free to reply with any questions.\n\n" +
+      "Thanks for your interest in B.Tech admissions{{college_clause}}.\n" +
+      "Here's the official brochure: {{brochure_url}}\n\n" +
+      "Our counselor will reach out tomorrow to walk you through the admission process. " +
+      "Reply here if you have any quick questions.\n\n" +
       "Best regards",
   };
 }
@@ -821,6 +839,15 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
   // `liveMessage` once ctx arrives. User edits go straight into liveMessage.
   const [liveMessage, setLiveMessage] = useState<string>('');
   const [liveMessageDirty, setLiveMessageDirty] = useState(false);
+  // WhatsApp template catalogue for the picker. Loaded lazily — only when
+  // channel === 'whatsapp' to avoid an unnecessary fetch on the email path.
+  const [waTemplates, setWaTemplates] = useState<WaTemplateOption[]>([]);
+  useEffect(() => {
+    if (cfg.channel !== 'whatsapp') return;
+    api.get<{ templates: WaTemplateOption[] }>('/whatsapp/templates')
+      .then((r) => setWaTemplates(r.data.templates || []))
+      .catch(() => setWaTemplates([]));
+  }, [cfg.channel]);
 
   // Fetch the merged lead context (CRM custom_fields + recall queue + agent)
   // on open so the message template has real values to interpolate.
@@ -936,21 +963,37 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
         if (!data?.ok) setSendError('Email provider rejected the send. Check SMTP credentials.');
       } else if (cfg.channel === 'whatsapp') {
         if (!lead.phone) throw new Error('Lead has no phone number');
+        // When the user picked a template, also pass the resolution context
+        // so the server can fill {{1}}, {{2}}, ... per the template's
+        // variable_mapping. Lead context mirrors the dotted paths the
+        // resolveTemplateVariables helper understands (lead.name, brochure_url).
+        const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
         const { data } = await api.post('/communications/whatsapp/send', {
           lead_id: lead.id,
           recipient: lead.phone,
           message: body,
+          template_id: cfg.whatsapp_template_id || undefined,
+          context: cfg.whatsapp_template_id ? {
+            lead: { name: leadName, first_name: lead.first_name, email: lead.email, phone: lead.phone },
+            brochure_url: cfg.brochure_url || '',
+          } : undefined,
           attachments: cfg.brochure_url ? [{ name: 'Brochure', url: cfg.brochure_url }] : [],
         });
         setSendResult(data?.ok ? 'success' : 'error');
         if (!data?.ok) {
           const raw = String(data?.error || '');
-          if (/channel.*from address/i.test(raw)) {
-            setSendError(`Twilio WhatsApp sandbox isn't enabled on this account. Open Twilio Console → Messaging → Try it out → Send a WhatsApp message, click "Confirm" to activate the sandbox, then have the recipient send the 2-word "join …" code to +1 415 523 8886 from their WhatsApp. Raw: ${raw}`);
-          } else if (/63007|24h|session|opt[- ]?in/i.test(raw)) {
-            setSendError(`Recipient hasn't sent the Twilio sandbox join code yet (or 24h session expired). Ask them to WhatsApp the "join …" code to +1 415 523 8886. Raw: ${raw}`);
+          if (/131030|not in allowed list|allowed recipients/i.test(raw)) {
+            setSendError(`Meta test number can only message allow-listed recipients. Go to Meta Business → WhatsApp Manager → API Setup → "To" → Manage phone number list → add this recipient (max 5 on test numbers). Raw: ${raw}`);
+          } else if (/131047|RE_ENGAGEMENT|24h.*window|template_required/i.test(raw)) {
+            setSendError(`Outside 24h session window. First-contact messages must use an approved Meta template (set META_WA_TEMPLATE_NAME). Raw: ${raw}`);
+          } else if (/AUTH_FAILED|190|token.*expired/i.test(raw)) {
+            setSendError(`Meta access token invalid or expired. Generate a System User token (Meta Business Settings → System Users) and update META_WA_ACCESS_TOKEN. Raw: ${raw}`);
+          } else if (/channel.*from address/i.test(raw)) {
+            setSendError(`Twilio WhatsApp sandbox isn't enabled. Open Twilio Console → Messaging → Try it out → Send a WhatsApp message, click "Confirm", then have the recipient send the 2-word "join …" code to +1 415 523 8886. Raw: ${raw}`);
+          } else if (/63007|sandbox.*not.*joined/i.test(raw)) {
+            setSendError(`Recipient hasn't joined the Twilio sandbox. Ask them to WhatsApp the "join …" code to +1 415 523 8886. Raw: ${raw}`);
           } else {
-            setSendError(`WhatsApp send rejected by Twilio: ${raw || 'unknown error'}`);
+            setSendError(`WhatsApp send rejected: ${raw || 'unknown error'}`);
           }
         }
       } else {
@@ -1029,6 +1072,39 @@ function BrochureSettingsModal({ lead, onClose }: { lead: Lead; onClose: () => v
           onChange={(e) => setCfg({ ...cfg, brochure_url: e.target.value })}
           placeholder="https://example.com/brochure.pdf"
         />
+
+        {cfg.channel === 'whatsapp' && (
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1.5">
+              WhatsApp template <span className="text-gray-400">(required for first contact)</span>
+            </label>
+            <select
+              value={cfg.whatsapp_template_id || ''}
+              onChange={(e) => setCfg({ ...cfg, whatsapp_template_id: e.target.value || undefined })}
+              className="w-full border rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">— free text (24h window only) —</option>
+              {waTemplates.map((t) => (
+                <option
+                  key={t.id}
+                  value={t.name}
+                  disabled={t.status === 'REJECTED' || t.status === 'DISABLED'}
+                >
+                  {t.name} · {t.language} · {t.status}
+                  {t.variable_count > 0 ? ` · ${t.variable_count} vars` : ''}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-gray-500 mt-1">
+              For first-contact or outside-24h sends Meta requires an approved template.
+              The lead's name and brochure URL are passed automatically; the template's
+              variable_mapping decides which slot they fill.
+              {waTemplates.length === 0 && (
+                <> No templates synced yet — open <strong>WA Templates</strong> in the sidebar and click <em>Sync from Meta</em>.</>
+              )}
+            </p>
+          </div>
+        )}
 
         {cfg.channel === 'email' && (
           <Input

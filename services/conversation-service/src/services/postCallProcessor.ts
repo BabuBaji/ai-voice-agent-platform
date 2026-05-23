@@ -1,5 +1,6 @@
 import { pool } from '../index';
 import { analyzeConversation, AnalysisResult } from './analyzer';
+import { triggerWorkflow, mapStatusToEvent } from './whatsappWorkflowEngine';
 import pino from 'pino';
 
 const logger = pino({ name: 'post-call-processor' });
@@ -109,11 +110,53 @@ export async function processCallEnd(
   // Schedule follow-up task(s) based on extended lead_status.
   await scheduleFollowUpTasks(conversationId, tenantId, analysis!, crmLeadId);
 
+  // Fire the WhatsApp workflow for the resolved lead_status. Best-effort —
+  // post-call success path does NOT depend on the WhatsApp send succeeding.
+  // Idempotency in the engine prevents re-firing when re-analysis runs.
+  void fireWorkflowFromAnalysis(conversationId, tenantId, analysis!, crmLeadId)
+    .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'post-call workflow trigger failed'));
+
   return {
     success: true,
     lead_status: analysis!.lead_status,
     lead_id: crmLeadId,
   };
+}
+
+async function fireWorkflowFromAnalysis(
+  conversationId: string, tenantId: string, analysis: AnalysisResult, leadId: string | null,
+): Promise<void> {
+  const event = mapStatusToEvent(analysis.lead_status);
+  if (!event) return;
+  // Look up the caller phone — it lives on conversations.caller_number.
+  // Without a phone the engine can't send, but we still trigger so the
+  // side-effects (counselor assignment, admin notify) can run.
+  const r = await pool.query(
+    `SELECT caller_number FROM conversations WHERE id = $1 AND tenant_id = $2`,
+    [conversationId, tenantId],
+  );
+  const phone: string | null = r.rows[0]?.caller_number || null;
+  // Compose template context from the analyzer output. The variable
+  // resolver reads dotted paths like lead.name, brochure_url.
+  const context: Record<string, any> = {
+    lead: {
+      name: (analysis as any)?.key_entities?.full_name
+        || (analysis as any)?.full_name
+        || '',
+      phone,
+      email: (analysis as any)?.key_entities?.email || null,
+    },
+    conversation: { id: conversationId, summary: (analysis as any)?.short_summary || '' },
+    brochure_url: process.env.BROCHURE_DEFAULT_URL || (analysis as any)?.brochure_url || '',
+    callback_at: (analysis as any)?.callback_at || '',
+  };
+  await triggerWorkflow({
+    tenant_id: tenantId,
+    workflow_event: event,
+    lead_id: leadId || undefined,
+    phone: phone || undefined,
+    context,
+  });
 }
 
 /**

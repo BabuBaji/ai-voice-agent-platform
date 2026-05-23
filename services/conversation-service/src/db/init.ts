@@ -170,6 +170,165 @@ export async function initDatabase(pool: Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_comm_lead ON communication_logs (lead_id);
       CREATE INDEX IF NOT EXISTS idx_comm_channel_status ON communication_logs (channel, status);
 
+      -- Meta WhatsApp webhook support: provider_message_id is the Meta "wamid"
+      -- used to correlate delivery/read/failed status callbacks back to the
+      -- row we inserted at send time. failed_at + replied_at extend the
+      -- lifecycle past the original sent/delivered/read terminal states.
+      -- status now also accepts 'replied' when an inbound message arrives
+      -- with context.id pointing at one of our sent messages.
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS provider_message_id TEXT;
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS replied_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_comm_provider_msg_id ON communication_logs (provider_message_id) WHERE provider_message_id IS NOT NULL;
+
+      -- Retry queue columns. retry_attempts counts how many times we've
+      -- re-fired this exact log row; next_retry_at is when the sweeper
+      -- should pick it up next. template_language + template_params are
+      -- stored on the row so the sweeper can faithfully re-construct the
+      -- original send without consulting the campaign/workflow that
+      -- originally triggered it.
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS retry_attempts INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS template_language VARCHAR(20);
+      ALTER TABLE communication_logs ADD COLUMN IF NOT EXISTS template_params JSONB;
+      CREATE INDEX IF NOT EXISTS idx_comm_retry_due ON communication_logs (next_retry_at)
+        WHERE status = 'failed' AND next_retry_at IS NOT NULL;
+
+      -- whatsapp_templates: tenant-scoped catalogue of Meta-approved templates.
+      -- Synced from Meta Graph API (GET /{WABA_ID}/message_templates) and
+      -- additionally manageable locally for variable-to-CRM-field mapping
+      -- (e.g. {{1}} → lead.name). One row per (tenant, name, language) tuple
+      -- since Meta scopes templates by name+lang within a WABA.
+      CREATE TABLE IF NOT EXISTS whatsapp_templates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        name VARCHAR(120) NOT NULL,            -- e.g. 'hello_world', 'brochure_v1'
+        language VARCHAR(20) NOT NULL DEFAULT 'en_US',
+        category VARCHAR(40),                  -- 'MARKETING' | 'UTILITY' | 'AUTHENTICATION'
+        status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                                                -- Meta states: APPROVED | PENDING | REJECTED | PAUSED | DISABLED
+        meta_template_id VARCHAR(120),         -- Meta's internal template id (when synced)
+        header_format VARCHAR(20),             -- 'TEXT' | 'IMAGE' | 'DOCUMENT' | 'VIDEO' | null
+        header_text TEXT,                      -- when header_format = 'TEXT'
+        body_text TEXT,                        -- the body component text (may contain {{1}} {{2}} ...)
+        footer_text TEXT,
+        buttons JSONB,                         -- [{type, text, url?}] from BUTTONS component
+        variable_count INTEGER DEFAULT 0,      -- number of {{N}} placeholders in body
+        variable_mapping JSONB DEFAULT '{}',   -- {"1":"lead.name","2":"brochure_url",...}
+        rejection_reason TEXT,
+        last_synced_at TIMESTAMPTZ,
+        raw_components JSONB,                  -- full components array from Meta (audit/debug)
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (tenant_id, name, language)
+      );
+      CREATE INDEX IF NOT EXISTS idx_wa_templates_tenant ON whatsapp_templates (tenant_id, status);
+      CREATE INDEX IF NOT EXISTS idx_wa_templates_name ON whatsapp_templates (tenant_id, name);
+
+      -- whatsapp_campaigns: bulk send to many recipients using one template.
+      -- Decoupled from telephony campaign_targets because the mechanics differ
+      -- (template-driven send, webhook-driven status, no call-window logic,
+      -- different rate-limit shape — Meta enforces tier-based per-second caps).
+      CREATE TABLE IF NOT EXISTS whatsapp_campaigns (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        name VARCHAR(180) NOT NULL,
+        template_id UUID NOT NULL,
+        template_name VARCHAR(120) NOT NULL,
+        template_language VARCHAR(20) NOT NULL DEFAULT 'en_US',
+        status VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+                                                -- DRAFT | RUNNING | PAUSED | COMPLETED | CANCELLED
+        rate_limit_per_minute INTEGER NOT NULL DEFAULT 60,
+        total_recipients INTEGER DEFAULT 0,
+        scheduled_at TIMESTAMPTZ,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        created_by UUID,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_wa_campaigns_tenant ON whatsapp_campaigns (tenant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_wa_campaigns_runnable ON whatsapp_campaigns (status) WHERE status IN ('RUNNING','DRAFT');
+
+      -- whatsapp_campaign_targets: one row per recipient. Mirrors lifecycle
+      -- columns from communication_logs so we can answer "what's the state
+      -- of recipient X in campaign Y" without a JOIN; webhook updates
+      -- propagate from communication_logs into the matching row via
+      -- provider_message_id (set on first successful send).
+      CREATE TABLE IF NOT EXISTS whatsapp_campaign_targets (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        campaign_id UUID NOT NULL REFERENCES whatsapp_campaigns(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL,
+        lead_id UUID,
+        recipient VARCHAR(32) NOT NULL,
+        variable_context JSONB DEFAULT '{}',
+        status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                                                -- queued | sent | delivered | read | failed | replied
+        communication_log_id UUID,
+        provider_message_id TEXT,
+        attempt_count INTEGER DEFAULT 0,
+        last_error TEXT,
+        sent_at TIMESTAMPTZ,
+        delivered_at TIMESTAMPTZ,
+        read_at TIMESTAMPTZ,
+        failed_at TIMESTAMPTZ,
+        replied_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_wa_targets_campaign ON whatsapp_campaign_targets (campaign_id, status);
+      CREATE INDEX IF NOT EXISTS idx_wa_targets_queued ON whatsapp_campaign_targets (campaign_id, status, attempt_count) WHERE status = 'queued';
+      CREATE INDEX IF NOT EXISTS idx_wa_targets_wamid ON whatsapp_campaign_targets (provider_message_id) WHERE provider_message_id IS NOT NULL;
+
+      -- tenant_lead_workflows: per-tenant mapping of a "workflow event"
+      -- (lead_created, interested, no_answer, callback_requested,
+      --  admission_confirmed, payment_pending — extensible) to the WhatsApp
+      -- template that should fire, plus side-effects (assign counselor /
+      -- notify admin). Default rows are seeded by ensureDefaultWorkflows()
+      -- the first time a tenant fires any workflow event.
+      CREATE TABLE IF NOT EXISTS tenant_lead_workflows (
+        tenant_id UUID NOT NULL,
+        workflow_event VARCHAR(60) NOT NULL,
+                                         -- e.g. 'lead_created', 'interested',
+                                         -- 'no_answer', 'callback_requested',
+                                         -- 'admission_confirmed', 'payment_pending'
+        template_name VARCHAR(120),      -- nullable: tenant can disable just-the-template send
+                                         -- while keeping side-effects on
+        template_language VARCHAR(20) NOT NULL DEFAULT 'en_US',
+        also_assign_counselor BOOLEAN NOT NULL DEFAULT FALSE,
+        also_notify_admin BOOLEAN NOT NULL DEFAULT FALSE,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (tenant_id, workflow_event)
+      );
+
+      -- workflow_runs: audit + idempotency. The workflow engine writes one
+      -- row per (lead_id, workflow_event, day) so re-processing the same
+      -- post-call analyzer output doesn't re-send the same WhatsApp twice
+      -- (Meta charges per template send + the recipient gets annoyed).
+      -- ON CONFLICT DO NOTHING in the engine enforces idempotency.
+      CREATE TABLE IF NOT EXISTS workflow_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL,
+        lead_id UUID,
+        workflow_event VARCHAR(60) NOT NULL,
+        idempotency_key VARCHAR(200) NOT NULL,
+                                         -- typically "{lead_id}:{workflow_event}:{YYYY-MM-DD}"
+                                         -- or for one-shot events (admission_confirmed) just "{lead_id}:{event}"
+        template_name VARCHAR(120),
+        communication_log_id UUID,       -- link to the WhatsApp send (nullable if no template)
+        counselor_assigned UUID,
+        admin_notified BOOLEAN DEFAULT FALSE,
+        status VARCHAR(20) NOT NULL DEFAULT 'completed',
+                                         -- 'completed' | 'skipped' | 'partial' | 'failed'
+        skip_reason TEXT,
+        last_error TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (tenant_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_tenant ON workflow_runs (tenant_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_lead ON workflow_runs (lead_id, workflow_event);
+
       -- counselors: lookup for assignment rules. Simple v1 — round-robin
       -- across rows where availability_status='available'. Future: weighted
       -- by language match / college match / current task count.

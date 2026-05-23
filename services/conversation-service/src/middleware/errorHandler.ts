@@ -6,7 +6,12 @@ const logger = pino({
 });
 
 export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction): void {
-  logger.error({ err: err.message, stack: err.stack }, 'Unhandled error');
+  const cause = (err as any).cause;
+  logger.error({
+    err: err.message,
+    stack: err.stack,
+    cause: cause ? { message: cause.message, code: cause.code, errno: cause.errno } : undefined,
+  }, 'Unhandled error');
   res.status(500).json({
     error: 'Internal Server Error',
     message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred',

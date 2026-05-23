@@ -184,6 +184,22 @@ proxyRouter.all('/api/v1/analytics', authMiddleware, forwardRequest(config.servi
 // --- Notification service ---
 proxyRouter.all('/api/v1/notifications/*', authMiddleware, forwardRequest(config.services.notification, keepPath));
 proxyRouter.all('/api/v1/notifications', authMiddleware, forwardRequest(config.services.notification, keepPath));
+// The WhatsApp module sub-routes (templates, campaigns, workflows, retry
+// queue, analytics) live on conversation-service. Notification-service still
+// owns /api/v1/whatsapp/phone/* (Baileys) and /api/v1/whatsapp/cloud/*
+// (legacy cred storage). Order matters — specific paths must come before
+// the catch-all below.
+proxyRouter.all('/api/v1/whatsapp/templates', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/templates/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/campaigns', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/campaigns/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/workflows', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/workflows/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/retry-queue', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/retry-queue/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/analytics', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/whatsapp/analytics/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Notification-service catch-all for /whatsapp/phone and /whatsapp/cloud.
 proxyRouter.all('/api/v1/whatsapp/*', authMiddleware, forwardRequest(config.services.notification, keepPath));
 proxyRouter.all('/api/v1/whatsapp', authMiddleware, forwardRequest(config.services.notification, keepPath));
 

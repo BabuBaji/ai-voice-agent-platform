@@ -339,6 +339,181 @@ class PlivoMessageProvider implements CommunicationProvider {
   }
 }
 
+/**
+ * MetaCloudWhatsAppProvider — sends WhatsApp via Meta's WhatsApp Cloud API
+ * directly (no BSP middleman). Required env:
+ *   META_WA_ACCESS_TOKEN     — long-lived System User token from Meta Business
+ *   META_WA_PHONE_NUMBER_ID  — 15-digit phone number ID from WhatsApp Manager
+ *   META_WA_TEMPLATE_NAME    — (optional) default template name; required for
+ *                              first-message / outside-24h sends
+ *   META_WA_TEMPLATE_LANG    — (optional) BCP-47 lang code, default 'en_US'
+ *   META_WA_GRAPH_VERSION    — (optional) Graph API version, default 'v22.0'
+ *
+ * Unlike Twilio sandbox, Meta Cloud API delivers to any phone number once
+ * your WABA is approved — no recipient-side opt-in dance.
+ */
+class MetaCloudWhatsAppProvider implements CommunicationProvider {
+  name = 'meta_cloud';
+  constructor(
+    private accessToken: string,
+    private phoneNumberId: string,
+    private graphVersion: string,
+  ) {}
+
+  async sendEmail(_opts: EmailSendOptions) {
+    return { ok: false, error: 'email_not_supported_by_meta_cloud' };
+  }
+
+  async sendWhatsApp(opts: WhatsAppSendOptions) {
+    const url = `https://graph.facebook.com/${this.graphVersion}/${this.phoneNumberId}/messages`;
+    const to = opts.recipient.replace(/^\+/, '').replace(/\D/g, '');
+    // Template selection: explicit only. The env-default fallback
+    // (process.env.META_WA_TEMPLATE_NAME) was removed because it
+    // silently overrode "free text" sends — the LeadsPage user would
+    // pick "free text", we'd discard their typed message, and Meta would
+    // deliver the env-default template's hardcoded body instead. Callers
+    // who want a template send must pass opts.template_id explicitly
+    // (LeadsPage picker, workflow engine, campaign worker all do this).
+    const templateName = opts.template_id || '';
+    const templateLang = opts.template_language || process.env.META_WA_TEMPLATE_LANG || 'en_US';
+    const useTemplate = !!templateName;
+
+    let payload: Record<string, any>;
+    if (useTemplate) {
+      // Template send — required for first business-initiated message OR
+      // outside the 24h customer-service window. Parameters are positional
+      // and must EXACTLY match the template's variable_count on Meta's side
+      // or Meta returns 132000 TEMPLATE_PARAM_MISMATCH.
+      //
+      // The legacy greeting/URL heuristic that used to live here was removed
+      // (caused 132000 against env-default templates with 0 vars). Callers
+      // must now pass opts.template_params explicitly — empty array is fine
+      // for 0-var templates. The orchestrator validates count up-front via
+      // a local template lookup; by the time we reach this point the count
+      // is known to match (or this is an env-default send where no local
+      // template row exists, in which case the operator is responsible).
+      const params: Array<{ type: string; text: string }> = [];
+      if (Array.isArray(opts.template_params)) {
+        for (const p of opts.template_params) params.push({ type: 'text', text: String(p ?? '') });
+      }
+      payload = {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: templateLang },
+          components: params.length ? [{ type: 'body', parameters: params }] : undefined,
+        },
+      };
+    } else {
+      // Free-form session message — only delivers if the recipient has
+      // messaged the business within the past 24h. Attach the first media
+      // URL as a document/image when its extension is recognised.
+      const firstUrl = opts.attachments?.[0]?.url || '';
+      const isPdf = /\.pdf(\?|$)/i.test(firstUrl);
+      const isImage = /\.(jpe?g|png|gif|webp)(\?|$)/i.test(firstUrl);
+      const isVideo = /\.(mp4|3gp)(\?|$)/i.test(firstUrl);
+      const isAudio = /\.(mp3|ogg|amr|aac)(\?|$)/i.test(firstUrl);
+      if (firstUrl && isPdf) {
+        payload = {
+          messaging_product: 'whatsapp', to, type: 'document',
+          document: { link: firstUrl, filename: opts.attachments?.[0]?.name || 'document.pdf', caption: opts.message.slice(0, 1024) },
+        };
+      } else if (firstUrl && isImage) {
+        payload = { messaging_product: 'whatsapp', to, type: 'image',
+          image: { link: firstUrl, caption: opts.message.slice(0, 1024) } };
+      } else if (firstUrl && isVideo) {
+        payload = { messaging_product: 'whatsapp', to, type: 'video',
+          video: { link: firstUrl, caption: opts.message.slice(0, 1024) } };
+      } else if (firstUrl && isAudio) {
+        payload = { messaging_product: 'whatsapp', to, type: 'audio', audio: { link: firstUrl } };
+      } else {
+        // Attach any remaining URLs that aren't already mentioned in the
+        // message body — otherwise users see the same link twice (once
+        // from {{brochure_url}} substitution in the body, once from this
+        // append). Compare normalised URLs (strip trailing slash + query).
+        const normalise = (u: string) => u.replace(/[\/?#].*$/, '').toLowerCase();
+        const bodyLower = opts.message.toLowerCase();
+        const extras = (opts.attachments || []).filter((a) => {
+          if (!a.url) return false;
+          if (bodyLower.includes(a.url.toLowerCase())) return false;
+          if (bodyLower.includes(normalise(a.url))) return false;
+          return true;
+        });
+        const textWithAttachments = extras.length
+          ? `${opts.message}\n\n${extras.map(a => `${a.name}: ${a.url}`).join('\n')}`
+          : opts.message;
+        payload = {
+          messaging_product: 'whatsapp', to, type: 'text',
+          text: { body: textWithAttachments, preview_url: true },
+        };
+      }
+    }
+
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const json: any = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const mapped = mapMetaError(resp.status, json);
+        logger.warn({ to, status: resp.status, err: mapped, useTemplate }, 'Meta WhatsApp send failed');
+        return { ok: false, error: mapped, provider_response: json };
+      }
+      const messageId = json?.messages?.[0]?.id;
+      logger.info({ to, messageId, useTemplate }, 'WhatsApp sent via Meta Cloud');
+      return { ok: true, provider_response: { message_id: messageId, raw: json } };
+    } catch (err: any) {
+      const cause = err?.cause?.message || err?.cause?.code || err?.message || 'fetch_failed';
+      logger.warn({ to, err: cause }, 'Meta WhatsApp network error');
+      return { ok: false, error: `NETWORK_ERROR: ${cause}` };
+    }
+  }
+}
+
+/** Map common Meta Cloud error codes to actionable strings. Docs:
+ *  https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes */
+function mapMetaError(status: number, body: any): string {
+  const err = body?.error || {};
+  const code = err.code;
+  const subcode = err.error_subcode;
+  const msg = err.message || `Meta HTTP ${status}`;
+  if (status === 401 || code === 190) {
+    return 'AUTH_FAILED: META_WA_ACCESS_TOKEN invalid or expired. Regenerate the System User token in Meta Business Settings.';
+  }
+  if (code === 131047) {
+    return 'RE_ENGAGEMENT_WINDOW_CLOSED: Recipient has not messaged the business in the past 24h. Send an approved template instead (set META_WA_TEMPLATE_NAME).';
+  }
+  if (code === 131026) {
+    return `RECEIVER_NOT_ON_WHATSAPP: ${msg}. The number is not registered with WhatsApp.`;
+  }
+  if (code === 131051) {
+    return `UNSUPPORTED_MESSAGE_TYPE: ${msg}`;
+  }
+  if (code === 131056 || subcode === 2494070) {
+    return `PAIR_RATE_LIMIT: Too many messages from this business to this recipient. Wait before retrying.`;
+  }
+  if (code === 132000) {
+    return `TEMPLATE_PARAM_MISMATCH: Number of variables in template doesn't match what the API got. Verify META_WA_TEMPLATE_NAME parameter count.`;
+  }
+  if (code === 132001) {
+    return `TEMPLATE_NOT_FOUND: Template '${process.env.META_WA_TEMPLATE_NAME}' is not approved or doesn't exist on this WABA.`;
+  }
+  if (code === 132007) {
+    return `TEMPLATE_PAUSED_OR_DISABLED: ${msg}. Resubmit the template for Meta approval.`;
+  }
+  if (code === 100) {
+    return `BAD_PARAMETER: ${msg}. Common cause: wrong META_WA_PHONE_NUMBER_ID, or recipient phone is malformed.`;
+  }
+  return `${msg}${code ? ` (code: ${code}${subcode ? `/${subcode}` : ''})` : ''}`;
+}
+
 function buildEmailProvider(): CommunicationProvider {
   const host = process.env.SMTP_HOST;
   const user = process.env.SMTP_USER;
@@ -374,6 +549,18 @@ function buildTwilioProvider(): CommunicationProvider | null {
   return new TwilioMessageProvider(sid, tok, smsFrom, waFrom);
 }
 
+function buildMetaProvider(): CommunicationProvider | null {
+  const token = process.env.META_WA_ACCESS_TOKEN;
+  const phoneId = process.env.META_WA_PHONE_NUMBER_ID;
+  if (!token || !phoneId) {
+    logger.warn('META_WA_ACCESS_TOKEN/META_WA_PHONE_NUMBER_ID not set — Meta WhatsApp disabled');
+    return null;
+  }
+  const ver = process.env.META_WA_GRAPH_VERSION || 'v22.0';
+  logger.info({ phoneId, graphVersion: ver }, 'Meta Cloud WhatsApp provider initialized');
+  return new MetaCloudWhatsAppProvider(token, phoneId, ver);
+}
+
 function buildPlivoProvider(): CommunicationProvider | null {
   const id = process.env.PLIVO_AUTH_ID;
   const tok = process.env.PLIVO_AUTH_TOKEN;
@@ -389,6 +576,7 @@ function buildPlivoProvider(): CommunicationProvider | null {
 const emailProvider: CommunicationProvider = buildEmailProvider();
 const twilioProvider: CommunicationProvider | null = buildTwilioProvider();
 const plivoProvider: CommunicationProvider | null = buildPlivoProvider();
+const metaProvider: CommunicationProvider | null = buildMetaProvider();
 
 /**
  * Pick the SMS provider. Twilio is the default for everything because it
@@ -433,8 +621,21 @@ async function pickSmsProviderForTenant(tenantId: string): Promise<{
   return { provider: pickSmsProvider(), fromOverride: null, source: 'env_default' };
 }
 
-/** WhatsApp always routes through Twilio today (Plivo has no WhatsApp API on this account). */
-const whatsappProvider: CommunicationProvider = twilioProvider || new StubProvider();
+/**
+ * Env-default WhatsApp provider. Order:
+ *   1) WHATSAPP_PROVIDER env override (meta|twilio) if that provider is built
+ *   2) Meta Cloud API (when META_WA_* envs are set) — direct, no sandbox
+ *   3) Twilio (sandbox or production sender)
+ *   4) Stub (returns error)
+ * Tenant-configured providers (Plivo, Tenant Twilio) still take priority
+ * inside pickWhatsAppProviderForTenant — this constant is the fallback.
+ */
+const whatsappProvider: CommunicationProvider = (() => {
+  const pref = (process.env.WHATSAPP_PROVIDER || '').toLowerCase();
+  if (pref === 'meta' && metaProvider) return metaProvider;
+  if (pref === 'twilio' && twilioProvider) return twilioProvider;
+  return metaProvider || twilioProvider || new StubProvider();
+})();
 
 /**
  * Send a brochure / admission-details email. Records the attempt in
@@ -598,18 +799,59 @@ async function sendWhatsAppWithProvider(
   opts: WhatsAppSendOptions, effective: WhatsAppSendOptions, provider: CommunicationProvider,
 ): Promise<{ ok: boolean; log_id: string | null; error?: string }> {
 
+  // Pre-flight: validate template parameter count against the local
+  // whatsapp_templates row when one exists. This catches the most common
+  // cause of Meta 132000 errors (caller passed N params for a template
+  // that expects M) BEFORE we hit the Meta API. Saves API quota and
+  // gives the operator an actionable error.
+  //
+  // We skip validation when:
+  //   - No template_id (free-form send, no params to count)
+  //   - No local template row found (could be an env-default or an
+  //     unsynced template; trust the caller)
+  // Same explicit-only rule as the Meta provider — no env fallback.
+  const effectiveTemplateName = effective.template_id || opts.template_id;
+  if (effectiveTemplateName) {
+    try {
+      const lang = effective.template_language || opts.template_language
+        || process.env.META_WA_TEMPLATE_LANG || 'en_US';
+      const tplRow = await pool.query(
+        `SELECT variable_count FROM whatsapp_templates
+         WHERE tenant_id = $1 AND name = $2 AND language = $3 LIMIT 1`,
+        [opts.tenant_id, effectiveTemplateName, lang],
+      );
+      const expected: number | undefined = tplRow.rows[0]?.variable_count;
+      if (typeof expected === 'number') {
+        const got = Array.isArray(opts.template_params) ? opts.template_params.length : 0;
+        if (expected !== got) {
+          const err = `PARAM_COUNT_MISMATCH: template '${effectiveTemplateName}' (${lang}) expects ${expected} variable(s), got ${got}. Pass template_params with the correct length, or sync the template from Meta.`;
+          logger.warn({ template: effectiveTemplateName, expected, got, tenant: opts.tenant_id }, 'pre-flight param-count mismatch');
+          return { ok: false, log_id: null, error: err };
+        }
+      }
+    } catch (err: any) {
+      // Pre-flight failure is non-fatal — fall through and let Meta judge.
+      logger.warn({ err: err?.message }, 'pre-flight validator threw — letting Meta decide');
+    }
+  }
+
   let logId: string | null = null;
   try {
     const r = await pool.query(
       `INSERT INTO communication_logs
          (tenant_id, lead_id, conversation_id, channel, provider, recipient,
-          message, template_id, attachments, status)
-       VALUES ($1, $2::uuid, $3::uuid, 'whatsapp', $4, $5, $6, $7, $8::jsonb, 'queued')
+          message, template_id, template_language, template_params,
+          attachments, status)
+       VALUES ($1, $2::uuid, $3::uuid, 'whatsapp', $4, $5, $6, $7, $8, $9::jsonb,
+               $10::jsonb, 'queued')
        RETURNING id`,
       [
         opts.tenant_id, opts.lead_id || null, opts.conversation_id || null,
         provider.name, opts.recipient, opts.message,
-        opts.template_id || null, JSON.stringify(opts.attachments || []),
+        opts.template_id || null,
+        opts.template_language || null,
+        JSON.stringify(opts.template_params || []),
+        JSON.stringify(opts.attachments || []),
       ],
     );
     logId = r.rows[0].id;
@@ -620,16 +862,39 @@ async function sendWhatsAppWithProvider(
   const result = await provider.sendWhatsApp(effective);
   if (logId) {
     try {
+      // Lift Meta's wamid into the top-level provider_message_id column so
+      // webhook callbacks (which carry only the wamid) can correlate back
+      // to this row via an indexed lookup. Other providers may not populate
+      // this; we tolerate null.
+      const wamid =
+        (result.provider_response as any)?.message_id ||
+        (result.provider_response as any)?.messages?.[0]?.id ||
+        null;
+      // Schedule first retry on failure — sweeper picks up at next_retry_at.
+      // Permanently fatal errors (recipient not on allow-list, template not
+      // approved, account paused) skip the retry queue since retrying won't
+      // change the outcome until an operator acts. retry_attempts starts at 0;
+      // the sweeper increments after each attempt.
+      const isFatal = isPermanentFailure(result.error);
       await pool.query(
         `UPDATE communication_logs
          SET status = $1::text, provider_response = $2::jsonb, last_error = $3,
-             sent_at = CASE WHEN $1::text = 'sent' THEN NOW() ELSE sent_at END
+             sent_at = CASE WHEN $1::text = 'sent' THEN NOW() ELSE sent_at END,
+             failed_at = CASE WHEN $1::text = 'failed' THEN NOW() ELSE failed_at END,
+             provider_message_id = COALESCE(provider_message_id, $5),
+             next_retry_at = CASE
+               WHEN $1::text = 'failed' AND NOT $6::boolean
+                 THEN NOW() + INTERVAL '5 minutes'
+               ELSE next_retry_at
+             END
          WHERE id = $4`,
         [
           result.ok ? 'sent' : 'failed',
           JSON.stringify(result.provider_response || {}),
           result.ok ? null : (result.error || 'unknown'),
           logId,
+          wamid,
+          isFatal,
         ],
       );
     } catch (err: any) {
@@ -637,6 +902,25 @@ async function sendWhatsAppWithProvider(
     }
   }
   return { ok: result.ok, log_id: logId, error: result.ok ? undefined : (result as any).error };
+}
+
+/** Classify Meta error strings into "retrying won't help" vs. transient.
+ *  Conservative: when unsure, we retry. Only well-known terminal errors
+ *  short-circuit the retry queue so the operator can fix the root cause. */
+function isPermanentFailure(err: string | undefined): boolean {
+  if (!err) return false;
+  const e = err.toLowerCase();
+  // 131030: recipient phone not in allow-list (test number policy).
+  // 132001: template not found / not approved.
+  // 132007: template paused or disabled.
+  // 190 / AUTH_FAILED: invalid or expired access token.
+  // PRODUCTION_NOT_READY / sandbox guards: not retryable.
+  if (e.includes('131030') || e.includes('allowed list') || e.includes('allow-list')) return true;
+  if (e.includes('132001') || e.includes('template_not_found') || e.includes('template_not_approved')) return true;
+  if (e.includes('132007') || e.includes('template_paused')) return true;
+  if (e.includes('auth_failed') || e.includes('access_token') || e.includes('190')) return true;
+  if (e.includes('production_not_ready') || e.includes('whatsapp_provider_not_configured')) return true;
+  return false;
 }
 
 /** Same shape as sendWhatsApp but for SMS. */

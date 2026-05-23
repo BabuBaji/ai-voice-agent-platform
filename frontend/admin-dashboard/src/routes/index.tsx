@@ -67,6 +67,16 @@ import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { ComingSoonPage } from '@/pages/stub/ComingSoonPage';
 import { WhatsAppPage } from '@/pages/chat/WhatsAppPage';
 
+// WhatsApp module — templates, campaigns, message logs.
+import { TemplatesPage as WhatsAppTemplatesPage } from '@/pages/whatsapp/TemplatesPage';
+import { CampaignsPage as WhatsAppCampaignsPage } from '@/pages/whatsapp/CampaignsPage';
+import { CampaignNewPage as WhatsAppCampaignNewPage } from '@/pages/whatsapp/CampaignNewPage';
+import { CampaignDetailPage as WhatsAppCampaignDetailPage } from '@/pages/whatsapp/CampaignDetailPage';
+import { WorkflowsPage as WhatsAppWorkflowsPage } from '@/pages/whatsapp/WorkflowsPage';
+import { MessageLogsPage as WhatsAppMessageLogsPage } from '@/pages/whatsapp/MessageLogsPage';
+import { AnalyticsPage as WhatsAppAnalyticsPage } from '@/pages/whatsapp/AnalyticsPage';
+import { RetryQueuePage as WhatsAppRetryQueuePage } from '@/pages/whatsapp/RetryQueuePage';
+
 // Settings
 import { GeneralSettingsPage } from '@/pages/settings/GeneralSettingsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
@@ -203,6 +213,14 @@ export const routes: RouteObject[] = [
       { path: '/crm/pipeline', element: <PipelinePage /> },
       { path: '/crm/recalls', element: <RecallsPage /> },
       { path: '/communications', element: <CommunicationsPage /> },
+      { path: '/whatsapp/templates', element: <WhatsAppTemplatesPage /> },
+      { path: '/whatsapp/campaigns', element: <WhatsAppCampaignsPage /> },
+      { path: '/whatsapp/campaigns/new', element: <WhatsAppCampaignNewPage /> },
+      { path: '/whatsapp/campaigns/:id', element: <WhatsAppCampaignDetailPage /> },
+      { path: '/whatsapp/workflows', element: <WhatsAppWorkflowsPage /> },
+      { path: '/whatsapp/logs', element: <WhatsAppMessageLogsPage /> },
+      { path: '/whatsapp/analytics', element: <WhatsAppAnalyticsPage /> },
+      { path: '/whatsapp/retry-queue', element: <WhatsAppRetryQueuePage /> },
       { path: '/knowledge', element: <KnowledgeBasePage /> },
       { path: '/voice-cloning', element: <VoiceCloningPage /> },
       { path: '/chatbots', element: <ChatbotsListPage /> },

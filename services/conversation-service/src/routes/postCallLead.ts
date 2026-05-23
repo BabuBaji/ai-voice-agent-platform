@@ -552,7 +552,15 @@ const whatsappSendSchema = z.object({
   conversation_id: z.string().uuid().optional(),
   recipient: z.string().regex(/^\+?[1-9]\d{6,14}$/),
   message: z.string().min(1),
+  /** Template name (e.g. 'brochure_v1') when sending via approved template.
+   *  Omit for free-form session messages (only works inside 24h window). */
   template_id: z.string().optional(),
+  template_language: z.string().optional(),
+  /** When template_id is set, the server resolves the template's variable
+   *  mapping against this context to build the positional params. Common
+   *  keys: lead.name, brochure_url, callback_at. UI never has to know
+   *  about variable_mapping. */
+  context: z.record(z.any()).optional(),
   attachments: z.array(z.object({ name: z.string(), url: z.string().url() })).optional(),
 });
 postCallLeadRouter.post('/communications/whatsapp/send', async (req: Request, res: Response, next: NextFunction) => {
@@ -561,7 +569,37 @@ postCallLeadRouter.post('/communications/whatsapp/send', async (req: Request, re
     if (!tenantId) return;
     const data = whatsappSendSchema.parse(req.body || {});
     const recipient = toE164(data.recipient);
-    const out = await sendWhatsApp({ tenant_id: tenantId, ...data, recipient });
+
+    // Server-side template variable resolution. The caller only needs to
+    // pass `context` — we look up the template by name, walk its
+    // variable_mapping, and produce positional params. This keeps the UI
+    // (LeadsPage etc.) ignorant of per-template variable schemas.
+    let template_params: string[] | undefined;
+    if (data.template_id) {
+      const tplLang = data.template_language || 'en_US';
+      // Use require dynamics so the route file doesn't add a top-of-file
+      // dependency on the templates module (which would create a small
+      // cycle through communications.ts → templates).
+      const { getTemplateByName } = await import('../services/whatsappTemplateStore');
+      const { resolveTemplateVariables } = await import('../services/templateVariables');
+      const tpl = await getTemplateByName(tenantId, data.template_id, tplLang);
+      if (tpl) {
+        const { params } = resolveTemplateVariables(tpl, data.context || {});
+        template_params = params;
+      }
+    }
+
+    const out = await sendWhatsApp({
+      tenant_id: tenantId,
+      lead_id: data.lead_id,
+      conversation_id: data.conversation_id,
+      recipient,
+      message: data.message,
+      template_id: data.template_id,
+      template_language: data.template_language,
+      template_params,
+      attachments: data.attachments,
+    });
     if (out.ok && data.lead_id) {
       void enqueueRecallFromBrochureSend(tenantId, data.lead_id, recipient, data.conversation_id);
     }

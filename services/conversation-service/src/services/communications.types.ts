@@ -24,7 +24,17 @@ export interface WhatsAppSendOptions {
   conversation_id?: string | null;
   recipient: string;            // E.164 phone with + prefix
   message: string;
+  /** Template name (e.g. 'hello_world'). When set, providers route via
+   *  template send. NULL → free-form session message (requires open 24h
+   *  window with the recipient). */
   template_id?: string | null;
+  /** BCP-47 language code for the template. Defaults to provider's env
+   *  default (META_WA_TEMPLATE_LANG) when not specified. */
+  template_language?: string | null;
+  /** Positional variables for {{1}}, {{2}}, … in the template body.
+   *  When provided, overrides the legacy greeting/URL heuristic in the
+   *  Meta provider. Order matters — params[0] fills {{1}}, etc. */
+  template_params?: string[] | null;
   attachments?: Array<{ name: string; url: string }>;
   /** Sender override. The post-call brochure flow injects the agent caller-ID. */
   from_number?: string | null;

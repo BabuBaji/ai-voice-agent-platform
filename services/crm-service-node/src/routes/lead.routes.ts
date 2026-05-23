@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { pool, ensureDefaultPipeline } from '../db/init';
 import { getLeadsPaginated } from '../services/lead.service';
+import { fireLeadWorkflow, mapStatusToEvent, leadContext } from '../services/whatsappWorkflow.client';
 
 const router = Router();
 
@@ -70,7 +71,27 @@ router.post('/', async (req: Request, res: Response) => {
         JSON.stringify(parsed.custom_fields || {}),
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const lead = result.rows[0];
+    res.status(201).json(lead);
+
+    // Fire-and-forget WhatsApp workflow. lead_created fires for every new
+    // lead regardless of source (post-call analyzer, contact form, manual,
+    // CSV one-off). If the lead was created with a non-NEW status that maps
+    // to a workflow event (e.g. analyzer wrote 'QUALIFIED'), fire that too.
+    if (lead.phone) {
+      const ctx = leadContext(lead);
+      fireLeadWorkflow({
+        tenant_id: req.tenantId, workflow_event: 'lead_created',
+        lead_id: lead.id, phone: lead.phone, context: ctx,
+      });
+      const event = mapStatusToEvent(lead.status, lead.custom_fields);
+      if (event && event !== 'lead_created') {
+        fireLeadWorkflow({
+          tenant_id: req.tenantId, workflow_event: event,
+          lead_id: lead.id, phone: lead.phone, context: ctx,
+        });
+      }
+    }
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation failed', details: err.errors });
@@ -116,6 +137,17 @@ router.post('/import', async (req: Request, res: Response) => {
 
       await client.query('COMMIT');
       res.status(201).json({ imported: imported.length, leads: imported });
+
+      // Fire lead_created for each imported lead (post-commit so we never
+      // notify on rolled-back rows). Phone-less imports are silently skipped.
+      for (const lead of imported) {
+        if (lead.phone) {
+          fireLeadWorkflow({
+            tenant_id: req.tenantId, workflow_event: 'lead_created',
+            lead_id: lead.id, phone: lead.phone, context: leadContext(lead),
+          });
+        }
+      }
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -162,6 +194,15 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const parsed = updateLeadSchema.parse(req.body);
 
+    // Read prior state so we can detect a status change. Cheap indexed read
+    // on the same row we're about to update.
+    const priorRes = await pool.query(
+      `SELECT status, custom_fields FROM leads WHERE id = $1 AND tenant_id = $2`,
+      [req.params.id, req.tenantId],
+    );
+    const priorStatus = priorRes.rows[0]?.status || null;
+    const priorCustom = priorRes.rows[0]?.custom_fields || {};
+
     // Build dynamic SET clause
     const fields: string[] = [];
     const values: any[] = [req.params.id, req.tenantId];
@@ -204,7 +245,23 @@ router.put('/:id', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Lead not found' });
       return;
     }
-    res.json(result.rows[0]);
+    const lead = result.rows[0];
+    res.json(lead);
+
+    // Detect status change → fire the mapped workflow event. We compare
+    // BOTH the canonical status field AND the extended_lead_status nested
+    // in custom_fields (which the voice-agent analyzer writes). Sending on
+    // every PUT would spam — only fire when the mapped event changed.
+    if (lead.phone) {
+      const priorEvent = mapStatusToEvent(priorStatus, priorCustom);
+      const nextEvent = mapStatusToEvent(lead.status, lead.custom_fields);
+      if (nextEvent && nextEvent !== priorEvent) {
+        fireLeadWorkflow({
+          tenant_id: req.tenantId, workflow_event: nextEvent,
+          lead_id: lead.id, phone: lead.phone, context: leadContext(lead),
+        });
+      }
+    }
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation failed', details: err.errors });

@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Bot, Phone, Users, BookOpen, Workflow,
   BarChart3, Settings, ChevronDown, ChevronLeft, ChevronRight,
   Mic, MessageSquare, Sparkles, Megaphone, ScrollText,
-  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut, Radio,
+  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut, Radio, RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -30,6 +30,7 @@ const iconMap: Record<string, React.ReactNode> = {
   FileText: <FileText className="h-[18px] w-[18px]" />,
   Mail: <Mail className="h-[18px] w-[18px]" />,
   Bug: <Bug className="h-[18px] w-[18px]" />,
+  RefreshCw: <RefreshCw className="h-[18px] w-[18px]" />,
 };
 
 interface NavItem {
@@ -92,6 +93,12 @@ const navSections: NavSection[] = [
     items: [
       { label: 'Chatbots', path: '/chatbots', icon: 'Bot', badge: 'New' },
       { label: 'WhatsApp', path: '/chat/whatsapp', icon: 'MessageSquare' },
+      { label: 'WA Templates', path: '/whatsapp/templates', icon: 'FileText' },
+      { label: 'WA Workflows', path: '/whatsapp/workflows', icon: 'Sparkles' },
+      { label: 'WA Campaigns', path: '/whatsapp/campaigns', icon: 'Megaphone' },
+      { label: 'WA Analytics', path: '/whatsapp/analytics', icon: 'ScrollText' },
+      { label: 'WA Logs', path: '/whatsapp/logs', icon: 'ScrollText' },
+      { label: 'WA Retry Queue', path: '/whatsapp/retry-queue', icon: 'RefreshCw' },
       { label: 'Communications', path: '/communications', icon: 'Mail' },
     ],
   },

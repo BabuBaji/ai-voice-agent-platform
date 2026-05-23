@@ -11,6 +11,8 @@ import { startRetentionSweeper } from './services/privacy';
 import { startStaleSweeper } from './services/staleSweeper';
 import { startCrmRetrySweeper } from './services/crmRetrySweeper';
 import { startRecallScheduler } from './services/recallScheduler';
+import { startCampaignWorker } from './services/whatsappCampaignWorker';
+import { startRetrySweeper } from './services/whatsappRetrySweeper';
 import pino from 'pino';
 
 const logger = pino({
@@ -64,6 +66,19 @@ async function start(): Promise<void> {
     // WhatsApp+SMS / UNREACHABLE) for every interested lead post-call.
     // Disable with AUTO_RECALL=off.
     startRecallScheduler();
+
+    // WhatsApp bulk campaign worker — drains queued targets for RUNNING
+    // campaigns at each campaign's rate_limit_per_minute. Disable with
+    // WA_CAMPAIGN_WORKER=off.
+    if (process.env.WA_CAMPAIGN_WORKER !== 'off') {
+      startCampaignWorker();
+    }
+
+    // WhatsApp retry sweeper — re-tries failed WA sends at 5/15/30-min
+    // backoff (3 attempts). Disable with WA_RETRY_SWEEPER=off.
+    if (process.env.WA_RETRY_SWEEPER !== 'off') {
+      startRetrySweeper();
+    }
 
     const shutdown = async () => {
       logger.info('Shutting down...');
