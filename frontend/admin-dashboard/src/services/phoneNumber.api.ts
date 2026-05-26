@@ -14,6 +14,8 @@ export interface PhoneNumberRecord {
   last_verified_at?: string | null;
   deployed_at?: string | null;
   deployed_config_id?: string | null;
+  inbound_enabled?: boolean;
+  outbound_enabled?: boolean;
 }
 
 export interface VerificationTestResult {
@@ -98,11 +100,13 @@ export const phoneNumberApi = {
     provider?: 'plivo' | 'twilio' | 'exotel';
     country?: string;
     capabilities?: ('voice' | 'sms')[];
+    numberType?: 'local' | 'tollfree' | 'any';
   } = {}): Promise<{ data: AvailableNumber[]; reason?: string; message?: string; sandbox?: boolean }> => {
     const qs = new URLSearchParams();
     qs.set('provider', params.provider || 'plivo');
     qs.set('country', params.country || 'US');
     if (params.capabilities?.length) qs.set('capabilities', params.capabilities.join(','));
+    if (params.numberType && params.numberType !== 'any') qs.set('number_type', params.numberType);
     const r = await api.get(`/phone-numbers/available?${qs.toString()}`);
     return {
       data: r.data?.data ?? [],
@@ -337,6 +341,16 @@ export const phoneNumberApi = {
   getDeploymentHistory: async (id: string): Promise<any[]> => {
     const r = await api.get(`/phone-numbers/${id}/deployment`);
     return r.data?.data ?? [];
+  },
+
+  toggleInbound: async (id: string, enabled: boolean): Promise<{ ok: boolean; inbound_enabled: boolean }> => {
+    const r = await api.post(`/phone-numbers/${id}/inbound`, { enabled });
+    return r.data;
+  },
+
+  toggleOutbound: async (id: string, enabled: boolean): Promise<{ ok: boolean; outbound_enabled: boolean }> => {
+    const r = await api.post(`/phone-numbers/${id}/outbound`, { enabled });
+    return r.data;
   },
 };
 

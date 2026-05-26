@@ -8,7 +8,7 @@ interface TranscriptViewerProps {
 
 export function TranscriptViewer({ messages }: TranscriptViewerProps) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-2">
       {messages.map((msg, idx) => {
         const isAssistant = msg.role === 'assistant';
         return (

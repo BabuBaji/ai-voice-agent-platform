@@ -50,5 +50,5 @@ export interface TelephonyProvider {
 
   provisionNumber(options: PhoneNumberProvisionOptions): Promise<ProvisionedNumber>;
   releaseNumber(providerNumberId: string): Promise<void>;
-  listAvailableNumbers(country: string, capabilities?: string[]): Promise<ProvisionedNumber[]>;
+  listAvailableNumbers(country: string, capabilities?: string[], numberType?: string): Promise<ProvisionedNumber[]>;
 }

@@ -234,6 +234,8 @@ export async function initDatabase(pool: Pool): Promise<void> {
       ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ;
       ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS deployed_at TIMESTAMPTZ;
       ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS deployed_config_id UUID;
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS inbound_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+      ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS outbound_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
       -- Each verify run aggregates 5 sub-tests. We persist every test row so
       -- the UI can show a granular history; aggregate status = worst child.

@@ -182,3 +182,174 @@ async def get_outcomes(
         *params,
     )
     return [{"outcome": r["outcome"], "count": r["count"]} for r in rows]
+
+
+@router.get("/sentiment")
+async def get_sentiment(
+    days: int = Query(30, ge=1, le=365),
+    agent_id: str = Query(""),
+    channel: str = Query(""),
+    x_tenant_id: Optional[str] = Header(None),
+):
+    from common import get_db_pool
+    from ..config import settings
+    pool = await get_db_pool(settings.database_url)
+
+    params: list = [days]
+    where = "WHERE created_at >= NOW() - ($1::int || ' days')::interval"
+    p = 2
+    if x_tenant_id:
+        where += f" AND tenant_id = ${p}"; params.append(x_tenant_id); p += 1
+    if agent_id:
+        where += f" AND agent_id = ${p}"; params.append(agent_id); p += 1
+    if channel:
+        where += f" AND UPPER(channel) = ${p}"; params.append(channel.upper()); p += 1
+
+    rows = await pool.fetch(
+        f"""
+        SELECT COALESCE(UPPER(sentiment), 'UNKNOWN') AS sentiment,
+               COUNT(*)::int AS count
+        FROM conversations
+        {where}
+        GROUP BY COALESCE(UPPER(sentiment), 'UNKNOWN')
+        ORDER BY count DESC
+        """,
+        *params,
+    )
+    return [{"sentiment": r["sentiment"], "count": r["count"]} for r in rows]
+
+
+@router.get("/hourly-distribution")
+async def get_hourly_distribution(
+    days: int = Query(30, ge=1, le=365),
+    channel: str = Query(""),
+    x_tenant_id: Optional[str] = Header(None),
+):
+    from common import get_db_pool
+    from ..config import settings
+    pool = await get_db_pool(settings.database_url)
+
+    params: list = [days]
+    where = "WHERE created_at >= NOW() - ($1::int || ' days')::interval"
+    p = 2
+    if x_tenant_id:
+        where += f" AND tenant_id = ${p}"; params.append(x_tenant_id); p += 1
+    if channel:
+        where += f" AND UPPER(channel) = ${p}"; params.append(channel.upper()); p += 1
+
+    rows = await pool.fetch(
+        f"""
+        SELECT EXTRACT(HOUR FROM created_at)::int AS hour,
+               COUNT(*)::int AS calls,
+               COALESCE(AVG(NULLIF(duration_seconds, 0)), 0)::float AS avg_duration
+        FROM conversations
+        {where}
+        GROUP BY hour
+        ORDER BY hour ASC
+        """,
+        *params,
+    )
+    result = [{"hour": h, "calls": 0, "avg_duration": 0.0} for h in range(24)]
+    for r in rows:
+        result[r["hour"]] = {"hour": r["hour"], "calls": r["calls"], "avg_duration": float(r["avg_duration"])}
+    return result
+
+
+@router.get("/duration-distribution")
+async def get_duration_distribution(
+    days: int = Query(30, ge=1, le=365),
+    channel: str = Query(""),
+    x_tenant_id: Optional[str] = Header(None),
+):
+    from common import get_db_pool
+    from ..config import settings
+    pool = await get_db_pool(settings.database_url)
+
+    params: list = [days]
+    where = "WHERE created_at >= NOW() - ($1::int || ' days')::interval AND duration_seconds IS NOT NULL AND duration_seconds > 0"
+    p = 2
+    if x_tenant_id:
+        where += f" AND tenant_id = ${p}"; params.append(x_tenant_id); p += 1
+    if channel:
+        where += f" AND UPPER(channel) = ${p}"; params.append(channel.upper()); p += 1
+
+    row = await pool.fetchrow(
+        f"""
+        SELECT
+            COUNT(*) FILTER (WHERE duration_seconds < 60)::int AS under_1m,
+            COUNT(*) FILTER (WHERE duration_seconds >= 60 AND duration_seconds < 180)::int AS "1_3m",
+            COUNT(*) FILTER (WHERE duration_seconds >= 180 AND duration_seconds < 300)::int AS "3_5m",
+            COUNT(*) FILTER (WHERE duration_seconds >= 300 AND duration_seconds < 600)::int AS "5_10m",
+            COUNT(*) FILTER (WHERE duration_seconds >= 600)::int AS over_10m
+        FROM conversations
+        {where}
+        """,
+        *params,
+    )
+    return [
+        {"bucket": "<1 min", "count": row["under_1m"] if row else 0},
+        {"bucket": "1-3 min", "count": row["1_3m"] if row else 0},
+        {"bucket": "3-5 min", "count": row["3_5m"] if row else 0},
+        {"bucket": "5-10 min", "count": row["5_10m"] if row else 0},
+        {"bucket": "10+ min", "count": row["over_10m"] if row else 0},
+    ]
+
+
+@router.get("/performance")
+async def get_performance(
+    days: int = Query(30, ge=1, le=365),
+    channel: str = Query(""),
+    x_tenant_id: Optional[str] = Header(None),
+):
+    from common import get_db_pool
+    from ..config import settings
+    pool = await get_db_pool(settings.database_url)
+
+    params: list = [days]
+    where = "WHERE created_at >= NOW() - ($1::int || ' days')::interval"
+    p = 2
+    if x_tenant_id:
+        where += f" AND tenant_id = ${p}"; params.append(x_tenant_id); p += 1
+    if channel:
+        where += f" AND UPPER(channel) = ${p}"; params.append(channel.upper()); p += 1
+
+    row = await pool.fetchrow(
+        f"""
+        SELECT
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status IN ('COMPLETED','ENDED'))::int AS completed,
+            COUNT(*) FILTER (WHERE sentiment = 'POSITIVE')::int AS positive,
+            COUNT(*) FILTER (WHERE sentiment = 'NEGATIVE')::int AS negative,
+            COUNT(*) FILTER (WHERE sentiment = 'NEUTRAL')::int AS neutral,
+            COUNT(*) FILTER (WHERE sentiment IS NOT NULL)::int AS scored,
+            COALESCE(AVG(NULLIF(duration_seconds, 0)), 0)::float AS avg_duration,
+            COALESCE(MAX(duration_seconds), 0)::int AS max_duration,
+            COALESCE(MIN(NULLIF(duration_seconds, 0)), 0)::int AS min_duration,
+            COUNT(DISTINCT agent_id)::int AS unique_agents,
+            COUNT(DISTINCT date_trunc('day', created_at))::int AS active_days
+        FROM conversations
+        {where}
+        """,
+        *params,
+    )
+    total = row["total"] if row else 0
+    completed = row["completed"] if row else 0
+    positive = row["positive"] if row else 0
+    scored = row["scored"] if row else 0
+    active_days = row["active_days"] if row else 1
+
+    return {
+        "total_calls": total,
+        "completed_calls": completed,
+        "resolution_rate": round((completed / total) * 100, 1) if total > 0 else 0.0,
+        "sentiment_score": round((positive / scored) * 100, 1) if scored > 0 else 0.0,
+        "positive_count": positive,
+        "negative_count": row["negative"] if row else 0,
+        "neutral_count": row["neutral"] if row else 0,
+        "avg_duration": float(row["avg_duration"]) if row else 0.0,
+        "max_duration": row["max_duration"] if row else 0,
+        "min_duration": row["min_duration"] if row else 0,
+        "unique_agents": row["unique_agents"] if row else 0,
+        "calls_per_day": round(total / max(active_days, 1), 1),
+        "active_days": active_days,
+    }

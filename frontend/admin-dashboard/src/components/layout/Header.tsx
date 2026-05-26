@@ -1,4 +1,4 @@
-import { LogOut } from 'lucide-react';
+import { LogOut, Sparkles } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useNavigate, useLocation } from 'react-router-dom';
 
@@ -35,14 +35,23 @@ export function Header() {
       ) : (
         <div />
       )}
-      <button
-        onClick={handleLogout}
-        title={user?.name ? `Sign out (${user.name})` : 'Sign out'}
-        className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm font-medium text-gray-600 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0"
-      >
-        <LogOut className="h-4 w-4" />
-        Sign out
-      </button>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <button
+          onClick={() => window.dispatchEvent(new Event('open-tenant-assistant'))}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-xs font-semibold bg-gradient-to-r from-primary-600 to-accent-600 text-white hover:shadow-lg hover:scale-[1.02] transition-all"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          AI Help
+        </button>
+        <button
+          onClick={handleLogout}
+          title={user?.name ? `Sign out (${user.name})` : 'Sign out'}
+          className="inline-flex items-center gap-2 h-9 px-3 rounded-lg text-sm font-medium text-gray-600 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+        >
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </button>
+      </div>
     </header>
   );
 }

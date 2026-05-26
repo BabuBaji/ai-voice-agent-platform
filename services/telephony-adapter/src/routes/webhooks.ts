@@ -1094,21 +1094,38 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
     // (paused vs deployed) instead of just is_active.
     let numberId: string | null = null;
     let deploymentStatus: string | null = null;
+    let isInboundCall = false;
     if (!agentId || !tenantId) {
+      isInboundCall = true;
       const phoneResult = await pool.query(
-        `SELECT id, agent_id, tenant_id, deployment_status FROM phone_numbers
+        `SELECT id, agent_id, tenant_id, deployment_status, inbound_enabled FROM phone_numbers
          WHERE phone_number = $1 AND is_active = TRUE LIMIT 1`,
         [To]
       );
       if (phoneResult.rows.length === 0) {
+        logger.info({ to: To }, '[INBOUND_NUMBER_NOT_REGISTERED]');
         res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response><Speak>Sorry, this number is not configured. Goodbye.</Speak><Hangup/></Response>`);
         return;
       }
-      agentId = phoneResult.rows[0].agent_id;
-      tenantId = phoneResult.rows[0].tenant_id;
-      numberId = phoneResult.rows[0].id;
-      deploymentStatus = phoneResult.rows[0].deployment_status;
+      const phoneRow = phoneResult.rows[0];
+      if (phoneRow.inbound_enabled === false) {
+        logger.info({ to: To, numberId: phoneRow.id }, '[INBOUND_DISABLED] inbound_enabled=false');
+        res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Speak>This number does not accept incoming calls at this time. Goodbye.</Speak><Hangup/></Response>`);
+        return;
+      }
+      if (!phoneRow.agent_id) {
+        logger.info({ to: To, numberId: phoneRow.id }, '[INBOUND_NO_AGENT_ASSIGNED]');
+        res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response><Speak>Thank you for calling. No AI agent is assigned to this number yet. Please contact support.</Speak><Hangup/></Response>`);
+        return;
+      }
+      agentId = phoneRow.agent_id;
+      tenantId = phoneRow.tenant_id;
+      numberId = phoneRow.id;
+      deploymentStatus = phoneRow.deployment_status;
+      logger.info({ to: To, numberId, agentId, tenantId }, '[INBOUND_NUMBER_MATCHED]');
     } else {
       // Outbound (we already know agent + tenant from query). Best-effort
       // lookup of a deployed number for this agent so the snapshot path can
@@ -1265,7 +1282,7 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
       // Plivo's Stream start event does NOT include the caller's number,
       // so we pass From/To/CallUUID through the WS URL query string. The
       // WS handler uses them to populate calls + conversations rows.
-      const streamUrl = `${wsBase}/plivo/audio?agentId=${encodeURIComponent(agentId)}&tenantId=${encodeURIComponent(tenantId)}&from=${encodeURIComponent(From || '')}&to=${encodeURIComponent(To || '')}&callSid=${encodeURIComponent(CallUUID || '')}`;
+      const streamUrl = `${wsBase}/plivo/audio?agentId=${encodeURIComponent(agentId)}&tenantId=${encodeURIComponent(tenantId)}&from=${encodeURIComponent(From || '')}&to=${encodeURIComponent(To || '')}&callSid=${encodeURIComponent(CallUUID || '')}&direction=${isInboundCall ? 'inbound' : 'outbound'}`;
       // Plivo docs: contentType MUST combine codec + rate with a semicolon
       // (e.g. "audio/x-mulaw;rate=8000"). A separate sampleRate attr is
       // ignored, which means Plivo may silently skip the Stream entirely.
@@ -1302,12 +1319,14 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
       logger.error({ err: err.message }, 'Failed to create conversation');
     }
 
+    const callDirection = isInboundCall ? 'INBOUND' : 'OUTBOUND';
     await pool.query(
       `INSERT INTO calls (tenant_id, agent_id, conversation_id, direction, status, caller_number, called_number, provider, provider_call_sid)
-       VALUES ($1, $2, $3, 'OUTBOUND', 'IN_PROGRESS', $4, $5, 'plivo', $6)
+       VALUES ($1, $2, $3, $4, 'IN_PROGRESS', $5, $6, 'plivo', $7)
        ON CONFLICT (provider_call_sid) DO UPDATE SET status='IN_PROGRESS', conversation_id=EXCLUDED.conversation_id`,
-      [tenantId, agentId, conversationId, From, To, CallUUID]
+      [tenantId, agentId, conversationId, callDirection, From, To, CallUUID]
     );
+    logger.info({ callSid: CallUUID, direction: callDirection }, isInboundCall ? '[INBOUND_CALL_SESSION_CREATED]' : 'Outbound call row created');
 
     let greeting: string;
     try {

@@ -384,13 +384,15 @@ export class PlivoProvider implements TelephonyProvider {
     }
   }
 
-  async listAvailableNumbers(country: string, capabilities?: string[]): Promise<ProvisionedNumber[]> {
+  async listAvailableNumbers(country: string, capabilities?: string[], numberType?: string): Promise<ProvisionedNumber[]> {
     // Use Plivo's REST API directly — the Node SDK exposes it as
     // `client.phoneNumbers.search(...)` but its return shape varies by SDK
     // version. Calling REST gives us a stable response.
+    // numberType: 'local' (default), 'tollfree', or 'any' (searches both).
+    const plivoType = numberType === 'tollfree' ? 'tollfree' : 'local';
     const params = new URLSearchParams({
       country_iso: (country || 'US').toUpperCase(),
-      type: 'local',
+      type: plivoType,
       limit: '20',
     });
     if (capabilities?.includes('sms') && !capabilities.includes('voice')) params.set('services', 'sms');

@@ -163,14 +163,17 @@ export class TwilioProvider implements TelephonyProvider {
     }
   }
 
-  async listAvailableNumbers(country: string, capabilities?: string[]): Promise<ProvisionedNumber[]> {
+  async listAvailableNumbers(country: string, capabilities?: string[], numberType?: string): Promise<ProvisionedNumber[]> {
     try {
       const client = this.getClient();
       const searchParams: any = { limit: 20 };
       if (capabilities?.includes('voice')) searchParams.voiceEnabled = true;
       if (capabilities?.includes('sms')) searchParams.smsEnabled = true;
 
-      const numbers = await client.availablePhoneNumbers(country).local.list(searchParams);
+      const catalog = numberType === 'tollfree'
+        ? client.availablePhoneNumbers(country).tollFree
+        : client.availablePhoneNumbers(country).local;
+      const numbers = await catalog.list(searchParams);
 
       return numbers.map((n) => ({
         providerNumberId: '',

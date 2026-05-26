@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, Download, Trash2, Loader2, AlertCircle, ChevronLeft, ChevronRight, X, Phone, Eye, Send, Mail, Building2, FileText, MessageSquare, CheckCircle2, Pencil, Check, Users, Sparkles, Trophy, UserCheck, Inbox, Filter, ListFilter } from 'lucide-react';
+import { Search, Plus, Download, Trash2, Loader2, AlertCircle, ChevronLeft, ChevronRight, X, Phone, Eye, Send, Mail, Building2, FileText, MessageSquare, CheckCircle2, Pencil, Check, Users, Sparkles, Trophy, UserCheck, Inbox, Filter, ListFilter, TrendingUp, Target, PhoneIncoming, Globe, Megaphone, UserPlus, ArrowUpRight } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge, Badge } from '@/components/ui/Badge';
 import { Input } from '@/components/ui/Input';
@@ -206,8 +206,13 @@ export function LeadsPage() {
   const kpis = {
     total,
     new: displayed.filter((l) => l.status === 'new').length,
+    contacted: displayed.filter((l) => l.status === 'contacted').length,
     qualified: displayed.filter((l) => l.status === 'qualified').length,
+    proposal: displayed.filter((l) => l.status === 'proposal').length,
     won: displayed.filter((l) => l.status === 'won').length,
+    lost: displayed.filter((l) => l.status === 'lost').length,
+    avgScore: displayed.length > 0 ? Math.round(displayed.reduce((s, l) => s + (l.score || 0), 0) / displayed.length) : 0,
+    totalValue: displayed.reduce((s, l) => s + (l.value || 0), 0),
   };
 
   const STATUS_PILLS = [
@@ -220,19 +225,39 @@ export function LeadsPage() {
     { value: 'lost',      label: 'Lost' },
   ];
 
+  // Source icon mapping
+  const SOURCE_ICONS: Record<string, { icon: typeof Phone; color: string }> = {
+    'inbound-call': { icon: PhoneIncoming, color: 'text-teal-600 bg-teal-50' },
+    website: { icon: Globe, color: 'text-blue-600 bg-blue-50' },
+    referral: { icon: Users, color: 'text-purple-600 bg-purple-50' },
+    outbound: { icon: Phone, color: 'text-indigo-600 bg-indigo-50' },
+    campaign: { icon: Megaphone, color: 'text-amber-600 bg-amber-50' },
+    manual: { icon: UserPlus, color: 'text-gray-600 bg-gray-50' },
+  };
+
+  // Funnel data for mini pipeline
+  const funnelStages = [
+    { key: 'new', label: 'New', count: kpis.new, color: 'bg-blue-500' },
+    { key: 'contacted', label: 'Contacted', count: kpis.contacted, color: 'bg-cyan-500' },
+    { key: 'qualified', label: 'Qualified', count: kpis.qualified, color: 'bg-purple-500' },
+    { key: 'proposal', label: 'Proposal', count: kpis.proposal, color: 'bg-amber-500' },
+    { key: 'won', label: 'Won', count: kpis.won, color: 'bg-emerald-500' },
+    { key: 'lost', label: 'Lost', count: kpis.lost, color: 'bg-gray-400' },
+  ];
+  const funnelMax = Math.max(1, ...funnelStages.map((s) => s.count));
+
   return (
-    <div className="max-w-7xl mx-auto space-y-2">
-      {/* Compact header */}
-      <div className="flex items-center justify-between flex-wrap gap-2 pb-1">
-        <div className="flex items-center gap-2">
-          <Users className="h-4 w-4 text-primary-600" />
-          <h1 className="text-base font-semibold text-gray-900 leading-tight">Leads</h1>
-          <span className="text-[11px] text-gray-400">· auto-scored · brochures + follow-ups automated</span>
+    <div className="max-w-[1440px] mx-auto space-y-5">
+      {/* ─── Header ─── */}
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-extrabold text-gray-900 tracking-tight">Leads</h1>
+          <p className="text-xs text-gray-500 mt-0.5">Auto-scored from calls, campaigns, and web forms — brochures + follow-ups automated</p>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <Button variant="outline" size="sm" className="rounded-md h-7 text-xs"><Download className="h-3 w-3" />Export</Button>
-          <Button variant="gradient" size="sm" className="rounded-md h-7 text-xs" onClick={() => { setAddError(''); setShowAdd(true); }}>
-            <Plus className="h-3 w-3" />Add Lead
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="outline" size="sm" className="rounded-lg h-8 text-xs"><Download className="h-3.5 w-3.5" />Export</Button>
+          <Button variant="gradient" size="sm" className="rounded-lg h-8 text-xs" onClick={() => { setAddError(''); setShowAdd(true); }}>
+            <Plus className="h-3.5 w-3.5" />Add Lead
           </Button>
         </div>
       </div>
@@ -245,36 +270,60 @@ export function LeadsPage() {
         </div>
       )}
 
-      {/* KPI strip */}
-      <div className="grid grid-cols-4 gap-2">
+      {/* ─── KPI strip ─── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {[
-          { label: 'Total', value: kpis.total,     icon: Users,     accent: 'text-blue-600 bg-blue-50' },
-          { label: 'New',   value: kpis.new,       icon: Sparkles,  accent: 'text-amber-600 bg-amber-50' },
-          { label: 'Qual.', value: kpis.qualified, icon: UserCheck, accent: 'text-purple-600 bg-purple-50' },
-          { label: 'Won',   value: kpis.won,       icon: Trophy,    accent: 'text-emerald-600 bg-emerald-50' },
+          { label: 'Total Leads', value: kpis.total,     icon: Users,      color: 'text-primary-600 bg-primary-50' },
+          { label: 'New',         value: kpis.new,        icon: Sparkles,   color: 'text-blue-600 bg-blue-50' },
+          { label: 'Qualified',   value: kpis.qualified,  icon: UserCheck,  color: 'text-purple-600 bg-purple-50' },
+          { label: 'Won',         value: kpis.won,        icon: Trophy,     color: 'text-emerald-600 bg-emerald-50' },
+          { label: 'Avg Score',   value: kpis.avgScore,   icon: Target,     color: 'text-amber-600 bg-amber-50' },
+          { label: 'Pipeline',    value: kpis.totalValue > 0 ? formatCurrency(kpis.totalValue) : '$0', icon: TrendingUp, color: 'text-teal-600 bg-teal-50' },
         ].map((k) => {
           const Icon = k.icon;
           return (
-            <div key={k.label} className="bg-white rounded-md border border-gray-100 shadow-sm px-2.5 py-1.5 flex items-center justify-between">
-              <div className="leading-tight">
-                <p className="text-[10px] uppercase tracking-wider font-medium text-gray-500">{k.label}</p>
-                <p className="text-base font-semibold text-gray-900">{k.value}</p>
+            <div key={k.label} className="rounded-xl border border-gray-100 bg-white px-3.5 py-2.5 shadow-card flex items-center gap-3">
+              <div className={`h-8 w-8 rounded-lg flex items-center justify-center ${k.color}`}><Icon className="h-4 w-4" /></div>
+              <div>
+                <p className="text-[10px] text-gray-500 font-semibold uppercase tracking-wider">{k.label}</p>
+                <p className="text-base font-display font-extrabold text-gray-900 tabular-nums">{k.value}</p>
               </div>
-              <div className={`p-1 rounded ${k.accent}`}><Icon className="h-3.5 w-3.5" /></div>
             </div>
           );
         })}
       </div>
 
-      {/* Toolbar — single row, no card chrome */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 max-w-xs min-w-[200px]">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400" />
-          <input type="text" placeholder="Search name, email, phone…" value={search} onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-7 pr-2 py-1 text-xs border border-gray-200 rounded-md bg-white focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none" />
+      {/* ─── Mini pipeline funnel ─── */}
+      <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-card">
+        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">Lead Pipeline</p>
+        <div className="flex items-end gap-1.5 h-12">
+          {funnelStages.map((s) => {
+            const pct = Math.max(6, (s.count / funnelMax) * 100);
+            return (
+              <div key={s.key} className="flex-1 flex flex-col items-center gap-1">
+                <span className="text-[10px] font-bold text-gray-700 tabular-nums">{s.count}</span>
+                <div className="w-full rounded-t-sm overflow-hidden bg-gray-100" style={{ height: '32px' }}>
+                  <div className={`w-full ${s.color} rounded-t-sm transition-all duration-500`} style={{ height: `${pct}%`, marginTop: `${100 - pct}%` }} />
+                </div>
+                <span className="text-[9px] text-gray-500 font-medium truncate w-full text-center">{s.label}</span>
+              </div>
+            );
+          })}
         </div>
+      </div>
+
+      {/* ─── Filter bar ─── */}
+      <div className="flex items-center gap-2 flex-wrap p-3 rounded-xl bg-white/80 backdrop-blur border border-gray-100 shadow-card">
+        <div className="relative flex-1 max-w-xs min-w-[200px]">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+          <input type="text" placeholder="Search name, email, phone…" value={search} onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:border-primary-300 focus:ring-2 focus:ring-primary-100 focus:outline-none" />
+        </div>
+
+        <div className="h-5 w-px bg-gray-200 hidden sm:block" />
+
         <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
-          className="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-primary-100 cursor-pointer">
+          className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 cursor-pointer font-medium">
           <option value="all">All sources</option>
           <option value="inbound-call">Inbound Call</option>
           <option value="website">Website</option>
@@ -282,49 +331,54 @@ export function LeadsPage() {
           <option value="outbound">Outbound</option>
           <option value="campaign">Campaign</option>
         </select>
-        <Filter className="h-3 w-3 text-gray-400 ml-1" />
-        {STATUS_PILLS.map((s) => {
-          const isActive = statusFilter === s.value;
-          return (
-            <button
-              key={s.value}
-              onClick={() => setStatusFilter(s.value)}
-              className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
-                isActive
-                  ? 'border-primary-400 bg-primary-600 text-white'
-                  : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              {s.label}
-            </button>
-          );
-        })}
+
+        <div className="h-5 w-px bg-gray-200 hidden sm:block" />
+
+        <div className="inline-flex items-center gap-1 p-0.5 bg-gray-50 rounded-lg">
+          {STATUS_PILLS.map((s) => {
+            const isActive = statusFilter === s.value;
+            return (
+              <button
+                key={s.value}
+                onClick={() => setStatusFilter(s.value)}
+                className={`text-[11px] px-2.5 py-1 rounded-md font-semibold transition-all duration-200 ${
+                  isActive
+                    ? 'bg-primary-600 text-white shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                }`}
+              >
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+
         {(statusFilter !== 'all' || sourceFilter !== 'all' || search) && (
           <button onClick={() => { setStatusFilter('all'); setSourceFilter('all'); setSearch(''); }}
-            className="text-[11px] text-gray-500 hover:text-gray-800 underline-offset-2 hover:underline">Clear</button>
+            className="text-[11px] text-gray-500 hover:text-gray-800 font-medium ml-1">Clear all</button>
         )}
         {selectedIds.length > 0 && (
           <div className="flex items-center gap-1.5 ml-auto">
-            <span className="text-[11px] text-gray-600 font-medium">{selectedIds.length} selected</span>
-            <Button variant="danger" size="sm" onClick={handleDeleteSelected} className="rounded-md h-6 text-[11px]">
+            <span className="text-[11px] text-gray-600 font-semibold">{selectedIds.length} selected</span>
+            <Button variant="danger" size="sm" onClick={handleDeleteSelected} className="rounded-lg h-7 text-[11px]">
               <Trash2 className="h-3 w-3" />Delete
             </Button>
           </div>
         )}
       </div>
 
-      {/* Premium table */}
+      {/* ─── Table ─── */}
       {loading ? (
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm py-10 flex items-center justify-center">
-          <Loader2 className="h-6 w-6 animate-spin text-primary-600" />
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-card py-16 flex items-center justify-center">
+          <Loader2 className="h-7 w-7 animate-spin text-primary-600" />
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="rounded-2xl border border-gray-100 bg-white shadow-card overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs">
               <thead>
                 <tr className="bg-gray-50/80 border-b border-gray-100">
-                  <th className="w-9 px-2 py-1.5 text-left">
+                  <th className="w-9 px-2 py-2.5 text-left">
                     <input
                       type="checkbox"
                       checked={selectedIds.length > 0 && selectedIds.length === displayed.length}
@@ -332,26 +386,24 @@ export function LeadsPage() {
                       className="rounded border-gray-300 text-primary-600"
                     />
                   </th>
-                  <th className="w-14 px-2 py-1.5"></th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Lead</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Mobile</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Email</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Status</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Source</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Score</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Value</th>
-                  <th className="px-3 py-1.5 text-left text-[10px] uppercase tracking-wider font-semibold text-gray-500">Created</th>
+                  <th className="w-14 px-2 py-2.5"></th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Lead</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Mobile</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Email</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Status</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Source</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Score</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Value</th>
+                  <th className="px-3 py-2.5 text-left text-[10px] uppercase tracking-wider font-bold text-gray-500">Created</th>
                 </tr>
               </thead>
               <tbody>
                 {displayed.length === 0 && (
                   <tr>
-                    <td colSpan={10} className="px-3 py-10 text-center">
-                      <div className="inline-flex flex-col items-center gap-1.5">
-                        <Inbox className="h-10 w-10 text-gray-300" />
-                        <p className="text-sm font-medium text-gray-600">No leads match your filters</p>
-                        <p className="text-xs text-gray-400 max-w-sm">Adjust the search or add a new lead.</p>
-                      </div>
+                    <td colSpan={10} className="px-3 py-16 text-center">
+                      <Inbox className="h-10 w-10 text-gray-200 mx-auto mb-2" />
+                      <p className="text-sm font-semibold text-gray-600">No leads match your filters</p>
+                      <p className="text-xs text-gray-400 mt-1">Adjust the search or add a new lead.</p>
                     </td>
                   </tr>
                 )}
@@ -359,6 +411,8 @@ export function LeadsPage() {
                   const isSelected = selectedIds.includes(item.id);
                   const scoreColor = item.score >= 80 ? 'text-emerald-600' : item.score >= 50 ? 'text-amber-600' : 'text-gray-400';
                   const scoreBar = item.score >= 80 ? 'bg-emerald-500' : item.score >= 50 ? 'bg-amber-500' : 'bg-gray-300';
+                  const srcCfg = SOURCE_ICONS[item.source] || SOURCE_ICONS.manual;
+                  const SrcIcon = srcCfg.icon;
                   return (
                     <tr
                       key={item.id}
@@ -367,60 +421,65 @@ export function LeadsPage() {
                         isSelected ? 'bg-primary-50/20' : ''
                       }`}
                     >
-                      <td className="px-2 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => toggleSelect(item.id)}
-                          className="rounded border-gray-300 text-primary-600 h-3 w-3"
+                          className="rounded border-gray-300 text-primary-600 h-3.5 w-3.5"
                         />
                       </td>
-                      <td className="px-2 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => setViewLead(item)}
-                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-primary-50 hover:bg-primary-100 text-primary-700 text-[10px] font-medium transition-colors"
+                          className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md bg-primary-50 hover:bg-primary-100 text-primary-700 text-[10px] font-semibold transition-colors"
                           title="View all details"
                         >
                           <Eye className="h-2.5 w-2.5" /> View
                         </button>
                       </td>
-                      <td className="px-3 py-0.5 align-middle">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-primary-100 to-accent-100 text-primary-700 flex items-center justify-center text-[10px] font-semibold ring-1 ring-primary-100 flex-shrink-0">
+                      <td className="px-3 py-2 align-middle">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary-400 to-accent-400 text-white flex items-center justify-center text-[11px] font-bold shadow-sm flex-shrink-0">
                             {item.name[0]?.toUpperCase()}
                           </div>
                           <div className="min-w-0 leading-none">
-                            <p className="font-medium text-gray-900 truncate text-xs">{item.name}</p>
+                            <p className="font-semibold text-gray-900 truncate text-xs">{item.name}</p>
                             {item.company && <p className="text-[10px] text-gray-400 truncate mt-0.5">{item.company}</p>}
                           </div>
                         </div>
                       </td>
-                      <td className="px-3 py-0.5 align-middle" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-3 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
                         {item.phone ? (
                           <a href={`tel:${item.phone}`} className="inline-flex items-center gap-1 text-[11px] font-mono text-gray-700 hover:text-primary-600" title="Click to dial">
                             <Phone className="h-2.5 w-2.5 text-gray-400" />{item.phone}
                           </a>
-                        ) : <span className="text-xs text-gray-300">—</span>}
+                        ) : <span className="text-[10px] text-gray-300">—</span>}
                       </td>
-                      <td className="px-3 py-0.5 align-middle">
+                      <td className="px-3 py-2 align-middle">
                         {item.email
-                          ? <span className="text-[11px] text-gray-700">{item.email}</span>
-                          : <span className="text-xs text-gray-300">—</span>}
+                          ? <span className="text-[11px] text-gray-700 truncate block max-w-[160px]">{item.email}</span>
+                          : <span className="text-[10px] text-gray-300">—</span>}
                       </td>
-                      <td className="px-3 py-0.5 align-middle"><StatusBadge status={item.status} /></td>
-                      <td className="px-3 py-0.5 align-middle"><Badge variant="outline">{sourceLabels[item.source] || item.source}</Badge></td>
-                      <td className="px-3 py-0.5 align-middle">
+                      <td className="px-3 py-2 align-middle"><StatusBadge status={item.status} /></td>
+                      <td className="px-3 py-2 align-middle">
+                        <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md font-semibold ${srcCfg.color}`}>
+                          <SrcIcon className="h-2.5 w-2.5" />
+                          {sourceLabels[item.source] || item.source}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 align-middle">
                         <div className="flex items-center gap-1.5">
-                          <div className="w-8 h-0.5 bg-gray-100 rounded-full overflow-hidden">
-                            <div className={`h-full rounded-full ${scoreBar}`} style={{ width: `${item.score}%` }} />
+                          <div className="w-10 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${scoreBar} transition-all`} style={{ width: `${item.score}%` }} />
                           </div>
-                          <span className={`text-[11px] font-semibold ${scoreColor}`}>{item.score}</span>
+                          <span className={`text-[11px] font-bold tabular-nums ${scoreColor}`}>{item.score}</span>
                         </div>
                       </td>
-                      <td className="px-3 py-0.5 align-middle">
-                        <span className="text-[11px] font-medium text-gray-800">{item.value > 0 ? formatCurrency(item.value) : <span className="text-gray-300">—</span>}</span>
+                      <td className="px-3 py-2 align-middle">
+                        <span className="text-[11px] font-semibold text-gray-800">{item.value > 0 ? formatCurrency(item.value) : <span className="text-gray-300">—</span>}</span>
                       </td>
-                      <td className="px-3 py-0.5 align-middle"><span className="text-[11px] text-gray-500">{formatDate(item.createdAt)}</span></td>
+                      <td className="px-3 py-2 align-middle"><span className="text-[11px] text-gray-500">{formatDate(item.createdAt)}</span></td>
                     </tr>
                   );
                 })}
@@ -428,18 +487,18 @@ export function LeadsPage() {
             </table>
           </div>
 
-          <div className="px-3 py-2 border-t border-gray-100 flex items-center justify-between bg-gray-50/50">
-            <p className="text-xs text-gray-500">Showing <span className="font-medium text-gray-800">{displayed.length}</span> of <span className="font-medium text-gray-800">{total}</span></p>
+          <div className="px-4 py-2.5 border-t border-gray-100 flex items-center justify-between bg-gray-50/30">
+            <p className="text-[11px] text-gray-500">Showing <span className="font-semibold text-gray-800">{displayed.length}</span> of <span className="font-semibold text-gray-800">{total}</span></p>
             <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-md"><ChevronLeft className="h-3.5 w-3.5" /></Button>
-              <span className="text-xs text-gray-700 px-1">Page <span className="font-medium">{page}</span> / <span className="font-medium">{totalPages}</span></span>
-              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-md"><ChevronRight className="h-3.5 w-3.5" /></Button>
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded-lg h-7 w-7 p-0"><ChevronLeft className="h-3.5 w-3.5" /></Button>
+              <span className="text-[11px] text-gray-600 px-2 font-medium">{page} / {totalPages}</span>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded-lg h-7 w-7 p-0"><ChevronRight className="h-3.5 w-3.5" /></Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Add Lead modal — unchanged behavior, slight visual polish */}
+      {/* Add Lead modal */}
       {showAdd && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !adding && setShowAdd(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>

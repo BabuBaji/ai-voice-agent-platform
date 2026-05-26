@@ -190,7 +190,7 @@ export function PhoneNumbersPage() {
     if (activeTab !== 'buy') return;
     search();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, country, filterProvider, filterVoice, filterSms]);
+  }, [activeTab, country, filterProvider, filterVoice, filterSms, filterTollFree]);
 
   // Lazy-load wallet balance when Buy tab opens
   useEffect(() => {
@@ -247,7 +247,7 @@ export function PhoneNumbersPage() {
         rows = r.data;
         info = r.message;
       } else {
-        const r = await phoneNumberApi.listAvailable({ provider: filterProvider, country, capabilities: caps });
+        const r = await phoneNumberApi.listAvailable({ provider: filterProvider, country, capabilities: caps, numberType: filterTollFree === 'any' ? undefined : filterTollFree });
         rows = (r.data || []).map((row) => ({ ...row, provider: row.provider || filterProvider }));
         info = r.message;
       }
@@ -476,6 +476,8 @@ export function PhoneNumbersPage() {
                     <th className="text-left px-4 py-2 font-medium">Number</th>
                     <th className="text-left px-3 py-2 font-medium">Provider</th>
                     <th className="text-left px-3 py-2 font-medium">Capabilities</th>
+                    <th className="text-center px-3 py-2 font-medium">Inbound</th>
+                    <th className="text-center px-3 py-2 font-medium">Outbound</th>
                     <th className="text-left px-3 py-2 font-medium">Agent</th>
                     <th className="text-left px-3 py-2 font-medium">Status</th>
                     <th className="text-left px-3 py-2 font-medium">Carrier</th>
@@ -509,6 +511,20 @@ export function PhoneNumbersPage() {
                             {n.capabilities?.voice && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">Web</span>}
                             {n.capabilities?.sms && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">SMS</span>}
                           </div>
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          <InboundToggle
+                            enabled={n.inbound_enabled !== false}
+                            numberId={n.id}
+                            onToggled={(v) => setOwned((prev) => prev.map((x) => x.id === n.id ? { ...x, inbound_enabled: v } : x))}
+                          />
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          <OutboundToggle
+                            enabled={n.outbound_enabled !== false}
+                            numberId={n.id}
+                            onToggled={(v) => setOwned((prev) => prev.map((x) => x.id === n.id ? { ...x, outbound_enabled: v } : x))}
+                          />
                         </td>
                         <td className="px-3 py-2 text-sm">
                           {n.agent_id ? (
@@ -1071,6 +1087,50 @@ export function PhoneNumbersPage() {
 
 // ─────────────────────────────────────────────────────────────────────
 // Sub-components
+
+function InboundToggle({ enabled, numberId, onToggled }: { enabled: boolean; numberId: string; onToggled: (v: boolean) => void }) {
+  const [busy, setBusy] = useState(false);
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      const r = await phoneNumberApi.toggleInbound(numberId, !enabled);
+      onToggled(r.inbound_enabled);
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      title={enabled ? 'Inbound calls enabled — click to disable' : 'Inbound calls disabled — click to enable'}
+      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-success-500' : 'bg-gray-300'} ${busy ? 'opacity-50' : ''}`}
+    >
+      <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transform transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+    </button>
+  );
+}
+
+function OutboundToggle({ enabled, numberId, onToggled }: { enabled: boolean; numberId: string; onToggled: (v: boolean) => void }) {
+  const [busy, setBusy] = useState(false);
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      const r = await phoneNumberApi.toggleOutbound(numberId, !enabled);
+      onToggled(r.outbound_enabled);
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      title={enabled ? 'Outbound calls enabled — click to disable' : 'Outbound calls disabled — click to enable'}
+      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-primary-500' : 'bg-gray-300'} ${busy ? 'opacity-50' : ''}`}
+    >
+      <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transform transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+    </button>
+  );
+}
 
 function DeploymentBadge({ status, lastVerifiedAt, small }: { status: string; lastVerifiedAt?: string | null; small?: boolean }) {
   const cls = small ? 'text-[10px] px-1.5 py-0.5' : 'text-[11px] px-2 py-0.5';

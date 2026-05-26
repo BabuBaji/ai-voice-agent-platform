@@ -124,7 +124,7 @@ export class ExotelProvider implements TelephonyProvider {
     throw new Error('Exotel numbers must be released through the Exotel dashboard.');
   }
 
-  async listAvailableNumbers(country: string, capabilities?: string[]): Promise<ProvisionedNumber[]> {
+  async listAvailableNumbers(country: string, capabilities?: string[], numberType?: string): Promise<ProvisionedNumber[]> {
     // Exotel does not have a public API for listing available numbers
     logger.warn('Exotel available number listing is not available via API');
     return [];

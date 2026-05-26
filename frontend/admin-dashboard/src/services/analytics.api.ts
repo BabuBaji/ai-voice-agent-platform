@@ -43,6 +43,38 @@ function qs(f: AnalyticsFilter): string {
   return q.toString();
 }
 
+export interface SentimentPoint {
+  sentiment: string;
+  count: number;
+}
+
+export interface HourlyPoint {
+  hour: number;
+  calls: number;
+  avg_duration: number;
+}
+
+export interface DurationBucket {
+  bucket: string;
+  count: number;
+}
+
+export interface PerformanceData {
+  total_calls: number;
+  completed_calls: number;
+  resolution_rate: number;
+  sentiment_score: number;
+  positive_count: number;
+  negative_count: number;
+  neutral_count: number;
+  avg_duration: number;
+  max_duration: number;
+  min_duration: number;
+  unique_agents: number;
+  calls_per_day: number;
+  active_days: number;
+}
+
 export const analyticsApi = {
   summary: async (f: AnalyticsFilter = {}): Promise<AnalyticsSummary> => {
     const res = await api.get(`/analytics/metrics/summary?${qs(f)}`);
@@ -59,5 +91,21 @@ export const analyticsApi = {
   agents: async (): Promise<AgentRow[]> => {
     const res = await api.get('/analytics/metrics/agents');
     return (res.data?.agents ?? []) as AgentRow[];
+  },
+  sentiment: async (f: AnalyticsFilter = {}): Promise<SentimentPoint[]> => {
+    const res = await api.get(`/analytics/metrics/sentiment?${qs(f)}`);
+    return res.data;
+  },
+  hourlyDistribution: async (f: AnalyticsFilter = {}): Promise<HourlyPoint[]> => {
+    const res = await api.get(`/analytics/metrics/hourly-distribution?${qs(f)}`);
+    return res.data;
+  },
+  durationDistribution: async (f: AnalyticsFilter = {}): Promise<DurationBucket[]> => {
+    const res = await api.get(`/analytics/metrics/duration-distribution?${qs(f)}`);
+    return res.data;
+  },
+  performance: async (f: AnalyticsFilter = {}): Promise<PerformanceData> => {
+    const res = await api.get(`/analytics/metrics/performance?${qs(f)}`);
+    return res.data;
   },
 };

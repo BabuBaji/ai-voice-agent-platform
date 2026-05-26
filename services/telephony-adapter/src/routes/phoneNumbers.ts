@@ -93,11 +93,12 @@ phoneNumberRouter.get('/available', async (req: Request, res: Response, next: Ne
     const provider = ((req.query.provider as string) || 'plivo').toLowerCase();
     const country = ((req.query.country as string) || 'US').toUpperCase();
     const caps = ((req.query.capabilities as string) || 'voice').split(',').map((s) => s.trim()) as ('voice' | 'sms')[];
+    const numberType = ((req.query.number_type as string) || 'local').toLowerCase();
 
     const p = getProvider(provider);
     let real: any[] = [];
     let realErr: any = null;
-    try { real = await p.listAvailableNumbers(country, caps); } catch (err) { realErr = err; }
+    try { real = await p.listAvailableNumbers(country, caps, numberType); } catch (err) { realErr = err; }
 
     // If the real catalog returned at least one number, use it as-is.
     if (real.length > 0) {

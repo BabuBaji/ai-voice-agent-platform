@@ -39,19 +39,22 @@ export function sarvamConfigured(): boolean {
 // own demo also uses it for natural-conversation flows). All `anushka`
 // voices remain selectable per-agent via agent.voice_config.voice_id; this
 // default just changes what an unspecified voice resolves to.
+// Sarvam speaker defaults. 'kavya' is a natural female voice with warm
+// conversational delivery and clear Indic pronunciation. Change to 'arvind'
+// for male or 'maitreyi' for an alternative female.
 const SARVAM_VOICE_DEFAULTS: Record<string, string> = {
-  'te-in': 'manisha',
-  'hi-in': 'manisha',
-  'ta-in': 'manisha',
-  'kn-in': 'manisha',
-  'ml-in': 'manisha',
-  'mr-in': 'manisha',
-  'bn-in': 'manisha',
-  'gu-in': 'manisha',
-  'pa-in': 'manisha',
-  'or-in': 'manisha',
-  'as-in': 'manisha',
-  'en-in': 'manisha',
+  'te-in': 'kavya',
+  'hi-in': 'kavya',
+  'ta-in': 'kavya',
+  'kn-in': 'kavya',
+  'ml-in': 'kavya',
+  'mr-in': 'kavya',
+  'bn-in': 'kavya',
+  'gu-in': 'kavya',
+  'pa-in': 'kavya',
+  'or-in': 'kavya',
+  'as-in': 'kavya',
+  'en-in': 'kavya',
 };
 
 // Sarvam's public speaker catalog. Any voice_id from another provider
@@ -681,7 +684,7 @@ export async function synthesizeSarvamTtsMulaw(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        inputs: [clean.slice(0, 1900)],
+        inputs: [clean.slice(0, 500)],
         target_language_code: lang,
         speaker,
         speech_sample_rate: 8000,

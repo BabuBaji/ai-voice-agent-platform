@@ -123,16 +123,53 @@ function bargeInGraceMs(session: { language?: string; agentBargeInGraceMs?: numb
 }
 
 function emit(session: { callSid?: string; conversationId?: string | null } | null, event: LiveEvent, fields: Record<string, any> = {}): void {
-  logger.info(
-    {
-      evt: event,
-      call_sid: session?.callSid || null,
-      conv_id: session?.conversationId || null,
-      ts_ms: Date.now(),
-      ...fields,
-    },
-    `evt:${event}`,
-  );
+  const payload = {
+    evt: event,
+    call_sid: session?.callSid || null,
+    conv_id: session?.conversationId || null,
+    ts_ms: Date.now(),
+    ...fields,
+  };
+  logger.info(payload, `evt:${event}`);
+  // Persist live state to conversations.metadata so the Live Calls dashboard
+  // can show call_state, latency, provider info without a separate event bus.
+  if (session?.conversationId && (event === 'STATE_CHANGE' || event === 'CALL_CONNECTED' || event === 'CALL_ENDED' || event === 'LLM_RESPONSE_COMPLETED' || event === 'SARVAM_FALLBACK_TRIGGERED' || event === 'INTERRUPT_DETECTED' || event === 'INFLIGHT_WATCHDOG_FIRED' || event === 'STATE_FORCED_RECOVERY' || event === 'WEBSOCKET_DEAD')) {
+    persistLiveState(session as any, event, fields).catch(() => {});
+  }
+}
+
+let _persistThrottle: Map<string, number> = new Map();
+async function persistLiveState(session: StreamSession, event: LiveEvent, fields: Record<string, any>): Promise<void> {
+  const convId = session.conversationId;
+  if (!convId) return;
+  const now = Date.now();
+  const last = _persistThrottle.get(convId) || 0;
+  if (now - last < 1000 && event === 'STATE_CHANGE') return; // throttle state changes to 1/sec
+  _persistThrottle.set(convId, now);
+  const liveState = {
+    call_state: session.callState || 'IDLE',
+    stt_backend: session.sttBackend || null,
+    tts_backend: session.ttsBackend || null,
+    language: session.language || null,
+    is_inbound: session.isInbound || false,
+    last_event: event,
+    last_event_at: now,
+    ttft_ms: session.turn?.llmStartAt && session.turn?.sttFinalAt ? session.turn.llmStartAt - session.turn.sttFinalAt : null,
+    ttfa_ms: session.turn?.audioFirstByteAt && session.turn?.llmStartAt ? session.turn.audioFirstByteAt - session.turn.llmStartAt : null,
+    provider_pref: session.providerPref || null,
+    stt_downshifted: session.sarvamSttDownshifted || false,
+    dg_dead: session.dgDead || false,
+    ...fields,
+  };
+  try {
+    const convUrl = (process.env.CONVERSATION_SERVICE_URL || config.conversationServiceUrl || 'http://localhost:3003');
+    await fetch(`${convUrl}/api/v1/conversations/${convId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-tenant-id': session.tenantId || '' },
+      body: JSON.stringify({ metadata: { live_state: liveState } }),
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch { /* non-fatal */ }
 }
 
 // ---- module state ----------------------------------------------------------
@@ -1073,7 +1110,7 @@ async function callLLM(
   // returning empty replies (its <think> block ate the response slot) and
   // the agent fell back to "say-again" on every turn. 14 preserves enough
   // dialogue tail without blowing context. Do NOT lower this again.
-  const trimmedHistory = history.length > 14 ? history.slice(-14) : history;
+  const trimmedHistory = history.length > 10 ? history.slice(-10) : history;
 
   // Indic path: call Sarvam directly. CRITICAL — Sarvam-M's context window
   // is ONLY 7192 tokens. Build a SLIM system prompt for Sarvam that
@@ -1093,16 +1130,16 @@ async function callLLM(
     const sarvamHistory = trimmedHistory.length > 10 ? trimmedHistory.slice(-10) : trimmedHistory;
     let sarvamReply = await callSarvamLLM({
       systemPrompt: slimPrompt,
-      messages: sarvamHistory,
-      maxTokens: 500,
-      temperature: parseFloat(agent.temperature) || 0.7,
+      messages: sarvamHistory.slice(-4),
+      maxTokens: 300,
+      temperature: 0.5,
     });
     if (!sarvamReply && sarvamHistory.length > 4) {
       sarvamReply = await callSarvamLLM({
         systemPrompt: slimPrompt,
         messages: sarvamHistory.slice(-4),
         maxTokens: 800,
-        temperature: parseFloat(agent.temperature) || 0.7,
+        temperature: 0.5,
       });
     }
     if (sarvamReply) return sarvamReply;
@@ -1130,11 +1167,9 @@ async function callLLM(
         messages: trimmedHistory,
         provider: agent.llm_provider || 'google',
         model: agent.llm_model || 'gemini-2.5-flash',
-        temperature: parseFloat(agent.temperature) || 0.7,
+        temperature: 0.5,
         // Latency optimization 3: cap reply at 180 tokens. The system prompt
-        // already mandates 2–4 sentences; this hard limit shaves 50–200ms off
-        // generation when the model would otherwise meander.
-        max_tokens: 180,
+        max_tokens: 100,
         knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
       }),
     });
@@ -1146,7 +1181,7 @@ async function callLLM(
       const fallback = await callSarvamLLM({
         systemPrompt,
         messages: history,
-        temperature: parseFloat(agent.temperature) || 0.7,
+        temperature: 0.5,
       });
       if (fallback) return fallback;
     }
@@ -1228,7 +1263,7 @@ async function streamLLMReply(
     campaignInstruction: campaignContext?.instruction || null,
     contactVariables: campaignContext?.variables || null,
   });
-  const trimmedHistory = history.length > 14 ? history.slice(-14) : history;
+  const trimmedHistory = history.length > 10 ? history.slice(-10) : history;
 
   // Indic path: HYBRID Gemini-first → Sarvam-fallback for latency.
   // Sarvam-M's <think> block makes it 1.5–3s per turn; Gemini-Flash returns
@@ -1251,7 +1286,7 @@ async function streamLLMReply(
       campaignInstruction: campaignContext?.instruction || null,
       contactVariables: campaignContext?.variables || null,
     });
-    const sarvamHistory = trimmedHistory.length > 8 ? trimmedHistory.slice(-8) : trimmedHistory;
+    const sarvamHistory = trimmedHistory.length > 6 ? trimmedHistory.slice(-6) : trimmedHistory;
 
     // Step 1: try Gemini (fast). The system prompt is the slim prompt PLUS
     // a hard language-lock so Gemini doesn't drift to English mid-turn.
@@ -1259,110 +1294,87 @@ async function streamLLMReply(
       const l = String(language || '').toLowerCase().slice(0, 2);
       return ({ te: 'Telugu', hi: 'Hindi', ta: 'Tamil', kn: 'Kannada', ml: 'Malayalam', mr: 'Marathi', bn: 'Bengali', gu: 'Gujarati', pa: 'Punjabi', or: 'Odia', as: 'Assamese' } as Record<string, string>)[l] || 'the caller\'s language';
     })();
-    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE LOCK: This call is in ${langName}. EVERY word of your reply must be in ${langName} script (Telugu/Devanagari/etc — never Latin letters). If you don't know how to say something in ${langName}, use the closest natural phrasing. NEVER reply in English on this call.`;
+    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply in ${langName}. If caller asks for English or another language, SWITCH immediately.\n\nCRITICAL: Read the conversation history. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer, then ask the NEXT question. Move FORWARD every turn.`;
 
-    let geminiReply: string | null = null;
-    const inCooldown = Date.now() < geminiCooldownUntilMs;
-    if (inCooldown) {
-      logger.info(
-        { language, cooldownRemainingSec: Math.round((geminiCooldownUntilMs - Date.now()) / 1000) },
-        'streamLLMReply (Indic): Gemini cooldown active — skipping straight to Sarvam',
-      );
-    } else {
+    // LLM cascade: Groq (primary, sub-500ms) → Gemini → Sarvam (last resort).
+    // Groq's llama-3.3-70b handles Telugu/Hindi well and is 5-10x faster than
+    // Sarvam-M which wastes tokens on <think> blocks.
+    let finalReply: string | null = null;
+
+    // Step 1: Groq (fastest)
+    if (!finalReply && process.env.GROQ_API_KEY) {
       try {
-        const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
-        const r = await fetch(`${aiUrl}/chat/simple`, {
+        const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({
-            system_prompt: langLockedPrompt,
-            messages: sarvamHistory,
-            provider: 'google',
-            model: 'gemini-2.5-flash',
-            temperature: parseFloat(agent.temperature) || 0.7,
-            max_tokens: 200,
-            knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
+            model: 'llama-3.3-70b-versatile',
+            messages: [
+              { role: 'system', content: langLockedPrompt },
+              ...sarvamHistory,
+            ],
+            temperature: 0.5,
+            max_tokens: 100,
           }),
+          signal: AbortSignal.timeout(3000),
         });
-        if (r.ok) {
-          const data = (await r.json()) as { reply?: string; mock?: boolean };
-          if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
-            geminiReply = data.reply.trim();
-            // Clear any prior cooldown — Gemini is working again.
-            if (geminiCooldownUntilMs > 0) {
-              logger.info({ language }, 'streamLLMReply (Indic): Gemini cooldown cleared — fast path restored');
-              geminiCooldownUntilMs = 0;
-            }
-            logger.info(
-              { language, replyLen: geminiReply.length, preview: geminiReply.slice(0, 60) },
-              'streamLLMReply (Indic): Gemini hit — using fast path',
-            );
-          } else {
-            // Mock = rate-limited or provider-disabled. Set a cooldown so the
-            // next ~5 min of Indic calls skip the Gemini probe entirely.
-            if (data.mock) {
-              geminiCooldownUntilMs = Date.now() + GEMINI_COOLDOWN_MS;
-              logger.warn(
-                { language, cooldownMinutes: GEMINI_COOLDOWN_MS / 60_000 },
-                'streamLLMReply (Indic): Gemini returned mock — entering cooldown',
-              );
-            }
-            logger.info(
-              { language, mock: data.mock, hadIndic: data.reply ? hasIndicScript(data.reply) : false, preview: (data.reply || '').slice(0, 60) },
-              'streamLLMReply (Indic): Gemini drifted to English/mock — falling back to Sarvam',
-            );
+        if (groqResp.ok) {
+          const groqData = await groqResp.json() as any;
+          const groqText = groqData?.choices?.[0]?.message?.content?.trim();
+          if (groqText && groqText.length > 2) {
+            finalReply = groqText;
+            logger.info({ language, replyLen: groqText.length, preview: groqText.slice(0, 60) }, 'streamLLMReply (Indic): Groq hit — primary fast path');
           }
         }
       } catch (err: any) {
-        logger.warn({ err: err.message }, 'streamLLMReply (Indic): Gemini call threw — falling back to Sarvam');
+        logger.warn({ err: err.message }, 'streamLLMReply (Indic): Groq failed');
       }
     }
 
-    // Step 2: emit Gemini's reply if it survived the language gate; otherwise
-    // fall back to Sarvam. NOTE — Sarvam-M streaming was tried and reverted
-    // because its <think> block dominates token-output time on stream:true
-    // (no usable sentence emitted until ~30s in). Buffered call returns the
-    // think-stripped reply faster end-to-end (~10s typical) than streaming
-    // ever reaches the first user-visible sentence. callSarvamLLMStream is
-    // still exported for the day Sarvam exposes a non-thinking variant.
-    let finalReply = geminiReply;
+    // Step 2: Gemini (fallback if Groq fails)
+    if (!finalReply) {
+      const inCooldown = Date.now() < geminiCooldownUntilMs;
+      if (!inCooldown) {
+        try {
+          const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
+          const r = await fetch(`${aiUrl}/chat/simple`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              system_prompt: langLockedPrompt,
+              messages: sarvamHistory,
+              provider: 'google',
+              model: 'gemini-2.5-flash',
+              temperature: 0.5,
+              max_tokens: 50,
+            }),
+            signal: AbortSignal.timeout(3000),
+          });
+          if (r.ok) {
+            const data = (await r.json()) as { reply?: string; mock?: boolean };
+            if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
+              finalReply = data.reply.trim();
+              if (geminiCooldownUntilMs > 0) geminiCooldownUntilMs = 0;
+              logger.info({ language, replyLen: finalReply.length, preview: finalReply.slice(0, 60) }, 'streamLLMReply (Indic): Gemini hit');
+            } else if (data.mock) {
+              geminiCooldownUntilMs = Date.now() + GEMINI_COOLDOWN_MS;
+            }
+          }
+        } catch { /* Gemini failed, continue */ }
+      }
+    }
+
+    // Step 3: Sarvam (last resort)
     if (!finalReply && sarvamConfigured()) {
-      // Sarvam-m still emits a <think> reasoning block even with
-      // enable_thinking:false / reasoning_effort:low. With maxTokens=200 the
-      // whole budget is consumed by the think block (finish_reason:length)
-      // before any user-visible text — stripThinkBlocks() returns '' and we
-      // fall through to say-again. Each retry trims history (less reasoning
-      // surface) while bumping budget so the conversational reply still has
-      // room after <think>. All three values stay under Sarvam's starter-tier
-      // cap of 2048 — going above it returns HTTP 400. Tightened from
-      // 1500/1800/2000 → 800/1200/1500 because the prompt mandates ≤25-word
-      // replies — leaving ~600 tokens of room for the think block AND a 25-
-      // word reply, while making it impossible for Sarvam-M to monologue
-      // for 2000 tokens and get truncated mid-sentence.
       let sarvamReply = await callSarvamLLM({
         systemPrompt: slimPrompt,
-        messages: sarvamHistory,
-        maxTokens: 800,
-        temperature: parseFloat(agent.temperature) || 0.7,
+        messages: sarvamHistory.slice(-2),
+        maxTokens: 400,
+        temperature: 0.5,
       });
-      if (!sarvamReply) {
-        sarvamReply = await callSarvamLLM({
-          systemPrompt: slimPrompt,
-          messages: sarvamHistory.slice(-4),
-          maxTokens: 1200,
-          temperature: parseFloat(agent.temperature) || 0.7,
-        });
-      }
-      if (!sarvamReply) {
-        // Last-ditch: only the latest user turn, gives the model the absolute
-        // smallest reasoning surface so the <think> block can't run away.
-        sarvamReply = await callSarvamLLM({
-          systemPrompt: slimPrompt,
-          messages: sarvamHistory.slice(-1),
-          maxTokens: 1500,
-          temperature: parseFloat(agent.temperature) || 0.7,
-        });
-      }
       finalReply = sarvamReply;
     }
 
@@ -1419,8 +1431,8 @@ async function streamLLMReply(
         messages: trimmedHistory,
         provider: agent.llm_provider || 'google',
         model: agent.llm_model || 'gemini-2.5-flash',
-        temperature: parseFloat(agent.temperature) || 0.7,
-        max_tokens: 180,
+        temperature: 0.5,
+        max_tokens: 100,
         knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
       }),
     });
@@ -1716,6 +1728,7 @@ interface StreamSession {
     callback_time?: { value: string; confidence: number; confirmed: boolean; source: string };
     university?: { value: string; confidence: number; confirmed: boolean; source: string };
   };
+  isInbound: boolean;
 }
 
 // ---- main setup ------------------------------------------------------------
@@ -1734,6 +1747,8 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
     const callerFromUrl = url.searchParams.get('from') || '';
     const calledFromUrl = url.searchParams.get('to') || '';
     const callSidFromUrl = url.searchParams.get('callSid') || '';
+    const directionFromUrl = (url.searchParams.get('direction') || '').toLowerCase();
+    const isInbound = directionFromUrl === 'inbound';
 
     const session: StreamSession = {
       callSid: callSidFromUrl,
@@ -1744,6 +1759,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       calledNumber: calledFromUrl,
       conversationId: null,
       streamId: null,
+      isInbound,
       campaignContext: { instruction: null, variables: {}, targetName: null, campaignId: null },
       language: 'en-IN',
       sttBackend: null,
@@ -2029,15 +2045,17 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     session.callSid,
     lang
   );
+  const callDir = session.isInbound ? 'INBOUND' : 'OUTBOUND';
   try {
     await pool.query(
       `INSERT INTO calls (tenant_id, agent_id, conversation_id, direction, status, caller_number, called_number, provider, provider_call_sid)
-       VALUES ($1,$2,$3,'OUTBOUND','IN_PROGRESS',$4,$5,'plivo',$6)
+       VALUES ($1,$2,$3,$4,'IN_PROGRESS',$5,$6,'plivo',$7)
        ON CONFLICT (provider_call_sid) DO UPDATE SET status='IN_PROGRESS', conversation_id=EXCLUDED.conversation_id,
          caller_number=COALESCE(NULLIF(EXCLUDED.caller_number,''), calls.caller_number),
          called_number=COALESCE(NULLIF(EXCLUDED.called_number,''), calls.called_number)`,
-      [session.tenantId, session.agentId, session.conversationId, session.callerNumber, session.calledNumber, session.callSid]
+      [session.tenantId, session.agentId, session.conversationId, callDir, session.callerNumber, session.calledNumber, session.callSid]
     );
+    logger.info({ callSid: session.callSid, direction: callDir }, session.isInbound ? '[INBOUND_CALL_SESSION_CREATED]' : 'Outbound call row created');
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Failed to upsert call row');
   }
@@ -2199,7 +2217,7 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     // qualification questions about education / course / fees etc. (callers
     // hung up when the agent jumped into "have you completed Intermediate?"
     // on turn 1).
-    const greetingInstructionByLang: Record<string, string> = {
+    const outboundGreetingByLang: Record<string, string> = {
       'te-IN': 'కాల్ ఇప్పుడే కనెక్ట్ అయింది. తెలుగులో ఒక చిన్న వాక్యంలో మిమ్మల్ని పరిచయం చేసుకుని, "ఇప్పుడు మాట్లాడటానికి సమయం ఉందా?" అని మాత్రమే అడగండి. చదువు / కోర్సు / ఫీజు గురించి ఇంకా అడగవద్దు. 12 పదాలకు మించి కాదు.',
       'hi-IN': 'कॉल अभी कनेक्ट हुई है। हिंदी में एक छोटे वाक्य में अपना परिचय दें और सिर्फ "क्या अभी बात करने का समय है?" पूछें। शिक्षा/कोर्स/फीस के बारे में अभी मत पूछें। 12 शब्दों से ज़्यादा नहीं।',
       'ta-IN': 'அழைப்பு இப்போதே இணைக்கப்பட்டது. தமிழில் ஒரே வாக்கியத்தில் உங்களை அறிமுகப்படுத்தி, "இப்போது பேசுவதற்கு நேரம் இருக்கிறதா?" என்று மட்டும் கேளுங்கள். கல்வி/பாடம்/கட்டணம் பற்றி இப்போது கேட்க வேண்டாம். 12 சொற்களுக்கு மேல் வேண்டாம்.',
@@ -2208,6 +2226,16 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
       'mr-IN': 'कॉल आत्ता कनेक्ट झाला आहे. मराठीत एका लहान वाक्यात स्वतःची ओळख करून द्या आणि फक्त "आत्ता बोलण्यासाठी वेळ आहे का?" विचारा. शिक्षण/कोर्स/फी बद्दल आत्ता विचारू नका. 12 शब्दांपेक्षा जास्त नको.',
       en: 'The call just connected. In ONE short sentence introduce yourself by first name only, then ask casually "is this a good time to talk?". DO NOT ask about education, course, fees, or any qualification question yet. Maximum 15 words total. Sound like a real human, not a script.',
     };
+    const inboundGreetingByLang: Record<string, string> = {
+      'te-IN': 'కస్టమర్ మీ నంబర్‌కి కాల్ చేశారు. తెలుగులో కాల్ చేసినందుకు ధన్యవాదాలు, మిమ్మల్ని పరిచయం చేసుకుని "ఎలా సహాయం చేయగలను?" అని మాత్రమే అడగండి. 15 పదాలకు మించి కాదు.',
+      'hi-IN': 'ग्राहक ने आपके नंबर पर कॉल किया है। हिंदी में कॉल करने के लिए धन्यवाद कहें, अपना परिचय दें और सिर्फ "मैं कैसे मदद कर सकती हूँ?" पूछें। 15 शब्दों से ज़्यादा नहीं।',
+      'ta-IN': 'வாடிக்கையாளர் உங்கள் எண்ணை அழைத்துள்ளார். தமிழில் அழைப்பிற்கு நன்றி தெரிவித்து, உங்களை அறிமுகப்படுத்தி "எவ்வாறு உதவ முடியும்?" என்று மட்டும் கேளுங்கள். 15 சொற்களுக்கு மேல் வேண்டாம்.',
+      'kn-IN': 'ಗ್ರಾಹಕರು ನಿಮ್ಮ ನಂಬರ್‌ಗೆ ಕರೆ ಮಾಡಿದ್ದಾರೆ. ಕನ್ನಡದಲ್ಲಿ ಕರೆ ಮಾಡಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದ, ಪರಿಚಯ ಮಾಡಿಕೊಂಡು "ಏನು ಸಹಾಯ ಮಾಡಬಹುದು?" ಎಂದು ಮಾತ್ರ ಕೇಳಿ. 15 ಪದಗಳಿಗಿಂತ ಹೆಚ್ಚಿಲ್ಲ.',
+      'ml-IN': 'ഉപഭോക്താവ് നിങ്ങളുടെ നമ്പറിലേക്ക് വിളിച്ചു. മലയാളത്തിൽ വിളിച്ചതിന് നന്ദി പറഞ്ഞ്, പരിചയപ്പെടുത്തി "എങ്ങനെ സഹായിക്കാം?" എന്ന് മാത്രം ചോദിക്കുക. 15 വാക്കിൽ കൂടരുത്.',
+      'mr-IN': 'ग्राहकाने तुमच्या नंबरवर कॉल केला आहे. मराठीत कॉल केल्याबद्दल धन्यवाद सांगा, ओळख करून द्या आणि फक्त "मी कसा मदत करू शकतो?" विचारा. 15 शब्दांपेक्षा जास्त नको.',
+      en: 'A customer is calling YOUR number. Thank them for calling, introduce yourself by first name, and ask "How can I help you today?". Sound warm and welcoming. Maximum 15 words. Do NOT ask if it is a good time — they called you.',
+    };
+    const greetingInstructionByLang = session.isInbound ? inboundGreetingByLang : outboundGreetingByLang;
     const langKeyForGreeting = String(session.language || 'en').toLowerCase();
     const greetingInstruction =
       greetingInstructionByLang[langKeyForGreeting] ||
@@ -2222,7 +2250,7 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
         },
       ],
       session.campaignContext.targetName,
-      'outbound',
+      session.isInbound ? 'inbound' : 'outbound',
       session.language,
       session.campaignContext,
     );
@@ -2869,7 +2897,7 @@ const STOP_KEYWORDS: RegExp[] = [
  * it's the 5th sentence — callers should hear "answer + one question", not
  * five paragraphs of encyclopaedia followed by a question that gets cut.
  */
-export function trimReplyForVoice(text: string, maxSentences = 4, maxWords = 130): string {
+export function trimReplyForVoice(text: string, maxSentences = 2, maxWords = 50): string {
   const trimmed = (text || '').trim();
   if (!trimmed) return trimmed;
 
@@ -3071,7 +3099,7 @@ async function generateFarewell(session: StreamSession, callerGoodbye: string): 
         },
       ],
       null,
-      'outbound',
+      session.isInbound ? 'inbound' : 'outbound',
       session.language,
     );
     const cleaned = trimReplyForVoice((reply || '').replace(/\[END_CALL\]/gi, '').trim(), 1, 15);
@@ -3237,13 +3265,16 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   const lastAssistantAskedQuestion = lastWasAssistant && /[?？]\s*$/.test((lastEntry?.content || '').trim());
   const filler = isFillerOnly(text);
 
-  if (filler && lastWasAssistant && !lastAssistantAskedQuestion) {
+  // Only skip filler acks if the agent JUST spoke (within 5s). If it's been
+  // longer, the user is trying to get attention ("హలో? హలో?") — always respond.
+  const secsSinceLastReply = session.turn.ttsStartAt > 0 ? (Date.now() - session.turn.ttsStartAt) / 1000 : 999;
+  const isAttentionCall = /హలో|hello|hi|hey|हैलो|हलो|ஹலோ|ಹಲೋ/i.test(text);
+  const skipThisFiller = filler && lastWasAssistant && !lastAssistantAskedQuestion && secsSinceLastReply < 5 && !isAttentionCall;
+  if (skipThisFiller) {
     logger.info(
       { callSid: session.callSid, userText: text.slice(0, 60) },
       'Stream: skipped back-channel ack (no LLM trigger, would cause repeat)',
     );
-    // Persist for transcript fidelity, but DON'T add to LLM history and
-    // DON'T fire a reply.
     if (session.conversationId) {
       await appendMessage(session.conversationId, session.tenantId, 'user', text);
     }
@@ -3445,9 +3476,9 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     if (!session.inFlightReply) return;  // completed normally before timeout
     session.inFlightReply = false;
     session.inFlightWatchdog = null;
-    emit(session, 'INFLIGHT_WATCHDOG_FIRED', { elapsed_ms: 15000 });
+    emit(session, 'INFLIGHT_WATCHDOG_FIRED', { elapsed_ms: 8000 });
     logger.warn({ callSid: session.callSid }, 'inFlightReply watchdog fired — clearing stuck flag');
-  }, 15000);
+  }, 8000);
 
   handleUserUtterance(session).finally(() => {
     session.inFlightReply = false;
@@ -3507,7 +3538,7 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
         session.agent,
         session.history,
         session.campaignContext.targetName,
-        'outbound',
+        session.isInbound ? 'inbound' : 'outbound',
         session.language,
         session.campaignContext,
       );
@@ -3591,17 +3622,15 @@ async function streamAndPlayReply(
   const ttsFromLlm = session.turn.llmStartAt ? Date.now() - session.turn.llmStartAt : null;
   emit(session, 'TTS_STARTED', { mode: 'stream', ttsFromLlm_ms: ttsFromLlm });
 
-  // Stuck-state recovery: if AGENT_SPEAKING for >60s (TTS pipeline hang,
-  // network stall, deadlock), force back to LISTENING so the next user
-  // utterance can fire. Cleared on normal TTS completion.
+  // Stuck-state recovery: if AGENT_SPEAKING for >15s, force back to LISTENING.
   const agentSpeakingWatchdog = setTimeout(() => {
     if (!session.isAgentSpeaking) return;
-    logger.warn({ callSid: session.callSid }, 'AGENT_SPEAKING stuck >60s — forcing recovery');
+    logger.warn({ callSid: session.callSid }, 'AGENT_SPEAKING stuck >15s — forcing recovery');
     emit(session, 'STATE_FORCED_RECOVERY', { from: 'AGENT_SPEAKING', reason: 'tts_stuck' });
     session.isAgentSpeaking = false;
     session.bargeInRequested = false;
     setCallState(session, 'LISTENING', 'stuck_state_recovery');
-  }, 60000);
+  }, 15000);
 
   // For each sentence we kick off synthesis immediately and keep the promise
   // in `synthPromises`. The playback loop awaits them in order so audio
@@ -3630,7 +3659,7 @@ async function streamAndPlayReply(
     session.agent,
     session.history,
     session.campaignContext.targetName,
-    'outbound',
+    session.isInbound ? 'inbound' : 'outbound',
     session.language,
     session.campaignContext,
     (sentence: string) => {

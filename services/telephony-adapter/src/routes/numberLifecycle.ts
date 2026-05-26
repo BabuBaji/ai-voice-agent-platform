@@ -699,6 +699,58 @@ numberLifecycleRouter.post('/:id/resume', async (req: Request, res: Response, ne
   }
 });
 
+// POST /:id/inbound — toggle inbound_enabled on/off
+numberLifecycleRouter.post('/:id/inbound', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const num = await resolveNumber(req.params.id, tenantId, res);
+    if (!num) return;
+    const enabled = req.body.enabled !== false;
+    await pool.query(
+      `UPDATE phone_numbers SET inbound_enabled = $1 WHERE id = $2 AND tenant_id = $3`,
+      [enabled, num.id, tenantId],
+    );
+    await auditLog({
+      tenantId,
+      numberId: num.id,
+      eventType: enabled ? 'inbound_enabled' : 'inbound_disabled',
+      actor: actorFrom(req),
+      before: { inbound_enabled: !enabled },
+      after: { inbound_enabled: enabled },
+    });
+    res.json({ ok: true, inbound_enabled: enabled });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /:id/outbound — toggle outbound_enabled on/off
+numberLifecycleRouter.post('/:id/outbound', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res);
+    if (!tenantId) return;
+    const num = await resolveNumber(req.params.id, tenantId, res);
+    if (!num) return;
+    const enabled = req.body.enabled !== false;
+    await pool.query(
+      `UPDATE phone_numbers SET outbound_enabled = $1 WHERE id = $2 AND tenant_id = $3`,
+      [enabled, num.id, tenantId],
+    );
+    await auditLog({
+      tenantId,
+      numberId: num.id,
+      eventType: enabled ? 'outbound_enabled' : 'outbound_disabled',
+      actor: actorFrom(req),
+      before: { outbound_enabled: !enabled },
+      after: { outbound_enabled: enabled },
+    });
+    res.json({ ok: true, outbound_enabled: enabled });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // Routing config endpoints
 // ─────────────────────────────────────────────────────────────────────────
