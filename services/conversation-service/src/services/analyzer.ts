@@ -840,7 +840,15 @@ async function createLeadFromAnalysis(
     const rawEmail = (ke.email || '').trim();
     const rawAltPhone = (ke.alt_phone || '').trim();
     const validEmail = rawEmail.includes('@') && rawEmail.includes('.');
+    // Prefer the number the customer explicitly gave during the call
+    // (alt_phone from slot store) over the dialed number. Store both:
+    // primary = confirmed mobile, alt = dialed number.
     const mobile = rawAltPhone || prospectPhone || '';
+    const dialedNumber = isOutbound ? phones.called_number : phones.caller_number;
+    // If alt_phone differs from the dialed number, keep both
+    if (rawAltPhone && dialedNumber && rawAltPhone !== String(dialedNumber).replace(/\D/g, '').slice(-10)) {
+      ke.alt_phone = '+91' + String(dialedNumber).replace(/\D/g, '').slice(-10);
+    }
     const interested =
       ['HOT', 'WARM'].includes(String(result.lead_score || '').toUpperCase()) ||
       (typeof result.interest_level === 'number' && result.interest_level >= 50) ||
@@ -1042,6 +1050,18 @@ async function createLeadFromAnalysis(
         [JSON.stringify({ crm_lead_id: leadId }), conversationId, tenantId],
       );
     } catch (_e) { /* non-fatal */ }
+
+    // Auto-create first follow-up task for this lead (scheduler module).
+    try {
+      const { createFollowupForLead } = await import('./followupScheduler');
+      await createFollowupForLead(pool, {
+        tenantId,
+        leadId,
+        conversationId,
+        agentId: conv.agent_id || undefined,
+        type: 'admission_interest',
+      });
+    } catch (_e) { /* non-fatal — scheduler is optional */ }
 
     // Auto-send brochure on WhatsApp + SMS in parallel, best-effort. Defaults
     // come from env (BROCHURE_DEFAULT_URL, BROCHURE_DEFAULT_TEMPLATE) so each

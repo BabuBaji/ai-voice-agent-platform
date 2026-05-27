@@ -31,4 +31,8 @@ export const config = {
   },
 
   mediaStreamWsPort: parseInt(process.env.MEDIA_STREAM_WS_PORT || '3012', 10),
+
+  groq: {
+    apiKey: process.env.GROQ_API_KEY || '',
+  },
 };

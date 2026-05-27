@@ -20,6 +20,8 @@ import { whatsappCampaignsRouter } from './routes/whatsappCampaigns';
 import { whatsappWorkflowsRouter } from './routes/whatsappWorkflows';
 import { whatsappRetryQueueRouter } from './routes/whatsappRetryQueue';
 import { whatsappAnalyticsRouter } from './routes/whatsappAnalytics';
+import { followupRouter } from './routes/followups';
+import { followupFeaturesRouter } from './routes/followupFeatures';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -88,6 +90,9 @@ app.use('/api/v1/whatsapp', whatsappWorkflowsRouter);
 app.use('/api/v1/whatsapp', whatsappRetryQueueRouter);
 // Delivery analytics — counts by status, conversion rates, per-template.
 app.use('/api/v1/whatsapp', whatsappAnalyticsRouter);
+// Follow-up scheduler: auto follow-ups, visits, reminders, feedback
+app.use('/api/v1/followups', followupRouter);
+app.use('/api/v1/followups', followupFeaturesRouter);
 
 app.use(errorHandler);
 

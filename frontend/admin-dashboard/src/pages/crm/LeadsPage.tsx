@@ -47,7 +47,7 @@ export function LeadsPage() {
     setLoading(true);
     setError('');
     try {
-      const params: Record<string, any> = { page, limit };
+      const params: Record<string, any> = { page, limit, sort: 'created_at', order: 'desc' };
       if (statusFilter !== 'all') params.status = statusFilter;
       if (sourceFilter !== 'all') params.source = sourceFilter;
       if (search) params.search = search;
@@ -74,7 +74,7 @@ export function LeadsPage() {
           l.company.toLowerCase().includes(q) ||
           l.email.toLowerCase().includes(q) ||
           (l.phone || '').toLowerCase().includes(q);
-        const matchStatus = statusFilter === 'all' || l.status === statusFilter;
+        const matchStatus = statusFilter === 'all' || (l.status || '').toUpperCase() === statusFilter.toUpperCase();
         const matchSource = sourceFilter === 'all' || l.source === sourceFilter;
         return matchSearch && matchStatus && matchSource;
       })
@@ -205,24 +205,24 @@ export function LeadsPage() {
   // showing local counts is good enough for a top-of-page glance.
   const kpis = {
     total,
-    new: displayed.filter((l) => l.status === 'new').length,
-    contacted: displayed.filter((l) => l.status === 'contacted').length,
-    qualified: displayed.filter((l) => l.status === 'qualified').length,
-    proposal: displayed.filter((l) => l.status === 'proposal').length,
-    won: displayed.filter((l) => l.status === 'won').length,
-    lost: displayed.filter((l) => l.status === 'lost').length,
+    new: displayed.filter((l) => (l.status || '').toUpperCase() === 'NEW').length,
+    contacted: displayed.filter((l) => (l.status || '').toUpperCase() === 'CONTACTED').length,
+    qualified: displayed.filter((l) => (l.status || '').toUpperCase() === 'QUALIFIED').length,
+    interested: displayed.filter((l) => (l.status || '').toUpperCase() === 'INTERESTED').length,
+    needs_review: displayed.filter((l) => (l.status || '').toUpperCase() === 'NEEDS_REVIEW').length,
+    lost: displayed.filter((l) => ['UNQUALIFIED', 'LOST'].includes((l.status || '').toUpperCase())).length,
     avgScore: displayed.length > 0 ? Math.round(displayed.reduce((s, l) => s + (l.score || 0), 0) / displayed.length) : 0,
     totalValue: displayed.reduce((s, l) => s + (l.value || 0), 0),
   };
 
   const STATUS_PILLS = [
-    { value: 'all',       label: 'All' },
-    { value: 'new',       label: 'New' },
-    { value: 'contacted', label: 'Contacted' },
-    { value: 'qualified', label: 'Qualified' },
-    { value: 'proposal',  label: 'Proposal' },
-    { value: 'won',       label: 'Won' },
-    { value: 'lost',      label: 'Lost' },
+    { value: 'all',          label: 'All' },
+    { value: 'NEW',          label: 'New' },
+    { value: 'CONTACTED',    label: 'Contacted' },
+    { value: 'INTERESTED',   label: 'Interested' },
+    { value: 'QUALIFIED',    label: 'Qualified' },
+    { value: 'NEEDS_REVIEW', label: 'Review' },
+    { value: 'UNQUALIFIED',  label: 'Lost' },
   ];
 
   // Source icon mapping
@@ -326,9 +326,10 @@ export function LeadsPage() {
           className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 cursor-pointer font-medium">
           <option value="all">All sources</option>
           <option value="inbound-call">Inbound Call</option>
+          <option value="outbound-call">Outbound Call</option>
+          <option value="web-call">Web Call</option>
           <option value="website">Website</option>
           <option value="referral">Referral</option>
-          <option value="outbound">Outbound</option>
           <option value="campaign">Campaign</option>
         </select>
 
@@ -670,6 +671,9 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
     { section: 'contact', label: 'Mobile', icon: <Phone className="h-3.5 w-3.5 text-gray-400" />, value: lead.phone ? (
       <a href={`tel:${lead.phone}`} className="font-mono text-gray-800 hover:text-primary-600">{lead.phone}</a>
     ) : <span className="text-gray-400 italic">not provided</span> },
+    ...((cf.alt_phone || cf.dialed_number) ? [{ section: 'contact' as const, label: 'Dialed Number', icon: <PhoneIncoming className="h-3.5 w-3.5 text-gray-400" />, value: (
+      <a href={`tel:${cf.alt_phone || cf.dialed_number}`} className="font-mono text-gray-500 hover:text-primary-600">{(cf.alt_phone || cf.dialed_number || '').replace(/^\+91/, '')}</a>
+    ) }] : []),
     { section: 'contact', label: 'Email', icon: <Mail className="h-3.5 w-3.5 text-gray-400" />, value: editingEmail ? (
       <div className="flex items-center gap-2">
         <input

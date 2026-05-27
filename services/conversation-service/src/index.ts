@@ -13,6 +13,9 @@ import { startCrmRetrySweeper } from './services/crmRetrySweeper';
 import { startRecallScheduler } from './services/recallScheduler';
 import { startCampaignWorker } from './services/whatsappCampaignWorker';
 import { startRetrySweeper } from './services/whatsappRetrySweeper';
+import { initFollowupTables } from './db/followupTables';
+import { initFollowupFeatureTables } from './db/followupFeaturesInit';
+import { startFollowupScheduler } from './services/followupScheduler';
 import pino from 'pino';
 
 const logger = pino({
@@ -35,6 +38,8 @@ async function start(): Promise<void> {
     await initWebCallTables(pool);
     await initSupportTables(pool);
     await initContactTables(pool);
+    await initFollowupTables(pool);
+    await initFollowupFeatureTables(pool);
 
     const server = http.createServer(app);
 
@@ -78,6 +83,12 @@ async function start(): Promise<void> {
     // backoff (3 attempts). Disable with WA_RETRY_SWEEPER=off.
     if (process.env.WA_RETRY_SWEEPER !== 'off') {
       startRetrySweeper();
+    }
+
+    // Follow-up scheduler — auto-manages lead follow-ups, visit reminders,
+    // feedback collection, and daily reports. Disable with FOLLOWUP_SCHEDULER=off.
+    if (process.env.FOLLOWUP_SCHEDULER !== 'off') {
+      startFollowupScheduler(pool);
     }
 
     const shutdown = async () => {

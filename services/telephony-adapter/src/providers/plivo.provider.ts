@@ -427,6 +427,356 @@ export class PlivoProvider implements TelephonyProvider {
       return [];
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SMS / MMS
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async sendSms(opts: {
+    from: string; to: string; text: string;
+    callbackUrl?: string; dltEntityId?: string; dltTemplateId?: string;
+  }): Promise<{ messageUuid: string; status: string }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Message/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const payload: Record<string, any> = {
+      src: opts.from, dst: opts.to, text: opts.text, type: 'sms',
+    };
+    if (opts.callbackUrl) { payload.url = opts.callbackUrl; payload.method = 'POST'; }
+    if (opts.dltEntityId) payload.dlt_entity_id = opts.dltEntityId;
+    if (opts.dltTemplateId) payload.dlt_template_id = opts.dltTemplateId;
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo SMS ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    const uuid = Array.isArray(data.message_uuid) ? data.message_uuid[0] : (data.message_uuid || '');
+    logger.info({ to: opts.to, uuid }, 'Plivo SMS sent');
+    return { messageUuid: uuid, status: 'queued' };
+  }
+
+  async sendMms(opts: {
+    from: string; to: string; text: string; mediaUrls: string[]; callbackUrl?: string;
+  }): Promise<{ messageUuid: string; status: string }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Message/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const payload: Record<string, any> = {
+      src: opts.from, dst: opts.to, text: opts.text,
+      type: 'mms', media_urls: opts.mediaUrls,
+    };
+    if (opts.callbackUrl) { payload.url = opts.callbackUrl; payload.method = 'POST'; }
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo MMS ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    const uuid = Array.isArray(data.message_uuid) ? data.message_uuid[0] : (data.message_uuid || '');
+    logger.info({ to: opts.to, uuid }, 'Plivo MMS sent');
+    return { messageUuid: uuid, status: 'queued' };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Number Lookup
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async lookupNumber(number: string): Promise<{
+    country: string; numberType: string;
+    carrier: { name: string; mobileCountryCode: string; mobileNetworkCode: string };
+    format: { e164: string; national: string; international: string };
+  } | null> {
+    const digits = number.replace(/[^\d+]/g, '');
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      const r = await fetch(`https://lookup.plivo.com/v1/Number/${encodeURIComponent(digits)}?type=carrier`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return null;
+      const d: any = await r.json();
+      return {
+        country: d.country?.name || d.country_iso || '',
+        numberType: d.phone_number_type || d.type || '',
+        carrier: {
+          name: d.carrier?.name || '',
+          mobileCountryCode: d.carrier?.mobile_country_code || '',
+          mobileNetworkCode: d.carrier?.mobile_network_code || '',
+        },
+        format: {
+          e164: d.phone_number || digits,
+          national: d.national_format || '',
+          international: d.international_format || '',
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Verify (OTP)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async startVerification(opts: {
+    to: string; channel?: 'sms' | 'call'; codeLength?: number; locale?: string;
+  }): Promise<{ sessionUuid: string; status: string }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Verify/Session/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const payload: Record<string, any> = {
+      recipient: opts.to,
+      channel: opts.channel || 'sms',
+      code_length: opts.codeLength || 6,
+    };
+    if (opts.locale) payload.locale = opts.locale;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo Verify ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    logger.info({ to: opts.to, session: data.session_uuid }, 'Plivo OTP sent');
+    return { sessionUuid: data.session_uuid || '', status: data.status || 'sent' };
+  }
+
+  async checkVerification(opts: { sessionUuid: string; code: string }): Promise<{ status: string; valid: boolean }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Verify/Session/${opts.sessionUuid}/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ otp: opts.code }),
+    });
+    const text = await r.text();
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    const status = data.status || (r.ok ? 'verified' : 'invalid');
+    const valid = r.ok && (status === 'verified' || status === 'approved');
+    logger.info({ session: opts.sessionUuid, valid, status }, 'Plivo OTP check');
+    return { status, valid };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Conference
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async createConference(opts: {
+    conferenceName: string; callUuid: string;
+    muted?: boolean; record?: boolean; callbackUrl?: string; maxMembers?: number;
+  }): Promise<{ conferenceName: string }> {
+    const confUrl = `${config.publicBaseUrl}/api/v1/plivo/conference-xml?name=${encodeURIComponent(opts.conferenceName)}&record=${opts.record ? '1' : '0'}&max=${opts.maxMembers || 10}&muted=${opts.muted ? '1' : '0'}&cb=${encodeURIComponent(opts.callbackUrl || '')}`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Call/${opts.callUuid}/`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aleg_url: confUrl, aleg_method: 'GET' }),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo conference redirect ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    logger.info({ conferenceName: opts.conferenceName, callUuid: opts.callUuid }, 'Call redirected to conference');
+    return { conferenceName: opts.conferenceName };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Recordings
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async listRecordings(opts?: { callUuid?: string; limit?: number; offset?: number }): Promise<Array<{
+    recordingId: string; callUuid: string; url: string; duration: number; conferenceName: string;
+  }>> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const qs = new URLSearchParams();
+    if (opts?.callUuid) qs.set('call_uuid', opts.callUuid);
+    qs.set('limit', String(opts?.limit || 20));
+    if (opts?.offset) qs.set('offset', String(opts.offset));
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Recording/?${qs}`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return [];
+      const d: any = await r.json();
+      return (d.objects || []).map((o: any) => ({
+        recordingId: o.recording_id || '', callUuid: o.call_uuid || '',
+        url: o.recording_url || '', duration: parseFloat(o.recording_duration_ms || o.recording_duration || 0) / 1000,
+        conferenceName: o.conference_name || '',
+      }));
+    } catch { return []; }
+  }
+
+  async getRecording(recordingId: string): Promise<{
+    recordingId: string; callUuid: string; url: string; duration: number;
+  } | null> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Recording/${recordingId}/`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return null;
+      const o: any = await r.json();
+      return {
+        recordingId: o.recording_id || recordingId, callUuid: o.call_uuid || '',
+        url: o.recording_url || '', duration: parseFloat(o.recording_duration_ms || o.recording_duration || 0) / 1000,
+      };
+    } catch { return null; }
+  }
+
+  async deleteRecording(recordingId: string): Promise<void> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Recording/${recordingId}/`, {
+        method: 'DELETE', headers: { Authorization: `Basic ${auth}` },
+      });
+    } catch (err: any) {
+      logger.warn({ err: err.message, recordingId }, 'Plivo recording delete failed');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Owned Numbers
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async listOwnedNumbers(opts?: { limit?: number; offset?: number; numberType?: string }): Promise<Array<{
+    number: string; alias: string; voiceEnabled: boolean; smsEnabled: boolean;
+    monthlyRentalRate: number; numberType: string; region: string; appId: string;
+  }>> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const qs = new URLSearchParams();
+    qs.set('limit', String(opts?.limit || 20));
+    if (opts?.offset) qs.set('offset', String(opts.offset));
+    if (opts?.numberType) qs.set('type', opts.numberType);
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Number/?${qs}`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return [];
+      const d: any = await r.json();
+      return (d.objects || []).map((o: any) => ({
+        number: o.number ? ('+' + String(o.number).replace(/^\+/, '')) : '',
+        alias: o.alias || '', voiceEnabled: o.voice_enabled !== false,
+        smsEnabled: !!o.sms_enabled, monthlyRentalRate: parseFloat(o.monthly_rental_rate || 0),
+        numberType: o.number_type || o.type || '', region: o.region || '',
+        appId: o.application || '',
+      }));
+    } catch { return []; }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Call Detail Records
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async getCallDetailRecord(callUuid: string): Promise<{
+    callUuid: string; from: string; to: string; direction: string;
+    duration: number; billDuration: number; totalAmount: string;
+    answerTime: string; endTime: string; hangupCause: string; status: string;
+  } | null> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Call/${callUuid}/`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return null;
+      const o: any = await r.json();
+      return {
+        callUuid: o.call_uuid || callUuid, from: o.from_number || '', to: o.to_number || '',
+        direction: o.call_direction || '', duration: parseInt(o.call_duration || '0'),
+        billDuration: parseInt(o.billed_duration || '0'), totalAmount: o.total_amount || '0',
+        answerTime: o.answer_time || '', endTime: o.end_time || '',
+        hangupCause: o.hangup_cause_name || '', status: o.call_state || '',
+      };
+    } catch { return null; }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Pricing
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async getPricing(countryIso: string): Promise<{
+    country: string; countryCode: string;
+    phoneNumbers: { local: any; tollfree: any };
+    voice: { inbound: any; outbound: any };
+    message: { inbound: any; outbound: any };
+  } | null> {
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    try {
+      const r = await fetch(`https://api.plivo.com/v1/Account/${config.plivo.authId}/Pricing/?country_iso=${countryIso.toUpperCase()}`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+      if (!r.ok) return null;
+      const d: any = await r.json();
+      return {
+        country: d.country || '', countryCode: d.country_code || '',
+        phoneNumbers: { local: d.phone_numbers?.local || null, tollfree: d.phone_numbers?.tollfree || null },
+        voice: { inbound: d.voice?.inbound || null, outbound: d.voice?.outbound || null },
+        message: { inbound: d.message?.inbound || null, outbound: d.message?.outbound || null },
+      };
+    } catch { return null; }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Applications (webhook URL management)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async createApplication(opts: {
+    name: string; answerUrl: string; hangupUrl?: string;
+    messageUrl?: string; fallbackUrl?: string;
+  }): Promise<{ appId: string; name: string }> {
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Application/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const payload: Record<string, any> = {
+      app_name: opts.name, answer_url: opts.answerUrl, answer_method: 'POST',
+    };
+    if (opts.hangupUrl) { payload.hangup_url = opts.hangupUrl; payload.hangup_method = 'POST'; }
+    if (opts.messageUrl) { payload.message_url = opts.messageUrl; payload.message_method = 'POST'; }
+    if (opts.fallbackUrl) { payload.fallback_answer_url = opts.fallbackUrl; payload.fallback_method = 'POST'; }
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo Application ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    const data: any = (() => { try { return JSON.parse(text); } catch { return {}; } })();
+    logger.info({ appId: data.app_id, name: opts.name }, 'Plivo Application created');
+    return { appId: data.app_id || '', name: opts.name };
+  }
+
+  async updateNumberApplication(number: string, appId: string): Promise<void> {
+    const digits = number.replace(/[^\d]/g, '');
+    const url = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Number/${digits}/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: appId }),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      let detail: any = text; try { detail = JSON.parse(text); } catch {}
+      throw new Error(`Plivo Number update ${r.status}: ${extractPlivoErrorMessage(detail, text).slice(0, 300)}`);
+    }
+    logger.info({ number: digits, appId }, 'Number application updated');
+  }
 }
 
 export const plivoProvider = new PlivoProvider();

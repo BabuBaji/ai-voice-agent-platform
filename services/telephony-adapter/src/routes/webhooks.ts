@@ -1846,7 +1846,243 @@ webhookRouter.post('/plivo/whatsapp-inbound', async (req: Request, res: Response
       [tenantId, from, text, JSON.stringify({ message_uuid: uuid, from, to })],
     );
     logger.info({ tenantId, from, len: text.length }, 'Plivo WhatsApp inbound logged');
+
+    // Auto-reply via AI agent if a number+agent is linked
+    if (text.trim()) {
+      try {
+        const agentRow = await pool.query(
+          `SELECT agent_id FROM phone_numbers
+           WHERE tenant_id = $1 AND is_active = TRUE AND agent_id IS NOT NULL
+           ORDER BY deployed_at DESC NULLS LAST LIMIT 1`,
+          [tenantId],
+        );
+        const waAgentId = agentRow.rows[0]?.agent_id;
+        if (waAgentId) {
+          const result = await routeInboundToAI({
+            tenantId, agentId: waAgentId, from, text,
+            channel: 'whatsapp',
+            replyTo: to,
+          });
+          if (result.replied) {
+            logger.info({ tenantId, from, replyLen: result.replyText?.length }, 'WhatsApp AI auto-reply sent');
+          }
+        }
+      } catch (e: any) {
+        logger.warn({ err: e.message }, 'WhatsApp AI auto-reply failed (non-fatal)');
+      }
+    }
+
     res.status(200).json({ received: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared AI auto-reply helper for inbound SMS and WhatsApp
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function routeInboundToAI(opts: {
+  tenantId: string;
+  agentId: string;
+  from: string;
+  text: string;
+  channel: 'sms' | 'whatsapp';
+  replyTo: string;
+}): Promise<{ replied: boolean; replyText?: string }> {
+  try {
+    const fromDigits = String(opts.from).replace(/\D/g, '');
+    const aiResp = await fetch('http://localhost:8000/chat/simple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: opts.agentId,
+        tenant_id: opts.tenantId,
+        message: opts.text,
+        conversation_id: `${opts.channel}-${fromDigits}`,
+        metadata: { channel: opts.channel, from: opts.from },
+      }),
+    });
+    if (!aiResp.ok) {
+      logger.warn({ status: aiResp.status, channel: opts.channel }, 'AI runtime returned non-200 for inbound reply');
+      return { replied: false };
+    }
+    const aiData: any = await aiResp.json().catch(() => ({}));
+    const replyText = String(aiData.response || aiData.message || aiData.reply || '').trim();
+    if (!replyText || replyText.length < 2) return { replied: false };
+
+    const smsUrl = `https://api.plivo.com/v1/Account/${config.plivo.authId}/Message/`;
+    const auth = Buffer.from(`${config.plivo.authId}:${config.plivo.authToken}`).toString('base64');
+    const callbackPath = opts.channel === 'whatsapp' ? 'whatsapp-status' : 'sms-status';
+    const payload: Record<string, any> = {
+      src: opts.replyTo,
+      dst: opts.from,
+      text: replyText.slice(0, 1600),
+      url: `${config.publicBaseUrl}/webhooks/plivo/${callbackPath}`,
+      method: 'POST',
+    };
+    if (opts.channel === 'whatsapp') {
+      payload.type = 'whatsapp';
+    }
+
+    const sendResp = await fetch(smsUrl, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (sendResp.ok) {
+      const sendData: any = await sendResp.json().catch(() => ({}));
+      const msgUuid = sendData.message_uuid?.[0] || sendData.message_uuid || '';
+      // Log the outbound reply
+      await pool.query(
+        `INSERT INTO communication_logs
+           (tenant_id, channel, provider, recipient, message, status, provider_response, sent_at)
+         VALUES ($1, $2, 'plivo', $3, $4, 'sent', $5::jsonb, NOW())`,
+        [opts.tenantId, opts.channel, opts.from, replyText.slice(0, 1600),
+         JSON.stringify({ message_uuid: msgUuid, auto_reply: true })],
+      );
+      return { replied: true, replyText };
+    }
+    logger.warn({ status: sendResp.status, channel: opts.channel }, 'Plivo reply send failed');
+    return { replied: false };
+  } catch (err: any) {
+    logger.warn({ err: err.message, channel: opts.channel }, 'routeInboundToAI error');
+    return { replied: false };
+  }
+}
+
+/**
+ * POST /webhooks/plivo/sms-inbound — incoming SMS from a contact.
+ * Logs the message, looks up the assigned AI agent, generates an AI reply,
+ * and sends it back via Plivo SMS API.
+ */
+webhookRouter.post('/plivo/sms-inbound', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const from = body.From || body.from || '';
+    const to = body.To || body.to || '';
+    const text = body.Text || body.text || body.Body || '';
+    const uuid = body.MessageUUID || body.message_uuid || null;
+    if (!from || !to) {
+      logger.warn({ body }, 'Plivo sms-inbound webhook missing From/To');
+      res.status(200).json({ received: true });
+      return;
+    }
+
+    // Find which tenant + agent owns the destination number
+    const toDigits = String(to).replace(/\D/g, '');
+    const phoneRow = await pool.query(
+      `SELECT tenant_id, agent_id FROM phone_numbers
+       WHERE regexp_replace(phone_number, '\\D', '', 'g') = $1 AND is_active = TRUE
+       LIMIT 1`,
+      [toDigits],
+    );
+    if (!phoneRow.rows.length) {
+      logger.warn({ to, toDigits }, 'Plivo sms-inbound: no tenant matched number');
+      res.status(200).json({ received: true });
+      return;
+    }
+    const { tenant_id: tenantId, agent_id: agentId } = phoneRow.rows[0];
+
+    // Log inbound message
+    await pool.query(
+      `INSERT INTO communication_logs
+         (tenant_id, channel, provider, recipient, message, status, provider_response, sent_at)
+       VALUES ($1, 'sms_inbound', 'plivo', $2, $3, 'received', $4::jsonb, NOW())`,
+      [tenantId, from, text, JSON.stringify({ message_uuid: uuid, from, to })],
+    );
+    logger.info({ tenantId, from, len: text.length }, 'Plivo SMS inbound logged');
+
+    // AI auto-reply if agent is assigned
+    if (agentId && text.trim()) {
+      try {
+        const result = await routeInboundToAI({
+          tenantId, agentId, from, text,
+          channel: 'sms',
+          replyTo: to,
+        });
+        if (result.replied) {
+          logger.info({ tenantId, from, replyLen: result.replyText?.length }, 'SMS AI auto-reply sent');
+        }
+      } catch (e: any) {
+        logger.warn({ err: e.message }, 'SMS AI auto-reply failed (non-fatal)');
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /webhooks/plivo/machine-detection — AMD callback.
+ * Plivo fires this when machine_detection=true was set on an outbound call.
+ * Body: CallUUID, Machine (true/false), MachineDetectionDuration
+ */
+webhookRouter.post('/plivo/machine-detection', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const callUuid = body.CallUUID || body.call_uuid || '';
+    const machineRaw = body.Machine || body.machine || '';
+    const duration = body.MachineDetectionDuration || body.machine_detection_duration || 0;
+    const isMachine = machineRaw === true || machineRaw === 'true' || machineRaw === 'machine';
+    const amdResult = isMachine ? 'machine' : 'human';
+
+    logger.info({ callUuid, amdResult, duration }, 'Plivo AMD callback');
+
+    if (callUuid) {
+      await pool.query(
+        `UPDATE calls SET metadata = COALESCE(metadata, '{}')::jsonb || $1::jsonb WHERE provider_call_sid = $2`,
+        [JSON.stringify({ amd_result: amdResult, amd_duration: duration }), callUuid],
+      );
+      // Update campaign target if this was a campaign call
+      await pool.query(
+        `UPDATE campaign_targets SET metadata = COALESCE(metadata, '{}')::jsonb || $1::jsonb
+         WHERE call_sid = $2`,
+        [JSON.stringify({ amd_result: amdResult }), callUuid],
+      ).catch(() => {});
+    }
+    res.status(200).json({ received: true, amd_result: amdResult });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /webhooks/plivo/conference-event — conference room lifecycle events.
+ * Events: ConferenceEnter, ConferenceExit, ConferenceDigit, ConferenceRecording,
+ *         ConferenceFloor, ConferenceSpeaking
+ */
+webhookRouter.post('/plivo/conference-event', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body || {};
+    const event = body.Event || body.event || '';
+    const conferenceName = body.ConferenceName || body.conference_name || '';
+    const conferenceUuid = body.ConferenceUUID || body.conference_uuid || '';
+    const memberIdRaw = body.ConferenceMemberID || body.conference_member_id || '';
+    const callUuid = body.CallUUID || body.call_uuid || '';
+
+    logger.info({ event, conferenceName, conferenceUuid, memberIdRaw, callUuid }, 'Plivo conference event');
+
+    if (event === 'ConferenceRecording') {
+      const recordUrl = body.RecordUrl || body.record_url || '';
+      const recordingId = body.RecordingID || body.recording_id || '';
+      if (recordUrl) {
+        await pool.query(
+          `UPDATE calls SET recording_url = $1,
+             metadata = COALESCE(metadata, '{}')::jsonb || $2::jsonb
+           WHERE provider_call_sid = $3`,
+          [recordUrl, JSON.stringify({
+            conference_recording_id: recordingId,
+            conference_name: conferenceName,
+          }), callUuid],
+        ).catch(() => {});
+      }
+    }
+
+    res.status(200).json({ received: true, event });
   } catch (err) {
     next(err);
   }

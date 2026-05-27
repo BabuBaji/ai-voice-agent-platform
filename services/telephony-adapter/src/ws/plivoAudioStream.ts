@@ -116,10 +116,10 @@ function bargeInGraceMs(session: { language?: string; agentBargeInGraceMs?: numb
   const isIndic = INDIC_LANG_PREFIXES.some((p) => lang === p || lang.startsWith(p + '-'));
   if (isIndic) {
     const envIndic = Number(process.env.BARGE_IN_GRACE_MS_INDIC);
-    return Number.isFinite(envIndic) && envIndic > 0 ? envIndic : 2000;
+    return Number.isFinite(envIndic) && envIndic > 0 ? envIndic : 3500;
   }
   const envEn = Number(process.env.BARGE_IN_GRACE_MS_EN);
-  return Number.isFinite(envEn) && envEn > 0 ? envEn : 1500;
+  return Number.isFinite(envEn) && envEn > 0 ? envEn : 2000;
 }
 
 function emit(session: { callSid?: string; conversationId?: string | null } | null, event: LiveEvent, fields: Record<string, any> = {}): void {
@@ -1131,14 +1131,14 @@ async function callLLM(
     let sarvamReply = await callSarvamLLM({
       systemPrompt: slimPrompt,
       messages: sarvamHistory.slice(-4),
-      maxTokens: 300,
+      maxTokens: 500,
       temperature: 0.5,
     });
     if (!sarvamReply && sarvamHistory.length > 4) {
       sarvamReply = await callSarvamLLM({
         systemPrompt: slimPrompt,
         messages: sarvamHistory.slice(-4),
-        maxTokens: 800,
+        maxTokens: 1000,
         temperature: 0.5,
       });
     }
@@ -1168,8 +1168,7 @@ async function callLLM(
         provider: agent.llm_provider || 'google',
         model: agent.llm_model || 'gemini-2.5-flash',
         temperature: 0.5,
-        // Latency optimization 3: cap reply at 180 tokens. The system prompt
-        max_tokens: 100,
+        max_tokens: 250,
         knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
       }),
     });
@@ -1288,109 +1287,104 @@ async function streamLLMReply(
     });
     const sarvamHistory = trimmedHistory.length > 6 ? trimmedHistory.slice(-6) : trimmedHistory;
 
-    // Step 1: try Gemini (fast). The system prompt is the slim prompt PLUS
-    // a hard language-lock so Gemini doesn't drift to English mid-turn.
+    // Language-lock the prompt so LLM doesn't drift to English mid-turn.
     const langName = (() => {
       const l = String(language || '').toLowerCase().slice(0, 2);
       return ({ te: 'Telugu', hi: 'Hindi', ta: 'Tamil', kn: 'Kannada', ml: 'Malayalam', mr: 'Marathi', bn: 'Bengali', gu: 'Gujarati', pa: 'Punjabi', or: 'Odia', as: 'Assamese' } as Record<string, string>)[l] || 'the caller\'s language';
     })();
-    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply in ${langName}. If caller asks for English or another language, SWITCH immediately.\n\nCRITICAL: Read the conversation history. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer, then ask the NEXT question. Move FORWARD every turn.`;
-
-    // LLM cascade: Groq (primary, sub-500ms) → Gemini → Sarvam (last resort).
-    // Groq's llama-3.3-70b handles Telugu/Hindi well and is 5-10x faster than
-    // Sarvam-M which wastes tokens on <think> blocks.
-    let finalReply: string | null = null;
-
-    // Step 1: Groq (fastest)
-    if (!finalReply && process.env.GROQ_API_KEY) {
-      try {
-        const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
-            messages: [
-              { role: 'system', content: langLockedPrompt },
-              ...sarvamHistory,
-            ],
-            temperature: 0.5,
-            max_tokens: 100,
-          }),
-          signal: AbortSignal.timeout(3000),
-        });
-        if (groqResp.ok) {
-          const groqData = await groqResp.json() as any;
-          const groqText = groqData?.choices?.[0]?.message?.content?.trim();
-          if (groqText && groqText.length > 2) {
-            finalReply = groqText;
-            logger.info({ language, replyLen: groqText.length, preview: groqText.slice(0, 60) }, 'streamLLMReply (Indic): Groq hit — primary fast path');
-          }
-        }
-      } catch (err: any) {
-        logger.warn({ err: err.message }, 'streamLLMReply (Indic): Groq failed');
-      }
+    // Build a conversation summary from history so even with trimmed context
+    // the LLM knows what's already been discussed and captured.
+    const histSummaryParts: string[] = [];
+    for (const h of history) {
+      if (h.role === 'user') histSummaryParts.push(`Customer: ${h.content.split('\n')[0].slice(0, 60)}`);
+      else if (h.role === 'assistant') histSummaryParts.push(`Agent: ${h.content.slice(0, 60)}`);
     }
+    const histSummary = histSummaryParts.length > 6
+      ? `\n\nCALL SUMMARY SO FAR (DO NOT re-ask these):\n${histSummaryParts.slice(0, -4).map(l => `- ${l}`).join('\n')}`
+      : '';
 
-    // Step 2: Gemini (fallback if Groq fails)
-    if (!finalReply) {
-      const inCooldown = Date.now() < geminiCooldownUntilMs;
-      if (!inCooldown) {
+    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply ONLY in ${langName} script. Never reply in English unless the caller explicitly asks. Keep replies to 1-2 SHORT sentences. Complete every sentence fully.\n\nCRITICAL: Read the conversation history AND the CALL SUMMARY below. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer in 2-3 words, then ask the NEXT question. Move FORWARD every turn. If the caller says "already told you", apologize briefly and ask the NEXT new question.${histSummary}`;
+
+    // Single-model strategy: Groq llama-3.3-70b is the fastest and most
+    // reliable for Indic voice. Only fall back to Sarvam if Groq is down.
+    let finalReply: string | null = null;
+    const t0 = Date.now();
+
+    // PRIMARY: Groq — try multiple models with separate rate-limit pools.
+    // llama-3.1-8b-instant (fastest, 500K TPD) → llama-3.3-70b-versatile (best, 100K TPD).
+    const groqKey = config.groq?.apiKey || process.env.GROQ_API_KEY || '';
+    const groqModels = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'];
+    if (groqKey) {
+      for (const groqModel of groqModels) {
+        if (finalReply) break;
         try {
-          const aiUrl = process.env.AI_RUNTIME_URL || 'http://localhost:8000';
-          const r = await fetch(`${aiUrl}/chat/simple`, {
+          const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Authorization': `Bearer ${groqKey}`,
+              'Content-Type': 'application/json',
+            },
             body: JSON.stringify({
-              system_prompt: langLockedPrompt,
-              messages: sarvamHistory,
-              provider: 'google',
-              model: 'gemini-2.5-flash',
-              temperature: 0.5,
-              max_tokens: 50,
+              model: groqModel,
+              messages: [
+                { role: 'system', content: langLockedPrompt },
+                ...sarvamHistory,
+              ],
+              temperature: 0.4,
+              max_tokens: 200,
             }),
-            signal: AbortSignal.timeout(3000),
+            signal: AbortSignal.timeout(4000),
           });
-          if (r.ok) {
-            const data = (await r.json()) as { reply?: string; mock?: boolean };
-            if (!data.mock && data.reply && data.reply.trim() && hasIndicScript(data.reply)) {
-              finalReply = data.reply.trim();
-              if (geminiCooldownUntilMs > 0) geminiCooldownUntilMs = 0;
-              logger.info({ language, replyLen: finalReply.length, preview: finalReply.slice(0, 60) }, 'streamLLMReply (Indic): Gemini hit');
-            } else if (data.mock) {
-              geminiCooldownUntilMs = Date.now() + GEMINI_COOLDOWN_MS;
+          if (groqResp.ok) {
+            const groqData = await groqResp.json() as any;
+            const groqText = groqData?.choices?.[0]?.message?.content?.trim();
+            if (groqText && groqText.length > 2) {
+              finalReply = groqText;
+              logger.info({ language, model: groqModel, replyLen: groqText.length, latencyMs: Date.now() - t0, preview: groqText.slice(0, 80) }, 'streamLLMReply (Indic): Groq hit');
+            }
+          } else {
+            const errBody = await groqResp.text().catch(() => '');
+            const is429 = groqResp.status === 429;
+            if (is429) {
+              logger.info({ model: groqModel, latencyMs: Date.now() - t0 }, 'streamLLMReply (Indic): Groq 429 — trying next model');
+            } else {
+              logger.warn({ status: groqResp.status, model: groqModel, body: errBody.slice(0, 150), latencyMs: Date.now() - t0 }, 'streamLLMReply (Indic): Groq HTTP error');
             }
           }
-        } catch { /* Gemini failed, continue */ }
+        } catch (err: any) {
+          logger.warn({ err: err.message, model: groqModel, latencyMs: Date.now() - t0 }, 'streamLLMReply (Indic): Groq failed');
+        }
       }
+    } else {
+      logger.warn('streamLLMReply (Indic): GROQ_API_KEY not set — skipping Groq');
     }
 
-    // Step 3: Sarvam (last resort)
+    // FALLBACK: Sarvam LLM (only if Groq is unavailable)
+    // Sarvam-M is a reasoning model that emits <think>...</think> before
+    // the reply. Long histories cause it to burn all tokens on thinking.
+    // Fix: trim to last 4 messages + use 1500 max_tokens so it has room
+    // for both the think block and the actual reply.
     if (!finalReply && sarvamConfigured()) {
       let sarvamReply = await callSarvamLLM({
-        systemPrompt: slimPrompt,
-        messages: sarvamHistory.slice(-2),
-        maxTokens: 400,
-        temperature: 0.5,
+        systemPrompt: langLockedPrompt,
+        messages: sarvamHistory.slice(-4),
+        maxTokens: 1500,
+        temperature: 0.4,
       });
-      finalReply = sarvamReply;
+      if (sarvamReply) {
+        finalReply = sarvamReply;
+        logger.info({ language, replyLen: sarvamReply.length, latencyMs: Date.now() - t0, preview: sarvamReply.slice(0, 80) }, 'streamLLMReply (Indic): Sarvam fallback hit');
+      }
     }
 
     if (!finalReply) {
       const lang = String(language).toLowerCase();
       const sayAgain = SAY_AGAIN[lang] || SAY_AGAIN[lang.slice(0, 2)] || 'Sorry, could you say that again?';
-      logger.warn(
-        { language, historyLen: history.length },
-        'streamLLMReply: both Gemini and Sarvam failed on Indic call — emitting native say-again',
-      );
+      logger.warn({ language, historyLen: history.length, latencyMs: Date.now() - t0 }, 'streamLLMReply: all LLMs failed — emitting say-again');
       onSentence(sayAgain);
       return sayAgain;
     }
-    // Fallthrough path: Gemini reply or Sarvam returned a final reply but
-    // streaming didn't emit (e.g. all-think-block output). Sentence-split
-    // and emit the buffered text so TTS gets a chance.
+    // Sentence-split and emit so TTS synthesizes each part in parallel.
     const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
     if (sents.length === 0) {
       onSentence(finalReply);
@@ -1432,7 +1426,7 @@ async function streamLLMReply(
         provider: agent.llm_provider || 'google',
         model: agent.llm_model || 'gemini-2.5-flash',
         temperature: 0.5,
-        max_tokens: 100,
+        max_tokens: 250,
         knowledge_base_ids: Array.isArray(agent?.knowledge_base_ids) ? agent.knowledge_base_ids : [],
       }),
     });
@@ -2299,16 +2293,21 @@ async function onStop(session: StreamSession): Promise<void> {
   // the slot store's values are higher-confidence because they passed
   // through readback + yes-confirmation gates during the call.
   //
-  // Stored under metadata.captured_slots so it's clearly the post-call
-  // bridge data and doesn't collide with the campaign overlay keys.
+  // Persist captured_slots directly via SQL (bypasses the PUT handler
+  // which can overwrite metadata with live_state). Uses jsonb || merge
+  // so captured_slots coexists with live_state.
   if (session.conversationId && Object.keys(session.collectedFields).length > 0) {
     try {
       await pool.query(
         `UPDATE conversations
-         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+         SET metadata = jsonb_set(
+           COALESCE(metadata, '{}'::jsonb),
+           '{captured_slots}',
+           $1::jsonb
+         )
          WHERE id = $2 AND tenant_id = $3`,
         [
-          JSON.stringify({ captured_slots: session.collectedFields }),
+          JSON.stringify(session.collectedFields),
           session.conversationId,
           session.tenantId,
         ],
@@ -2318,6 +2317,7 @@ async function onStop(session: StreamSession): Promise<void> {
           callSid: session.callSid,
           conv: session.conversationId,
           slots: Object.keys(session.collectedFields),
+          values: Object.fromEntries(Object.entries(session.collectedFields).map(([k, v]: [string, any]) => [k, v?.value])),
         },
         'onStop: persisted slot store to conversations.metadata.captured_slots',
       );
@@ -3161,6 +3161,17 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   const text = (rawText || '').trim();
   if (!text) return;
 
+  // Dedup guard: when both Deepgram and Sarvam STT are active (fallback
+  // path), both can return the same final transcript within a short window.
+  // Drop the duplicate so the LLM doesn't see the same user turn twice.
+  const now = Date.now();
+  const lastU = (session as any)._lastUserUtterance as { text: string; ts: number } | undefined;
+  if (lastU && lastU.text === text && now - lastU.ts < 3000) {
+    logger.info({ callSid: session.callSid, userText: text.slice(0, 60) }, 'Stream: dropped duplicate STT utterance');
+    return;
+  }
+  (session as any)._lastUserUtterance = { text, ts: now };
+
   // STT-artifact guard: the carrier (voicemail prompts, "this call is being
   // recorded" disclaimers, transcription confirmations) bleeds into the STT
   // stream and gets recognised as caller speech. Drop it — never persist,
@@ -3279,6 +3290,43 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
       await appendMessage(session.conversationId, session.tenantId, 'user', text);
     }
     return;
+  }
+
+  // ACK-DEBOUNCE: when the customer says a SINGLE short ack word like
+  // "ఓకే", "OK", "సరే", "yes" in response to a question, wait 1.5s to see
+  // if they continue speaking. Multi-word sentences are NEVER debounced.
+  // The _ackBypass flag prevents infinite re-entry when the timer fires.
+  const ackBypass = (session as any)._ackBypass === true;
+  if (!ackBypass) {
+    const ackWordCount = text.split(/\s+/).filter(Boolean).length;
+    const isShortAck = ackWordCount === 1 && /^(ok(ay)?|yes|yeah|yep|haa|ha|hmm|hm|ఓకే|సరే|అవును|ఊ|ఆ|हाँ|हां|ठीक|अच्छा|हा|ஓகே|சரி|ಸರಿ|ശരി)[\s.!]*$/i.test(text.trim());
+    if (isShortAck && lastAssistantAskedQuestion && !session.isAgentSpeaking) {
+      const debounceMs = 1500;
+      const pending = (session as any)._ackDebounce as { text: string; timer: any } | undefined;
+      if (pending?.timer) clearTimeout(pending.timer);
+      (session as any)._ackDebounce = {
+        text,
+        timer: setTimeout(() => {
+          (session as any)._ackDebounce = undefined;
+          (session as any)._ackBypass = true;
+          dispatchUserUtterance(session, text).finally(() => { (session as any)._ackBypass = false; });
+        }, debounceMs),
+      };
+      logger.info({ callSid: session.callSid, userText: text.slice(0, 40), debounceMs }, 'Stream: ack-debounce started — waiting for continuation');
+      return;
+    }
+    // If a real utterance arrives while an ack is pending, merge them.
+    const pendingAck = (session as any)._ackDebounce as { text: string; timer: any } | undefined;
+    if (pendingAck?.timer) {
+      clearTimeout(pendingAck.timer);
+      (session as any)._ackDebounce = undefined;
+      const merged = `${pendingAck.text} ${text}`.trim();
+      logger.info({ callSid: session.callSid, merged: merged.slice(0, 80) }, 'Stream: ack-debounce merged with continuation');
+      (session as any)._ackBypass = true;
+      return dispatchUserUtterance(session, merged).finally(() => { (session as any)._ackBypass = false; });
+    }
+  } else {
+    (session as any)._ackBypass = false;
   }
 
   // ECHO REJECTION: while the agent is speaking, Plivo's PSTN echo
@@ -3457,6 +3505,23 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
     // loop as soon as the current reply completes.
     return;
   }
+  // Max-turns safety: if conversation exceeds 40 turns, auto-close to
+  // prevent infinite loops when LLMs keep failing with "say-again".
+  if (session.history.length > 40 && !session.callEnded) {
+    session.callEnded = true;
+    const lang = String(session.language || '').slice(0, 2);
+    const autoClose = lang === 'te' ? 'ధన్యవాదాలు, మా టీమ్ మీకు త్వరలో కాల్ చేస్తారు. శుభదినం!'
+      : lang === 'hi' ? 'धन्यवाद, हमारी टीम जल्द आपसे संपर्क करेगी। शुभ दिन!'
+      : 'Thank you! Our team will contact you shortly. Have a great day!';
+    logger.warn({ callSid: session.callSid, turns: session.history.length }, 'Stream: max-turns safety — auto-closing call');
+    if (session.plivoWs) {
+      playText(session.plivoWs, session, autoClose).catch(() => {}).then(() => new Promise(r => setTimeout(r, 2000))).then(async () => {
+        try { await plivoProvider.endCall(session.callSid); } catch {}
+      });
+    }
+    return;
+  }
+
   session.inFlightReply = true;
   session.turn.llmStartAt = Date.now();
   setCallState(session, 'THINKING', 'llm_dispatch');
@@ -3550,6 +3615,21 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
     session.history.push({ role: 'assistant', content: spoken });
     if (session.conversationId) {
       await appendMessage(session.conversationId, session.tenantId, 'assistant', spoken);
+    }
+
+    // AUTO-CLOSE: if the agent's reply is a closing/farewell message
+    // (contains "24 hours", "have a great day", "good day", "శుభదినం",
+    // "ధన్యవాదాలు", "शुभ दिन"), latch callEnded and schedule hangup
+    // after a short delay so the caller hears the full farewell.
+    const closingPattern = /24\s*hours|have a great day|good\s*day|శుభదినం|శుభ\s*దినం|ధన్యవాదాలు.*బ్రోచర్|brochure.*send|team will connect|our team|మా టీమ్/i;
+    if (!session.callEnded && closingPattern.test(spoken)) {
+      session.callEnded = true;
+      logger.info({ callSid: session.callSid, spoken: spoken.slice(0, 80) }, 'Stream: auto-close detected — hanging up after farewell');
+      setTimeout(async () => {
+        if (!session.callSid) return;
+        try { await plivoProvider.endCall(session.callSid); }
+        catch (e: any) { logger.warn({ callSid: session.callSid, err: e?.message }, 'Auto-hangup failed'); }
+      }, 3000);
     }
 
     // If the caller barged in mid-playback, only the first ~10-20% of the

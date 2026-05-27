@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Bot, Phone, Users, BookOpen, Workflow,
   BarChart3, Settings, ChevronDown, ChevronLeft, ChevronRight,
   Mic, MessageSquare, Sparkles, Megaphone, ScrollText,
-  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut, Radio, RefreshCw,
+  PhoneCall, Puzzle, CreditCard, Key, FileText, Mail, Bug, LogOut, Radio, RefreshCw, CalendarClock,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -31,6 +31,7 @@ const iconMap: Record<string, React.ReactNode> = {
   Mail: <Mail className="h-[18px] w-[18px]" />,
   Bug: <Bug className="h-[18px] w-[18px]" />,
   RefreshCw: <RefreshCw className="h-[18px] w-[18px]" />,
+  CalendarClock: <CalendarClock className="h-[18px] w-[18px]" />,
 };
 
 interface NavItem {
@@ -81,6 +82,7 @@ const navSections: NavSection[] = [
         icon: 'Users',
         children: [
           { label: 'Leads', path: '/crm/leads' },
+          { label: 'Follow-ups', path: '/followups' },
           { label: 'Contacts', path: '/crm/contacts' },
           { label: 'Pipeline', path: '/crm/pipeline' },
           { label: 'Recalls', path: '/crm/recalls' },

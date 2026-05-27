@@ -84,6 +84,8 @@ import { PhoneNumbersPage } from '@/pages/settings/PhoneNumbersPage';
 import { IntegrationsPage } from '@/pages/settings/IntegrationsPage';
 import { WhatsAppIntegrationPage } from '@/pages/settings/WhatsAppIntegrationPage';
 import { PlivoIntegrationPage } from '@/pages/settings/PlivoIntegrationPage';
+import { PlivoFeaturesPage } from '@/pages/settings/PlivoFeaturesPage';
+import { FollowupsPage } from '@/pages/followups/FollowupsPage';
 import { TeamPage } from '@/pages/settings/TeamPage';
 import { BillingPage } from '@/pages/settings/BillingPage';
 import { PricingPage } from '@/pages/settings/PricingPage';
@@ -204,6 +206,7 @@ export const routes: RouteObject[] = [
       { path: '/calls', element: <CallLogPage /> },
       { path: '/calls/live', element: <LiveCallsPage /> },
       { path: '/calls/:id', element: <CallDetailPage /> },
+      { path: '/followups', element: <FollowupsPage /> },
       { path: '/campaigns', element: <CampaignsPage /> },
       { path: '/campaigns/new', element: <CampaignWizardPage /> },
       { path: '/campaigns/:id', element: <CampaignDetailPage /> },
@@ -235,6 +238,7 @@ export const routes: RouteObject[] = [
       { path: '/settings/integrations', element: <IntegrationsPage /> },
       { path: '/settings/whatsapp', element: <WhatsAppIntegrationPage /> },
       { path: '/settings/plivo', element: <PlivoIntegrationPage /> },
+      { path: '/settings/plivo-features', element: <PlivoFeaturesPage /> },
       { path: '/settings/team', element: <TeamPage /> },
       { path: '/settings/billing', element: <BillingPage /> },
       { path: '/settings/pricing', element: <PricingPage /> },

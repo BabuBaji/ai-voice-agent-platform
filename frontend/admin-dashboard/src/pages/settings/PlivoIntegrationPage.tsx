@@ -16,6 +16,7 @@ const settingsNav = [
   { label: 'Integrations',   path: '/settings/integrations',   icon: Puzzle },
   { label: 'WhatsApp',       path: '/settings/whatsapp',       icon: MessageSquare },
   { label: 'Plivo',          path: '/settings/plivo',          icon: Radio },
+  { label: 'Plivo Features', path: '/settings/plivo-features', icon: Radio },
   { label: 'API',            path: '/settings/api',            icon: KeyRound },
   { label: 'Team',           path: '/settings/team',           icon: Users },
   { label: 'Billing',        path: '/settings/billing',        icon: CreditCard },

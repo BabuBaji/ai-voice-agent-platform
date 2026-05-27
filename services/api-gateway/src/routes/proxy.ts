@@ -115,6 +115,8 @@ proxyRouter.all('/api/v1/phone-numbers/*', authMiddleware, forwardRequest(config
 proxyRouter.all('/api/v1/phone-numbers', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/campaigns/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/campaigns', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/plivo/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/plivo', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 
 // --- Conversation service ---
 proxyRouter.all('/api/v1/conversations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
@@ -125,6 +127,9 @@ proxyRouter.all('/api/v1/communication-logs', authMiddleware, forwardRequest(con
 // Lead-recall queue (per-lead followup loop)
 proxyRouter.all('/api/v1/recalls/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 proxyRouter.all('/api/v1/recalls', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Follow-up scheduler (auto follow-ups, visits, reminders, feedback)
+proxyRouter.all('/api/v1/followups/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+proxyRouter.all('/api/v1/followups', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 // Per-tenant WhatsApp integration config (encrypted creds at rest)
 proxyRouter.all('/api/v1/integrations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 proxyRouter.all('/api/v1/integrations', authMiddleware, forwardRequest(config.services.conversation, keepPath));
