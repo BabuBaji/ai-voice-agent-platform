@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, Fragment } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Loader2, ChevronLeft, ChevronRight, Eye, Search, X, Download, BarChart3,
   TrendingUp, TrendingDown, Sparkles, Flame, Trophy, Phone,
+  RefreshCw, ArrowUpDown, ChevronDown, Clock, Timer, Copy,
 } from 'lucide-react';
 import {
   ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
@@ -77,18 +78,18 @@ function KpiTile({ label, value, sub, accent, spark, icon: Icon, delta }: {
   const sparkData = (spark ?? []).map((v, i) => ({ i, v }));
   const gradId = `kpi-spark-${accent}-${String(label).replace(/[^a-z0-9]/gi, '')}`;
   return (
-    <div className={`relative overflow-hidden rounded-2xl bg-gradient-to-br ${tileBg[accent]} border shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 p-4 flex flex-col min-h-[150px]`}>
+    <div className={`relative overflow-hidden rounded-xl bg-gradient-to-br ${tileBg[accent]} border shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 p-2.5 flex flex-col min-h-[96px]`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className={`text-[10px] uppercase tracking-[0.12em] font-bold ${accentText[accent]}`}>{label}</p>
-          <p className="text-3xl font-bold text-slate-900 mt-1.5 leading-none tracking-tight">{value}</p>
+          <p className={`text-[9px] uppercase tracking-[0.1em] font-bold ${accentText[accent]}`}>{label}</p>
+          <p className="text-xl font-bold text-slate-900 mt-0.5 leading-none tracking-tight">{value}</p>
         </div>
-        <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${iconBg[accent]} flex items-center justify-center shadow-lg flex-shrink-0`}>
-          <Icon className="h-5 w-5 text-white" />
+        <div className={`w-7 h-7 rounded-lg bg-gradient-to-br ${iconBg[accent]} flex items-center justify-center shadow-md flex-shrink-0`}>
+          <Icon className="h-3.5 w-3.5 text-white" />
         </div>
       </div>
-      <div className="flex items-center gap-2 mt-2 min-h-[16px]">
-        {sub && <p className="text-[11px] text-slate-600 truncate font-medium">{sub}</p>}
+      <div className="flex items-center gap-1.5 mt-1 min-h-[14px]">
+        {sub && <p className="text-[10px] text-slate-600 truncate font-medium">{sub}</p>}
         {delta != null && (
           <span className={`text-[10px] font-bold inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full ${delta >= 0 ? 'text-emerald-700 bg-emerald-100' : 'text-rose-700 bg-rose-100'}`}>
             {delta >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
@@ -98,7 +99,7 @@ function KpiTile({ label, value, sub, accent, spark, icon: Icon, delta }: {
       </div>
       <div className="flex-1" />
       {sparkData.length > 1 && (
-        <div className="h-10 -mx-1 -mb-1">
+        <div className="h-7 -mx-1 -mb-1">
           <ResponsiveContainer>
             <AreaChart data={sparkData}>
               <defs>
@@ -112,6 +113,44 @@ function KpiTile({ label, value, sub, accent, spark, icon: Icon, delta }: {
           </ResponsiveContainer>
         </div>
       )}
+    </div>
+  );
+}
+
+// Compact summary chip used in the table toolbar.
+function SummaryChip({ icon: Icon, label, value }: { icon: any; label: string; value: any }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-slate-50 border border-slate-200">
+      <Icon className="h-3 w-3 text-slate-400" />
+      <span className="text-slate-400 uppercase tracking-wider text-[10px]">{label}</span>
+      <span className="font-semibold text-slate-700">{value}</span>
+    </span>
+  );
+}
+
+// Key/value cell used inside the expandable row detail.
+function Detail({ label, value, accent = 'slate' }: { label: string; value: string; accent?: 'slate' | 'emerald' | 'rose' }) {
+  const cls = accent === 'emerald' ? 'text-emerald-700' : accent === 'rose' ? 'text-rose-700' : 'text-slate-800';
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">{label}</div>
+      <div className={`mt-0.5 font-medium ${cls}`}>{value}</div>
+    </div>
+  );
+}
+function DetailMono({ label, value, onCopy, copied }: { label: string; value: string; onCopy?: () => void; copied?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">{label}</div>
+      <div className="mt-0.5 flex items-center gap-1.5">
+        <span className="font-mono text-[11px] text-slate-700 truncate">{value}</span>
+        {onCopy && (
+          <button onClick={onCopy} title="Copy" className="text-slate-400 hover:text-amber-600 flex-shrink-0">
+            <Copy className="h-3 w-3" />
+          </button>
+        )}
+        {copied && <span className="text-[10px] text-emerald-600">copied</span>}
+      </div>
     </div>
   );
 }
@@ -136,6 +175,27 @@ export function SuperAdminCallsPage() {
   const [activeStatusIdx, setActiveStatusIdx] = useState(0);
   const [activeChannelIdx, setActiveChannelIdx] = useState(0);
   const [loading, setLoading] = useState(true);
+
+  // ── Advanced table controls (client-side, additive — never touch the
+  //    URL-bound server filters above) ─────────────────────────────────────
+  const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState<'started_at' | 'duration_seconds' | 'status'>('started_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [lastLoaded, setLastLoaded] = useState<Date | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const toggleSort = (key: typeof sortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+  const copyId = (id: string) => {
+    navigator.clipboard?.writeText(id).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1200);
+    }).catch(() => {});
+  };
 
   const setFilter = (key: string, val: string) => {
     const next = new URLSearchParams(params);
@@ -167,6 +227,14 @@ export function SuperAdminCallsPage() {
     superAdminApi.timeseries().then(setSeries).catch(() => {});
   }, []);
   useEffect(() => { setPage(1); }, [tenantId, status, channel, since]);
+  // Stamp the last-refreshed time whenever a fresh page of rows lands.
+  useEffect(() => { if (!loading) setLastLoaded(new Date()); }, [rows, loading]);
+  // Optional auto-refresh of the list (server filters preserved).
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = setInterval(() => { load(); }, 10000);
+    return () => clearInterval(id);
+  }, [autoRefresh, load]);
 
   // ── Chart data derivations ─────────────────────────────────────────
   const seriesData = useMemo(() => (series?.days || []).map((d) => ({
@@ -204,11 +272,44 @@ export function SuperAdminCallsPage() {
   const callsSpark = useMemo(() => seriesData.map((d) => d.calls), [seriesData]);
   const minutesSpark = useMemo(() => seriesData.map((d) => d.minutes), [seriesData]);
 
+  // Client-side view of the current page: free-text filter + sort. Operates
+  // only on the already-loaded rows, so server-side pagination is untouched.
+  const displayRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let r = rows;
+    if (q) {
+      r = r.filter((c) => [c.caller_number, c.called_number, c.tenant_name, c.tenant_id, (c as any).outcome, (c as any).sentiment, c.channel, c.status, c.agent_id]
+        .some((v) => String(v || '').toLowerCase().includes(q)));
+    }
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...r].sort((a, b) => {
+      if (sortKey === 'duration_seconds') return ((a.duration_seconds || 0) - (b.duration_seconds || 0)) * dir;
+      if (sortKey === 'status') return String(a.status || '').localeCompare(String(b.status || '')) * dir;
+      return (new Date(a.started_at).getTime() - new Date(b.started_at).getTime()) * dir;
+    });
+  }, [rows, query, sortKey, sortDir]);
+
+  // Summary of the rows currently shown (avg duration, talk-time, sentiment).
+  const pageSummary = useMemo(() => {
+    const durs = displayRows.map((c) => c.duration_seconds || 0).filter((d) => d > 0);
+    const totalSec = durs.reduce((a, b) => a + b, 0);
+    const sent = { positive: 0, negative: 0, neutral: 0 };
+    for (const c of displayRows) {
+      const s = String((c as any).sentiment || '').toLowerCase();
+      if (s.includes('pos')) sent.positive++;
+      else if (s.includes('neg')) sent.negative++;
+      else if (s.includes('neu')) sent.neutral++;
+    }
+    return { count: displayRows.length, totalSec, avg: durs.length ? totalSec / durs.length : 0, sent };
+  }, [displayRows]);
+
+  const fmtDur = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.round(s)}s`);
+
   const totalPages = Math.max(1, Math.ceil(total / 25));
   const hasFilters = tenantId || (status !== 'all') || (channel !== 'all') || since;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Calls</h1>
@@ -242,8 +343,8 @@ export function SuperAdminCallsPage() {
         <div className="absolute -top-16 -left-16 w-64 h-64 rounded-full bg-orange-300/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 right-1/3 w-72 h-72 rounded-full bg-rose-200/15 blur-3xl pointer-events-none" />
 
-        <div className="relative p-6">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-5">
+        <div className="relative p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
             <div className="flex items-center gap-2.5">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center shadow-md">
                 <Sparkles className="h-5 w-5 text-white" />
@@ -260,7 +361,7 @@ export function SuperAdminCallsPage() {
           </div>
 
           {/* Hero KPI tiles */}
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          <div className="grid grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-2">
             <KpiTile label="Today" value={todayN} sub={`${stats?.today?.minutes ?? 0}m talk`}
               accent="amber" icon={Phone} spark={callsSpark.slice(-7)} delta={todayDelta} />
             <KpiTile label="Yesterday" value={yestN} sub="prev day" accent="sky" icon={Phone} />
@@ -275,7 +376,7 @@ export function SuperAdminCallsPage() {
           </div>
 
           {/* Big composed chart with calls bars + minutes area + brush */}
-          <div className="mt-6 bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+          <div className="mt-4 bg-white rounded-2xl border border-slate-200 p-3 shadow-sm">
             <div className="flex items-center justify-between mb-2">
               <div>
                 <p className="text-sm font-semibold text-slate-900">Calls & talk-time trend</p>
@@ -323,24 +424,24 @@ export function SuperAdminCallsPage() {
           </div>
 
           {/* Donuts + leaderboard row */}
-          <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="mt-3 grid grid-cols-2 xl:grid-cols-3 gap-3">
             {/* Status donut */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+            <div className="bg-white rounded-2xl border border-slate-200 p-3 shadow-sm">
               <div className="flex items-center justify-between mb-1">
                 <p className="text-sm font-semibold text-slate-900">By status</p>
                 <span className="text-[10px] uppercase tracking-wider text-slate-400">click slice to filter</span>
               </div>
               {statusData.length === 0 ? (
-                <div className="h-56 flex items-center justify-center text-xs text-slate-400">No status data</div>
+                <div className="h-44 flex items-center justify-center text-xs text-slate-400">No status data</div>
               ) : (
                 <>
-                  <div className="h-56">
+                  <div className="h-44">
                     <ResponsiveContainer>
                       <PieChart>
                         <Pie
                           data={statusData}
                           dataKey="value" nameKey="name"
-                          cx="50%" cy="50%" innerRadius={55} outerRadius={82} paddingAngle={2}
+                          cx="50%" cy="50%" innerRadius={42} outerRadius={62} paddingAngle={2}
                           activeIndex={activeStatusIdx}
                           activeShape={ActiveDonutShape}
                           onMouseEnter={(_: any, idx: number) => setActiveStatusIdx(idx)}
@@ -376,22 +477,22 @@ export function SuperAdminCallsPage() {
             </div>
 
             {/* Channel donut */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+            <div className="bg-white rounded-2xl border border-slate-200 p-3 shadow-sm">
               <div className="flex items-center justify-between mb-1">
                 <p className="text-sm font-semibold text-slate-900">By channel</p>
                 <span className="text-[10px] uppercase tracking-wider text-slate-400">click slice to filter</span>
               </div>
               {channelData.length === 0 ? (
-                <div className="h-56 flex items-center justify-center text-xs text-slate-400">No channel data</div>
+                <div className="h-44 flex items-center justify-center text-xs text-slate-400">No channel data</div>
               ) : (
                 <>
-                  <div className="h-56">
+                  <div className="h-44">
                     <ResponsiveContainer>
                       <PieChart>
                         <Pie
                           data={channelData}
                           dataKey="value" nameKey="name"
-                          cx="50%" cy="50%" innerRadius={55} outerRadius={82} paddingAngle={2}
+                          cx="50%" cy="50%" innerRadius={42} outerRadius={62} paddingAngle={2}
                           activeIndex={activeChannelIdx}
                           activeShape={ActiveDonutShape}
                           onMouseEnter={(_: any, idx: number) => setActiveChannelIdx(idx)}
@@ -421,8 +522,8 @@ export function SuperAdminCallsPage() {
             </div>
 
             {/* Top-tenants leaderboard */}
-            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
-              <div className="flex items-center justify-between mb-3">
+            <div className="bg-white rounded-2xl border border-slate-200 p-3 shadow-sm col-span-2 xl:col-span-1">
+              <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-1.5">
                   <Trophy className="h-3.5 w-3.5 text-amber-500" />
                   <p className="text-sm font-semibold text-slate-900">Top tenants · 7d</p>
@@ -430,7 +531,7 @@ export function SuperAdminCallsPage() {
                 <span className="text-[10px] uppercase tracking-wider text-slate-400">click row → filter</span>
               </div>
               {topTenantsCalls.length === 0 ? (
-                <div className="h-56 flex items-center justify-center text-xs text-slate-400">No tenant activity</div>
+                <div className="h-44 flex items-center justify-center text-xs text-slate-400">No tenant activity</div>
               ) : (
                 <ol className="space-y-2">
                   {(() => {
@@ -492,53 +593,144 @@ export function SuperAdminCallsPage() {
         )}
       </div>
 
+      {/* ── Advanced table toolbar: client search, sort, auto-refresh, summary ── */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-3 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder="Quick search this page — number, tenant, outcome, sentiment…"
+            className="w-full pl-9 pr-8 py-2 rounded-lg border border-slate-200 text-sm" />
+          {query && (
+            <button onClick={() => setQuery('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        <div className="inline-flex items-center gap-1 text-xs">
+          <span className="text-slate-400 uppercase tracking-wider text-[10px]">Sort</span>
+          {([['started_at', 'Newest'], ['duration_seconds', 'Duration'], ['status', 'Status']] as const).map(([k, label]) => (
+            <button key={k} onClick={() => toggleSort(k)}
+              className={`px-2 py-1 rounded-lg border inline-flex items-center gap-1 ${sortKey === k ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'}`}>
+              {label}{sortKey === k && <ArrowUpDown className="h-3 w-3" />}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setAutoRefresh((a) => !a)}
+          className={`text-xs px-2.5 py-2 rounded-lg border inline-flex items-center gap-1.5 ${autoRefresh ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'}`}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${autoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+          Auto {autoRefresh ? 'on' : 'off'}
+        </button>
+        <button onClick={() => load()} className="text-xs px-2.5 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-1.5">
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
+        </button>
+        {lastLoaded && (
+          <span className="text-[11px] text-slate-400 inline-flex items-center gap-1"><Clock className="h-3 w-3" />{lastLoaded.toLocaleTimeString()}</span>
+        )}
+        {/* summary chips */}
+        <div className="w-full flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100 mt-1">
+          <SummaryChip icon={Phone} label="Shown" value={pageSummary.count} />
+          <SummaryChip icon={Timer} label="Avg duration" value={fmtDur(pageSummary.avg)} />
+          <SummaryChip icon={Clock} label="Talk-time" value={fmtDur(pageSummary.totalSec)} />
+          {(pageSummary.sent.positive + pageSummary.sent.negative + pageSummary.sent.neutral) > 0 && (
+            <span className="inline-flex items-center gap-2 text-[11px] px-2 py-1 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-400 uppercase tracking-wider text-[10px]">Sentiment</span>
+              <span className="text-emerald-600 font-semibold">+{pageSummary.sent.positive}</span>
+              <span className="text-slate-500 font-semibold">~{pageSummary.sent.neutral}</span>
+              <span className="text-rose-600 font-semibold">−{pageSummary.sent.negative}</span>
+            </span>
+          )}
+        </div>
+      </div>
+
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         {loading ? (
           <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-amber-500" /></div>
-        ) : rows.length === 0 ? (
-          <div className="text-center py-8 text-sm text-slate-400">No calls match these filters.</div>
+        ) : displayRows.length === 0 ? (
+          <div className="text-center py-8 text-sm text-slate-600">{query ? `No calls match “${query}” on this page.` : 'No calls match these filters.'}</div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+            <thead className="bg-slate-100 text-[11px] uppercase tracking-wider text-slate-700 font-semibold">
               <tr>
-                <th className="text-left px-3 py-1.5 font-medium">Started</th>
+                <th className="text-left px-3 py-1.5 font-medium">
+                  <button onClick={() => toggleSort('started_at')} className="inline-flex items-center gap-1 hover:text-slate-700">
+                    Started {sortKey === 'started_at' && <ArrowUpDown className="h-3 w-3 text-amber-500" />}
+                  </button>
+                </th>
                 <th className="text-left px-3 py-1.5 font-medium">Tenant</th>
                 <th className="text-left px-3 py-1.5 font-medium">From → To</th>
                 <th className="text-left px-3 py-1.5 font-medium">Channel</th>
-                <th className="text-left px-3 py-1.5 font-medium">Status</th>
-                <th className="text-right px-3 py-1.5 font-medium">Duration</th>
+                <th className="text-left px-3 py-1.5 font-medium">
+                  <button onClick={() => toggleSort('status')} className="inline-flex items-center gap-1 hover:text-slate-700">
+                    Status {sortKey === 'status' && <ArrowUpDown className="h-3 w-3 text-amber-500" />}
+                  </button>
+                </th>
+                <th className="text-right px-3 py-1.5 font-medium">
+                  <button onClick={() => toggleSort('duration_seconds')} className="inline-flex items-center gap-1 hover:text-slate-700 ml-auto">
+                    Duration {sortKey === 'duration_seconds' && <ArrowUpDown className="h-3 w-3 text-amber-500" />}
+                  </button>
+                </th>
                 <th className="px-3 py-1.5" />
               </tr>
             </thead>
             <tbody>
-              {rows.map((c) => (
-                <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50/60">
-                  <td className="px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap">{new Date(c.started_at).toLocaleString()}</td>
-                  <td className="px-3 py-1.5">
-                    <div className="text-xs text-slate-700 leading-tight">{c.tenant_name || '—'}</div>
-                    <div className="text-[10px] text-slate-400 font-mono leading-tight">{c.tenant_id?.slice(0, 8)}</div>
-                  </td>
-                  <td className="px-3 py-1.5 font-mono text-[11px] text-slate-600">{c.caller_number || '—'} → {c.called_number || '—'}</td>
-                  <td className="px-3 py-1.5"><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{c.channel}</span></td>
-                  <td className="px-3 py-1.5"><span className={`text-[10px] px-1.5 py-0.5 rounded-full ${STATUS_COLORS[c.status] || 'bg-slate-100 text-slate-600'}`}>{c.status}</span></td>
-                  <td className="px-3 py-1.5 text-right font-mono text-xs text-slate-600">{c.duration_seconds ? `${Math.round(c.duration_seconds)}s` : '—'}</td>
-                  <td className="px-3 py-1.5">
-                    <button onClick={() => navigate(`/super-admin/calls/${c.id}`)} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-medium">
-                      <Eye className="h-3 w-3" /> View
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {displayRows.map((c) => {
+                const open = expandedId === c.id;
+                const sentiment = String((c as any).sentiment || '');
+                const outcome = String((c as any).outcome || '');
+                const sAccent = sentiment.toLowerCase().includes('pos') ? 'emerald' : sentiment.toLowerCase().includes('neg') ? 'rose' : 'slate';
+                return (
+                  <Fragment key={c.id}>
+                    <tr className={`border-t border-slate-100 hover:bg-slate-50/60 ${open ? 'bg-amber-50/40' : ''}`}>
+                      <td className="px-3 py-2 text-sm text-slate-900 whitespace-nowrap">{new Date(c.started_at).toLocaleString()}</td>
+                      <td className="px-3 py-2">
+                        <div className="text-sm font-medium text-slate-900 leading-tight">{c.tenant_name || '—'}</div>
+                        <div className="text-[11px] text-slate-500 font-mono leading-tight">{c.tenant_id?.slice(0, 8)}</div>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-800">{c.caller_number || '—'} → {c.called_number || '—'}</td>
+                      <td className="px-3 py-2"><span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-medium">{c.channel}</span></td>
+                      <td className="px-3 py-2"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${STATUS_COLORS[c.status] || 'bg-slate-100 text-slate-700'}`}>{c.status}</span></td>
+                      <td className="px-3 py-2 text-right font-mono text-sm font-semibold text-slate-900">{c.duration_seconds ? fmtDur(c.duration_seconds) : '—'}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center justify-end gap-1">
+                          <button onClick={() => setExpandedId(open ? null : c.id)} title="Quick details"
+                            className="inline-flex items-center px-1.5 py-0.5 rounded-md hover:bg-slate-100 text-slate-500">
+                            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+                          </button>
+                          <button onClick={() => navigate(`/super-admin/calls/${c.id}`)} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-medium">
+                            <Eye className="h-3 w-3" /> View
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className="bg-amber-50/30 border-t border-amber-100">
+                        <td colSpan={7} className="px-4 py-3">
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                            <Detail label="Outcome" value={outcome || '—'} />
+                            <Detail label="Sentiment" value={sentiment || '—'} accent={sAccent as any} />
+                            <Detail label="Ended" value={c.ended_at ? new Date(c.ended_at).toLocaleString() : '—'} />
+                            <Detail label="Duration" value={c.duration_seconds ? fmtDur(c.duration_seconds) : '—'} />
+                            <DetailMono label="Call ID" value={c.id} copied={copiedId === c.id} onCopy={() => copyId(c.id)} />
+                            <DetailMono label="Agent ID" value={c.agent_id || '—'} copied={copiedId === c.agent_id} onCopy={c.agent_id ? () => copyId(c.agent_id!) : undefined} />
+                            <DetailMono label="Tenant ID" value={c.tenant_id || '—'} copied={copiedId === c.tenant_id} onCopy={c.tenant_id ? () => copyId(c.tenant_id) : undefined} />
+                            <Detail label="Caller → Called" value={`${c.caller_number || '—'} → ${c.called_number || '—'}`} />
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
         <div className="px-3 py-1.5 border-t border-slate-100 flex items-center justify-between">
-          <p className="text-xs text-slate-500">Showing {rows.length} of {total}</p>
+          <p className="text-xs font-medium text-slate-700">Showing {displayRows.length}{query ? ` filtered` : ''} of {total}</p>
           <div className="flex items-center gap-2">
             <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="p-1.5 rounded border border-slate-200 disabled:opacity-40">
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <span className="text-xs text-slate-600">Page {page} of {totalPages}</span>
+            <span className="text-xs font-medium text-slate-700">Page {page} of {totalPages}</span>
             <button disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="p-1.5 rounded border border-slate-200 disabled:opacity-40">
               <ChevronRight className="h-4 w-4" />
             </button>

@@ -55,6 +55,13 @@ async function fetchTenantSettings(tenantId: string): Promise<any> {
   }
 }
 
+/** Public, cached accessor for a tenant's `settings` JSONB. Automation modules
+ *  (e.g. auto-brochure) read per-tenant toggles through this without each
+ *  re-implementing the cross-database identity_db lookup. */
+export async function getTenantSettings(tenantId: string): Promise<any> {
+  return fetchTenantSettings(tenantId);
+}
+
 // ─── PII redaction ──────────────────────────────────────────────────────
 
 const RX_EMAIL = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;

@@ -3,6 +3,7 @@ import { config } from '../config';
 import { recordCallBilling } from './billing.client';
 import { sendWhatsApp, sendSms } from './communications';
 import { enqueueLeadRecall } from './recallScheduler';
+import { maybeAutoSendBrochure } from './autoBrochure';
 
 export interface AnalysisResult {
   // Legacy fields (kept for backwards compat with existing UI + columns).
@@ -764,10 +765,143 @@ async function mergeSlotStoreOverEntities(
  * Best-effort — errors are logged but never propagate up. The analyzer
  * must continue to succeed even when CRM is down.
  */
+/**
+ * Recall / linked-lead handler. When a call was placed for an EXISTING lead
+ * (recall scheduler threaded its lead_id through call metadata), we:
+ *   1. link this conversation to that lead (no duplicate lead is created),
+ *   2. refresh the lead's status + recall trace (merge — preserves brochure_*),
+ *   3. run the brochure auto-send for THAT lead when interested. The brochure
+ *      module's per-lead duplicate guard means an already-brochured lead is
+ *      skipped (respect-dedup), so a recall only sends if it never went out.
+ * Best-effort; never throws.
+ */
+async function handleLinkedRecallLead(
+  conversationId: string,
+  tenantId: string,
+  conv: { agent_id?: string | null; direction?: string | null },
+  result: AnalysisResult,
+  leadId: string,
+): Promise<void> {
+  try {
+    // 1. Link the recall conversation to the existing lead.
+    await pool.query(
+      `UPDATE conversations SET analysis = COALESCE(analysis, '{}'::jsonb) || $1::jsonb
+       WHERE id = $2 AND tenant_id = $3`,
+      [JSON.stringify({ crm_lead_id: leadId }), conversationId, tenantId],
+    );
+
+    const ke = result.key_entities || {};
+    const extendedStatus = deriveExtendedLeadStatus(result);
+    result.lead_status = extendedStatus;
+
+    // 2. Load the existing lead for name/contact + interest context.
+    let lead: any = null;
+    try {
+      const r = await fetch(`${config.crmServiceUrl}/leads/${leadId}`, { headers: { 'x-tenant-id': tenantId } });
+      if (r.ok) lead = await r.json();
+    } catch { /* best-effort */ }
+    const cf = lead?.custom_fields || {};
+    const firstName = (lead?.first_name && lead.first_name !== '-')
+      ? lead.first_name
+      : (String(ke.customer_name || ke.full_name || '').split(/\s+/)[0] || 'there');
+
+    // 3. Enrich + refresh the existing lead from what the recall captured.
+    //    Merge so we never wipe existing values (or brochure_sent_*); only
+    //    fill/overwrite a field when the recall actually captured a value.
+    try {
+      const mergedCf: Record<string, any> = {
+        ...cf,
+        extended_lead_status: extendedStatus,
+        last_recall_status: extendedStatus,
+        last_recall_at: new Date().toISOString(),
+        interest_level: result.interest_level ?? cf.interest_level,
+      };
+      const setIf = (key: string, val: any) => {
+        const v = val == null ? '' : String(val).trim();
+        if (v) mergedCf[key] = v;
+      };
+      // Admissions detail fields captured/confirmed on this recall.
+      setIf('interested_university', ke.interested_university);
+      setIf('interested_course', ke.interested_course);
+      setIf('interested_branch', ke.interested_branch);
+      setIf('preferred_location', ke.preferred_location);
+      setIf('intermediate_marks', ke.intermediate_marks);
+      setIf('intermediate_percentage', ke.intermediate_percentage);
+      setIf('eamcet_rank', ke.eamcet_rank);
+      setIf('jee_rank', ke.jee_rank);
+      setIf('diploma_status', ke.diploma_status);
+      setIf('category', ke.category);
+      setIf('hostel_required', ke.hostel_required);
+      setIf('parent_name', ke.parent_name);
+      setIf('parent_mobile', ke.parent_mobile);
+      setIf('city', ke.city);
+      setIf('budget', ke.budget);
+      setIf('timeline', ke.timeline);
+      setIf('conversion_probability', result.conversion_probability);
+      setIf('next_best_action', result.next_best_action);
+
+      // Top-level columns: fill email only when the lead has none; upgrade a
+      // placeholder name ("Contact 1" / "Caller 4795" / "-") to a real one.
+      const body: Record<string, any> = { custom_fields: mergedCf };
+      const capturedEmail = String(ke.email || '').trim();
+      if (capturedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(capturedEmail) && !lead?.email) {
+        body.email = capturedEmail;
+      }
+      const capturedName = String(ke.customer_name || ke.full_name || '').trim();
+      const placeholderName = !lead?.first_name
+        || ['contact', 'caller', '-'].some((p) => String(lead.first_name).toLowerCase().startsWith(p));
+      if (capturedName && placeholderName) {
+        const parts = capturedName.split(/\s+/);
+        body.first_name = parts[0];
+        body.last_name = parts.slice(1).join(' ') || '-';
+      }
+
+      await fetch(`${config.crmServiceUrl}/leads/${leadId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+        body: JSON.stringify(body),
+      });
+    } catch { /* best-effort */ }
+
+    // 4. Brochure auto-send for the existing lead (interest-gated; deduped).
+    const interestedStatuses = ['HOT_INTERESTED', 'INTERESTED', 'COUNSELOR_MEETING_REQUIRED', 'CALLBACK_SCHEDULED', 'BROCHURE_REQUESTED'];
+    const interested =
+      interestedStatuses.includes(String(extendedStatus || '').toUpperCase()) ||
+      String(ke.brochure_required || '').toLowerCase() === 'true' ||
+      String(ke.counselor_meeting_required || '').toLowerCase() === 'true' ||
+      String(ke.callback_required || '').toLowerCase() === 'true';
+    if (interested) {
+      const phones = (await pool.query(
+        `SELECT called_number, caller_number FROM conversations WHERE id = $1 LIMIT 1`, [conversationId],
+      )).rows[0] || {};
+      const rawPhone = String(
+        (String(conv.direction || '').toUpperCase() === 'OUTBOUND' ? phones.called_number : phones.caller_number) || lead?.phone || '',
+      );
+      const digits = rawPhone.replace(/[^\d]/g, '');
+      const e164 = rawPhone.startsWith('+') ? rawPhone : (digits.length === 10 ? `+91${digits}` : `+${digits}`);
+      void maybeAutoSendBrochure({
+        tenantId, leadId, conversationId, agentId: conv.agent_id || null,
+        firstName, email: lead?.email || ke.email || null, phoneE164: e164,
+        extendedStatus,
+        brochureRequired: String(ke.brochure_required || '').toLowerCase() === 'true',
+        counselorMeetingRequired: String(ke.counselor_meeting_required || '').toLowerCase() === 'true',
+        callbackRequired: String(ke.callback_required || '').toLowerCase() === 'true',
+        college: ke.interested_university || cf.interested_university || null,
+        course: ke.interested_course || cf.interested_course || null,
+        branch: ke.interested_branch || cf.interested_branch || null,
+        recommendedFollowUpTime: result.recommended_follow_up_time || null,
+      });
+    }
+    console.info(`[analyzer] recall linked to existing lead=${leadId} (conv=${conversationId}, status=${extendedStatus}, interested=${interested})`);
+  } catch (err: any) {
+    console.warn(`[analyzer] handleLinkedRecallLead error: ${err?.message}`);
+  }
+}
+
 async function createLeadFromAnalysis(
   conversationId: string,
   tenantId: string,
-  conv: { agent_id?: string | null; channel?: string | null; direction?: string | null },
+  conv: { agent_id?: string | null; channel?: string | null; direction?: string | null; linked_lead_id?: string | null },
   result: AnalysisResult,
 ): Promise<void> {
   try {
@@ -785,14 +919,25 @@ async function createLeadFromAnalysis(
     if (outcome.includes('wrong number')) return;
 
     // Merge live-call slot store (caller-confirmed captures) over LLM
-    // extraction. Mutates result.key_entities in place so the rest of this
-    // function naturally picks up the higher-confidence values.
+    // extraction. Mutates result.key_entities in place so BOTH the linked-recall
+    // path and the normal lead-creation path pick up the higher-confidence values.
     if (!result.key_entities) result.key_entities = {};
     const slotMerge = await mergeSlotStoreOverEntities(conversationId, result.key_entities);
     if (slotMerge.confirmedSlots.length || slotMerge.unconfirmedSlots.length) {
       console.info(
         `[analyzer] slot store merged (conv=${conversationId}, confirmed=[${slotMerge.confirmedSlots.join(',')}], unconfirmed=[${slotMerge.unconfirmedSlots.join(',')}])`,
       );
+    }
+
+    // Recall / linked-lead path: this call was placed FOR an existing lead
+    // (the recall scheduler threaded its lead_id through call metadata). Link
+    // the conversation to that lead and act on it — never create a duplicate.
+    // Normal inbound/outbound calls carry no linked_lead_id, so this branch is
+    // skipped and the original lead-creation flow below runs unchanged.
+    const linkedLeadId = conv.linked_lead_id || null;
+    if (linkedLeadId) {
+      await handleLinkedRecallLead(conversationId, tenantId, conv, result, linkedLeadId);
+      return;
     }
 
     // Pull the prospect's phone number. For outbound, that's called_number;
@@ -1063,67 +1208,32 @@ async function createLeadFromAnalysis(
       });
     } catch (_e) { /* non-fatal — scheduler is optional */ }
 
-    // Auto-send brochure on WhatsApp + SMS in parallel, best-effort. Defaults
-    // come from env (BROCHURE_DEFAULT_URL, BROCHURE_DEFAULT_TEMPLATE) so each
-    // tenant can configure their own brochure without code changes. Disable
-    // entirely by setting AUTO_BROCHURE=off.
-    //
-    // Gate: only fire when this lead is actually a candidate for outreach —
-    // HOT/INTERESTED status OR the post-call analyzer flagged an explicit
-    // ask (brochure / counselor meeting / callback). Avoids spamming
-    // not-interested or wrong-number leads with WhatsApp + SMS.
-    const triggerStatuses = ['HOT_INTERESTED', 'INTERESTED', 'CALLBACK_SCHEDULED', 'COUNSELOR_MEETING_REQUIRED'];
-    const triggerFlag =
-      triggerStatuses.includes(String(extendedStatus || '').toUpperCase()) ||
-      String(ke.brochure_required || '').toLowerCase() === 'true' ||
-      String(ke.counselor_meeting_required || '').toLowerCase() === 'true' ||
-      String(ke.callback_required || '').toLowerCase() === 'true';
-    if (!triggerFlag) {
-      console.info(`[analyzer] auto-brochure skipped — trigger not met (lead=${leadId}, status=${extendedStatus})`);
-    }
-    if (triggerFlag && (process.env.AUTO_BROCHURE || 'on').toLowerCase() !== 'off') {
-      const brochureUrl = process.env.BROCHURE_DEFAULT_URL || 'https://dce.edu.in/';
-      const tpl = process.env.BROCHURE_DEFAULT_TEMPLATE ||
-        'Hi {{name}}, thanks for your interest in B.Tech admissions. Find the brochure here: {{brochure_url}}. Reply with any questions.';
-      const messageBody = tpl
-        .replace(/\{\{\s*name\s*\}\}/g, first_name)
-        .replace(/\{\{\s*brochure_url\s*\}\}/g, brochureUrl);
-      const e164Phone = STRICT_INDIAN_MOBILE_RE.test(mobileFor10)
-        ? `+91${mobileFor10}`
-        : (mobile.startsWith('+') ? mobile : `+${mobileDigits}`);
-      const attachments = [{ name: 'Brochure', url: brochureUrl }];
-      // Fire both channels in parallel — never block the analyzer / lead
-      // creation pipeline on Twilio responses. AFTER the result lands, if at
-      // least one channel actually delivered, enqueue this lead into the
-      // recall queue so we can follow up. We only enqueue for brochured
-      // leads because the recall script is built around "we sent you the
-      // brochure, did you receive it?" — leads that never got a brochure
-      // shouldn't be part of that loop.
-      Promise.allSettled([
-        sendWhatsApp({ tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
-                       recipient: e164Phone, message: messageBody, attachments }),
-        sendSms({ tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
-                  recipient: e164Phone, message: messageBody }),
-      ]).then((results) => {
-        const [waR, smsR] = results;
-        const waOk = waR.status === 'fulfilled' && (waR.value as any)?.ok;
-        const smsOk = smsR.status === 'fulfilled' && (smsR.value as any)?.ok;
-        console.info(`[analyzer] auto-brochure dispatched (lead=${leadId}, whatsapp=${waOk ? 'ok' : 'fail'}, sms=${smsOk ? 'ok' : 'fail'}, to=${e164Phone})`);
-        if (waOk || smsOk) {
-          void enqueueLeadRecall({
-            tenant_id: tenantId,
-            lead_id: leadId,
-            conversation_id: conversationId,
-            agent_id: conv.agent_id || null,
-            phone_number: e164Phone,
-            lead_status: extendedStatus,
-            preferred_callback_time: parsePreferredHHmm(result.recommended_follow_up_time),
-          });
-        } else {
-          console.info(`[analyzer] recall NOT enqueued — brochure failed on all channels (lead=${leadId})`);
-        }
-      });
-    }
+    // Auto-send brochure. Selection (per college/course/branch), per-tenant
+    // settings, email + WhatsApp + SMS delivery, duplicate-prevention, lead
+    // tracking, admin-review task on no-match, and the recall enqueue now live
+    // in the autoBrochure orchestrator — a superset of the original inline
+    // WhatsApp+SMS send. Fire-and-forget (never blocks lead creation); the
+    // module honors AUTO_BROCHURE=off and BROCHURE_DEFAULT_URL internally.
+    const e164Phone = STRICT_INDIAN_MOBILE_RE.test(mobileFor10)
+      ? `+91${mobileFor10}`
+      : (mobile.startsWith('+') ? mobile : `+${mobileDigits}`);
+    void maybeAutoSendBrochure({
+      tenantId,
+      leadId,
+      conversationId,
+      agentId: conv.agent_id || null,
+      firstName: first_name,
+      email: rawEmail || null,
+      phoneE164: e164Phone,
+      extendedStatus,
+      brochureRequired: String(ke.brochure_required || '').toLowerCase() === 'true',
+      counselorMeetingRequired: String(ke.counselor_meeting_required || '').toLowerCase() === 'true',
+      callbackRequired: String(ke.callback_required || '').toLowerCase() === 'true',
+      college: ke.interested_university || null,
+      course: ke.interested_course || null,
+      branch: ke.interested_branch || null,
+      recommendedFollowUpTime: result.recommended_follow_up_time || ke.appointment_time || null,
+    });
 
     // Schedule callback appointment for every interested lead. The interest
     // gate above already ran (we only reach this code for HOT/WARM / 50+
@@ -1188,6 +1298,7 @@ export async function analyzeConversation(conversationId: string, tenantId: stri
   const convRes = await pool.query(
     `SELECT c.id, c.agent_id, c.language, c.channel,
             ca.direction,
+            ca.metadata->>'lead_id' AS linked_lead_id,
             COALESCE(c.duration_seconds,
                      EXTRACT(EPOCH FROM (COALESCE(c.ended_at, now()) - c.started_at))::int,
                      0) AS duration_sec
@@ -1271,6 +1382,7 @@ export async function analyzeConversation(conversationId: string, tenantId: stri
       agent_id: conv.agent_id,
       channel: conv.channel,
       direction: (conv as any).direction || null,
+      linked_lead_id: (conv as any).linked_lead_id || null,
     },
     result,
   );

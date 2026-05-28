@@ -80,6 +80,7 @@ import { RetryQueuePage as WhatsAppRetryQueuePage } from '@/pages/whatsapp/Retry
 // Settings
 import { GeneralSettingsPage } from '@/pages/settings/GeneralSettingsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
+import { AutomationSettingsPage } from '@/pages/settings/AutomationSettingsPage';
 import { PhoneNumbersPage } from '@/pages/settings/PhoneNumbersPage';
 import { IntegrationsPage } from '@/pages/settings/IntegrationsPage';
 import { WhatsAppIntegrationPage } from '@/pages/settings/WhatsAppIntegrationPage';
@@ -125,6 +126,11 @@ import { SuperAdminCostAnalysisPage } from '@/pages/superAdmin/CostAnalysisPage'
 import { SuperAdmin2FAPage } from '@/pages/superAdmin/TwoFactorPage';
 import { SuperAdminSubscriptionsPage } from '@/pages/superAdmin/SubscriptionsPage';
 import { MonitorPage as SuperAdminMonitorPage } from '@/pages/superAdmin/MonitorPage';
+import { QueuesPage as SuperAdminQueuesPage } from '@/pages/superAdmin/QueuesPage';
+import { CommunicationsPage as SuperAdminCommunicationsPage } from '@/pages/superAdmin/CommunicationsPage';
+import { RemindersPage as SuperAdminRemindersPage } from '@/pages/superAdmin/RemindersPage';
+import { ProvidersPage as SuperAdminProvidersPage } from '@/pages/superAdmin/ProvidersPage';
+import { AnalyticsPage as SuperAdminAnalyticsPage } from '@/pages/superAdmin/AnalyticsPage';
 
 export const routes: RouteObject[] = [
   // Public landing page
@@ -174,6 +180,11 @@ export const routes: RouteObject[] = [
       { path: '/super-admin/subscriptions', element: <SuperAdminSubscriptionsPage /> },
       { path: '/super-admin/2fa', element: <SuperAdmin2FAPage /> },
       { path: '/super-admin/monitor', element: <SuperAdminMonitorPage /> },
+      { path: '/super-admin/queues', element: <SuperAdminQueuesPage /> },
+      { path: '/super-admin/communications', element: <SuperAdminCommunicationsPage /> },
+      { path: '/super-admin/reminders', element: <SuperAdminRemindersPage /> },
+      { path: '/super-admin/providers', element: <SuperAdminProvidersPage /> },
+      { path: '/super-admin/analytics', element: <SuperAdminAnalyticsPage /> },
     ],
   },
   // Public docs hub (dedicated dark layout, no auth required)
@@ -236,6 +247,7 @@ export const routes: RouteObject[] = [
       { path: '/settings/legacy', element: <GeneralSettingsPage /> },
       { path: '/settings/phone-numbers', element: <PhoneNumbersPage /> },
       { path: '/settings/integrations', element: <IntegrationsPage /> },
+      { path: '/settings/automation', element: <AutomationSettingsPage /> },
       { path: '/settings/whatsapp', element: <WhatsAppIntegrationPage /> },
       { path: '/settings/plivo', element: <PlivoIntegrationPage /> },
       { path: '/settings/plivo-features', element: <PlivoFeaturesPage /> },

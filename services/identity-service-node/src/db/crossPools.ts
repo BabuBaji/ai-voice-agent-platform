@@ -11,6 +11,7 @@ let _agentPool: Pool | null = null;
 let _conversationPool: Pool | null = null;
 let _workflowPool: Pool | null = null;
 let _knowledgePool: Pool | null = null;
+let _crmPool: Pool | null = null;
 
 export function agentPool(): Pool {
   if (!_agentPool) _agentPool = new Pool({ connectionString: config.agentDbUrl, max: 4 });
@@ -32,13 +33,20 @@ export function knowledgePool(): Pool {
   return _knowledgePool;
 }
 
+export function crmPool(): Pool {
+  if (!_crmPool) _crmPool = new Pool({ connectionString: config.crmDbUrl, max: 2 });
+  return _crmPool;
+}
+
 export async function closeCrossPools(): Promise<void> {
   if (_agentPool) await _agentPool.end();
   if (_conversationPool) await _conversationPool.end();
   if (_workflowPool) await _workflowPool.end();
   if (_knowledgePool) await _knowledgePool.end();
+  if (_crmPool) await _crmPool.end();
   _agentPool = null;
   _conversationPool = null;
   _workflowPool = null;
   _knowledgePool = null;
+  _crmPool = null;
 }

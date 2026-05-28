@@ -246,7 +246,10 @@ async function dispatchDial(row: any, nextCount: number): Promise<void> {
     const resp = await fetch(`${telephonyUrl}/api/v1/calls/initiate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-tenant-id': row.tenant_id },
-      body: JSON.stringify({ to: row.phone_number, agent_id: agentId }),
+      // Thread the existing lead_id through call metadata so the recall
+      // conversation links to THIS lead (analyzer's linked-lead path) instead
+      // of spawning a duplicate. `recall: true` marks the call's origin.
+      body: JSON.stringify({ to: row.phone_number, agent_id: agentId, metadata: { lead_id: row.lead_id, recall: true } }),
     });
     if (!resp.ok) dialErr = (await resp.text().catch(() => '')).slice(0, 300);
     else dialOk = true;

@@ -89,6 +89,49 @@ function StatLink({
   );
 }
 
+// Global operations summary — self-contained (own fetch) so it never blocks
+// the rest of the dashboard. Reads the new /super-admin/ops-summary endpoint.
+function OpsSummaryStrip() {
+  const [ops, setOps] = useState<any>(null);
+  useEffect(() => {
+    let on = true;
+    const load = () => superAdminApi.opsSummary().then((d) => { if (on) setOps(d); }).catch(() => {});
+    load();
+    const id = setInterval(load, 15000);
+    return () => { on = false; clearInterval(id); };
+  }, []);
+  if (!ops) return null;
+  const flag = ops.queue_health?.flag;
+  const flagCls = flag === 'red' ? 'text-rose-600' : flag === 'yellow' ? 'text-amber-600' : 'text-emerald-600';
+  const tile = (to: string, label: string, value: any, extra?: string) => (
+    <Link to={to} className="bg-white border border-slate-200 rounded-xl p-3 shadow-sm hover:shadow-md hover:border-slate-300 transition-all">
+      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">{label}</p>
+      <p className="text-xl font-bold text-slate-900 mt-1">{value}</p>
+      {extra && <p className="text-[11px] text-slate-500 mt-0.5">{extra}</p>}
+    </Link>
+  );
+  const commFail = ops.comm_failures_today || {};
+  const commFailTotal = Object.values(commFail).reduce((a: number, b: any) => a + Number(b || 0), 0);
+  return (
+    <div>
+      <p className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-2 mt-1 flex items-center gap-1.5">
+        <Activity className="h-3.5 w-3.5" /> Global operations
+      </p>
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        {tile('/super-admin/calls?status=ACTIVE', 'Active AI Calls', ops.active_ai_calls)}
+        {tile('/super-admin/communications', 'Comm Failures (today)', commFailTotal,
+          Object.entries(commFail).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none')}
+        {tile('/super-admin/queues', 'Queue Health', <span className={flagCls}>{(flag || 'green').toUpperCase()}</span>,
+          `${ops.queue_health?.crm_failed ?? 0} CRM · ${ops.queue_health?.comm_retry_pending ?? 0} retry`)}
+        {tile('/super-admin/reminders', 'Reminders Due', ops.reminders?.due_now ?? 0,
+          `${ops.reminders?.overdue ?? 0} overdue`)}
+        {tile('/super-admin/calls', 'Avg Call (today)', ops.avg_call_duration_today != null ? `${ops.avg_call_duration_today}s` : '—',
+          `${ops.calls_today ?? 0} calls`)}
+      </div>
+    </div>
+  );
+}
+
 function Panel({ title, sub, right, children, className = '' }: {
   title: string; sub?: string; right?: React.ReactNode;
   children: React.ReactNode; className?: string;
@@ -305,6 +348,9 @@ export function SuperAdminDashboardPage() {
         <StatLink to="/super-admin/tenants?status=active" icon={Zap} label="New This Month" value={summary.tenants.new_month}
           sub="signups" accent="amber" />
       </div>
+
+      {/* ── Operations strip (global monitoring summary) ─────────── */}
+      <OpsSummaryStrip />
 
       {/* ── Calls/day composed chart ───────────────────────────── */}
       <Panel

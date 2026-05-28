@@ -34,10 +34,10 @@ function SideLink({
   return (
     <Link
       to={target}
-      className="group relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white transition-all duration-200"
+      className="group relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white hover:translate-x-0.5 transition-all duration-200"
     >
       <div className="absolute inset-0 rounded-lg bg-gradient-to-r from-white/0 via-white/5 to-white/0 opacity-0 group-hover:opacity-100 transition-opacity" />
-      <Icon className="relative h-3.5 w-3.5 flex-shrink-0 text-slate-500 group-hover:text-violet-300 transition-colors" />
+      <Icon className="relative h-3.5 w-3.5 flex-shrink-0 text-slate-500 group-hover:text-violet-300 group-hover:scale-110 transition-all" />
       <span className="relative flex-1 truncate">{label}</span>
       {isNew && (
         <span className="relative px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-emerald-200 bg-emerald-500/15 border border-emerald-400/30 rounded">
@@ -215,7 +215,7 @@ export function DocsPage() {
 
       {/* ── Main content ── */}
       <main className="relative flex-1 min-w-0 z-10">
-        <div className="max-w-6xl mx-auto px-10 py-10">
+        <div className="max-w-6xl mx-auto px-6 sm:px-10 py-8 sm:py-10 animate-fade-in">
           {/* Top bar */}
           <div className="flex items-center justify-between mb-8">
             <div className="flex items-center gap-3">
@@ -244,7 +244,7 @@ export function DocsPage() {
           )}
 
           {/* ── Hero: multi-gradient frame around video block ── */}
-          <div id="overview" className="relative rounded-3xl p-[1px] mb-12 group bg-gradient-to-br from-violet-500/60 via-fuchsia-400/40 to-cyan-400/60">
+          <div id="overview" className="relative rounded-3xl p-[1px] mb-12 group bg-gradient-to-br from-violet-500/60 via-fuchsia-400/40 to-cyan-400/60 animate-scale-in transition-all duration-500 hover:shadow-2xl hover:shadow-fuchsia-500/20">
             <div className="relative rounded-[23px] overflow-hidden bg-[#0b0b1a]">
               <div className="aspect-[21/9] relative flex items-center justify-center">
                 <div className="absolute inset-0 bg-gradient-to-br from-violet-950/60 via-slate-950 to-cyan-950/60" />
@@ -258,7 +258,7 @@ export function DocsPage() {
                 </div>
 
                 <div className="relative text-center space-y-4 px-6">
-                  <div className="mx-auto h-16 w-16 rounded-full bg-white/10 backdrop-blur-md border border-white/20 flex items-center justify-center shadow-2xl shadow-fuchsia-500/30 group-hover:scale-110 group-hover:shadow-fuchsia-500/50 transition-all cursor-pointer">
+                  <div className="mx-auto h-16 w-16 rounded-full bg-white/10 backdrop-blur-md border border-white/20 flex items-center justify-center shadow-2xl shadow-fuchsia-500/30 animate-pulse-glow group-hover:scale-110 group-hover:shadow-fuchsia-500/50 transition-all duration-300 cursor-pointer">
                     <Play className="h-7 w-7 text-white fill-white ml-1" />
                   </div>
                   <h2 className="text-4xl md:text-6xl font-black tracking-tight">
@@ -293,7 +293,10 @@ export function DocsPage() {
 
           {/* ── Bento-style featured grid ── */}
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-widest">Explore the platform</h3>
+            <div className="flex items-center gap-2.5">
+              <span className="h-4 w-1 rounded-full bg-gradient-to-b from-violet-400 to-cyan-400" />
+              <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-widest">Explore the platform</h3>
+            </div>
             <div className="text-[10px] text-slate-500">{featured.length} guides</div>
           </div>
 
@@ -303,7 +306,7 @@ export function DocsPage() {
               Loading documentation...
             </div>
           ) : (
-            <div id="getting-started" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12 auto-rows-[190px]">
+            <div id="getting-started" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5 mb-12 auto-rows-[200px]">
               {featured.map((card, idx) => {
                 const Icon = docIcon(card.icon);
                 const c = colorFor(card.color);
@@ -312,18 +315,19 @@ export function DocsPage() {
                   <Link
                     key={card.slug}
                     to={target}
-                    className={`group relative rounded-2xl p-[1px] transition-all duration-300 hover:scale-[1.02] ${bentoSpan(idx)}`}
+                    style={{ animationDelay: `${idx * 70}ms`, animationFillMode: 'both' }}
+                    className={`group relative rounded-2xl p-[1px] animate-slide-up transition-all duration-300 hover:-translate-y-1.5 hover:scale-[1.02] hover:shadow-2xl hover:shadow-violet-500/20 ${bentoSpan(idx)}`}
                   >
                     {/* Gradient border that lights up on hover */}
                     <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-white/10 via-white/5 to-white/10 group-hover:from-violet-400/40 group-hover:via-fuchsia-400/30 group-hover:to-cyan-400/40 transition-colors" />
 
                     {/* Card surface */}
-                    <div className="relative h-full rounded-2xl bg-[#0f0f1e] overflow-hidden flex flex-col p-5">
+                    <div className="relative h-full rounded-2xl bg-[#0f0f1e] ring-1 ring-white/[0.04] overflow-hidden flex flex-col p-5">
                       {/* subtle corner glow matching card color */}
                       <div className={`absolute -top-12 -right-12 h-32 w-32 rounded-full ${c.bg} blur-2xl opacity-60 group-hover:opacity-100 transition-opacity`} />
 
                       <div className="relative flex items-start justify-between mb-3">
-                        <div className={`h-10 w-10 rounded-xl ${c.bg} flex items-center justify-center border border-white/5`}>
+                        <div className={`h-10 w-10 rounded-xl ${c.bg} flex items-center justify-center border border-white/5 transition-transform duration-300 group-hover:scale-110 group-hover:-rotate-3`}>
                           <Icon className={`h-5 w-5 ${c.text}`} />
                         </div>
                         {card.is_new && (
@@ -370,7 +374,7 @@ export function DocsPage() {
                 </p>
                 <Link
                   to="/agents/new"
-                  className="group inline-flex items-center gap-2 mt-7 px-6 py-3 text-sm font-bold text-slate-900 bg-white hover:bg-slate-100 rounded-full shadow-2xl shadow-fuchsia-500/30 hover:shadow-fuchsia-500/50 transition-all"
+                  className="group inline-flex items-center gap-2 mt-7 px-6 py-3 text-sm font-bold text-slate-900 bg-white hover:bg-slate-100 rounded-full shadow-2xl shadow-fuchsia-500/30 hover:shadow-fuchsia-500/50 hover:scale-105 active:scale-100 transition-all"
                 >
                   Start Building
                   <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />

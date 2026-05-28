@@ -17,6 +17,9 @@ export const config = {
   knowledgeDbUrl:
     process.env.KNOWLEDGE_DB_URL ||
     'postgresql://voiceagent:voiceagent_dev@localhost:5432/knowledge_db',
+  crmDbUrl:
+    process.env.CRM_DB_URL ||
+    'postgresql://voiceagent:voiceagent_dev@localhost:5432/crm_db',
   jwt: {
     secret: process.env.JWT_SECRET || 'dev-secret-change-me',
     accessExpiration: process.env.JWT_EXPIRATION || '15m',

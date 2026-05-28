@@ -4,7 +4,7 @@ import {
   Settings, Phone, Puzzle, Users, CreditCard, KeyRound, ScrollText,
   MessageSquare, Radio, Search, Shield, DollarSign, Mic, PhoneCall,
   Send, Loader2, AlertCircle, CheckCircle2, Trash2, Play, RefreshCw,
-  Wrench, Hash,
+  Wrench, Hash, Zap,
 } from 'lucide-react';
 import api from '@/services/api';
 
@@ -12,6 +12,7 @@ const settingsNav = [
   { label: 'General',        path: '/settings',                icon: Settings, end: true },
   { label: 'Phone Numbers',  path: '/settings/phone-numbers',  icon: Phone },
   { label: 'Integrations',   path: '/settings/integrations',   icon: Puzzle },
+  { label: 'Automation',     path: '/settings/automation',     icon: Zap },
   { label: 'WhatsApp',       path: '/settings/whatsapp',       icon: MessageSquare },
   { label: 'Plivo',          path: '/settings/plivo',          icon: Radio },
   { label: 'Plivo Features', path: '/settings/plivo-features', icon: Wrench },

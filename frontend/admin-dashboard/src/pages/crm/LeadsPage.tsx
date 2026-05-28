@@ -570,6 +570,18 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
   const [savingEmail, setSavingEmail] = useState(false);
   const [emailError, setEmailError] = useState('');
 
+  // Read-only communication timeline for this lead (best-effort). Powers the
+  // "Communication" section alongside the auto-brochure status from
+  // custom_fields. Never blocks the modal — failures are swallowed.
+  const [commLogs, setCommLogs] = useState<any[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/communication-logs', { params: { lead_id: lead.id, limit: 8 } })
+      .then((r: any) => { if (!cancelled) setCommLogs(r.data?.data || []); })
+      .catch(() => { /* timeline is best-effort */ });
+    return () => { cancelled = true; };
+  }, [lead.id]);
+
   const startEditEmail = () => {
     setEmailDraft(lead.email || '');
     setEmailError('');
@@ -616,7 +628,7 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
   // actually captured the field. Each row labelled `admission` for visual
   // grouping (the modal renders all rows in order, with a section divider
   // injected when the section name changes).
-  type Row = { label: string; value: React.ReactNode; icon?: React.ReactNode; section?: 'contact' | 'admission' | 'meta' };
+  type Row = { label: string; value: React.ReactNode; icon?: React.ReactNode; section?: 'contact' | 'admission' | 'communication' | 'meta' };
   const dash = <span className="text-gray-400 italic">—</span>;
   const missing = <span className="text-gray-400 italic">not captured</span>;
   const showVal = (v: any, fallback: React.ReactNode = missing) => (v && String(v).trim() ? <span className="text-gray-800">{String(v)}</span> : fallback);
@@ -664,6 +676,54 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
       label: 'Needs review',
       value: <div className="flex flex-wrap gap-1">{reviewReasons.map((r: string) => <Badge key={r} variant="warning">{r.replace(/_/g, ' ')}</Badge>)}</div>,
     });
+  }
+
+  // Auto-brochure status (read-only) from custom_fields + the comm-log
+  // timeline. Section only renders when there's some activity, so leads that
+  // never triggered automation stay clean.
+  const brochureChannels: string[] = Array.isArray(cf.brochure_sent_channels) ? cf.brochure_sent_channels : [];
+  const hasCommActivity = !!cf.brochure_sent || !!cf.brochure_send_failed || brochureChannels.length > 0 || commLogs.length > 0;
+  const commStatusVariant = (s: string): 'success' | 'danger' | 'warning' | 'outline' | 'info' => {
+    const x = String(s || '').toLowerCase();
+    if (x === 'sent' || x === 'delivered' || x === 'read') return 'success';
+    if (x === 'failed') return 'danger';
+    if (x === 'queued') return 'outline';
+    return 'info';
+  };
+  const communicationRows: Row[] = [];
+  if (hasCommActivity) {
+    communicationRows.push({
+      section: 'communication', label: 'Auto Brochure Sent',
+      value: cf.brochure_sent
+        ? <Badge variant="success">Sent</Badge>
+        : cf.brochure_send_failed
+          ? <Badge variant="warning">Send failed</Badge>
+          : <span className="text-gray-400 italic">not sent</span>,
+    });
+    if (brochureChannels.length > 0) {
+      communicationRows.push({
+        section: 'communication', label: 'Channels',
+        value: <div className="flex flex-wrap gap-1">{brochureChannels.map((c) => <Badge key={c} variant="info">{String(c).toUpperCase()}</Badge>)}</div>,
+      });
+    }
+    if (cf.brochure_sent_at) communicationRows.push({ section: 'communication', label: 'Sent at', value: <span className="text-gray-700">{formatDate(cf.brochure_sent_at)}</span> });
+    if (cf.brochure_name) communicationRows.push({ section: 'communication', label: 'Brochure', value: showVal(cf.brochure_name) });
+    if (commLogs.length > 0) {
+      communicationRows.push({
+        section: 'communication', label: 'Recent messages',
+        value: (
+          <div className="space-y-1">
+            {commLogs.slice(0, 8).map((l: any) => (
+              <div key={l.id} className="flex items-center gap-2 text-xs">
+                <Badge variant="outline">{String(l.channel || '').toUpperCase()}</Badge>
+                <Badge variant={commStatusVariant(l.status)}>{l.status}</Badge>
+                <span className="text-gray-400">{formatDate(l.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        ),
+      });
+    }
   }
 
   const rows: Row[] = [
@@ -723,6 +783,7 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
     { section: 'contact', label: 'Company', icon: <Building2 className="h-3.5 w-3.5 text-gray-400" />, value: lead.company || dash },
     { section: 'contact', label: 'City', value: cf.city || dash },
     ...admissionRows,
+    ...communicationRows,
     { section: 'meta', label: 'Status', value: (
       <span className="inline-flex items-center gap-2">
         <StatusBadge status={lead.status} />
@@ -771,6 +832,7 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
             const SECTION_TITLES: Record<string, string> = {
               contact: 'Contact',
               admission: 'Admissions Details',
+              communication: 'Communication',
               meta: 'Lead Meta',
             };
             for (const r of rows) {

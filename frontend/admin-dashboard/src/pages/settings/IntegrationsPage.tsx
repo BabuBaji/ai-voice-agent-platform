@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   Settings, Phone, Puzzle, Users, CreditCard, ExternalLink, Search,
-  CheckCircle2, AlertCircle, Loader2, Trash2, X, KeyRound, ScrollText,
+  CheckCircle2, AlertCircle, Loader2, Trash2, X, KeyRound, ScrollText, Zap,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
@@ -14,6 +14,7 @@ const settingsNav = [
   { label: 'General', path: '/settings', icon: Settings, end: true },
   { label: 'Phone Numbers', path: '/settings/phone-numbers', icon: Phone },
   { label: 'Integrations', path: '/settings/integrations', icon: Puzzle },
+  { label: 'Automation', path: '/settings/automation', icon: Zap },
   { label: 'API', path: '/settings/api', icon: KeyRound },
   { label: 'Team', path: '/settings/team', icon: Users },
   { label: 'Billing', path: '/settings/billing', icon: CreditCard },

@@ -13,6 +13,7 @@ import { apiKeyRouter } from './routes/apiKey.routes';
 import { docRouter } from './routes/doc.routes';
 import { billingRouter } from './routes/billing.routes';
 import { superAdminRouter } from './routes/superAdmin.routes';
+import { superAdminMonitoringRouter } from './routes/superAdminMonitoring.routes';
 import { broadcastsRouter } from './routes/broadcasts.routes';
 import { assistantRouter } from './routes/assistant.routes';
 import { auditMiddleware } from './middleware/audit.middleware';
@@ -54,6 +55,7 @@ export function createApp(pool: Pool) {
   app.use('/docs', docRouter());
   app.use('/billing', billingRouter());
   app.use('/super-admin', superAdminRouter());
+  app.use('/super-admin', superAdminMonitoringRouter());
   app.use('/broadcasts', broadcastsRouter());
   app.use('/assistant', assistantRouter());
 

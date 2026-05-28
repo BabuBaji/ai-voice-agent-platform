@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Settings, Phone, Puzzle, Users, CreditCard, KeyRound, ScrollText,
-  MessageSquare, Save, Send, Trash2, AlertCircle, CheckCircle2, Loader2, Shield, Radio,
+  MessageSquare, Save, Send, Trash2, AlertCircle, CheckCircle2, Loader2, Shield, Radio, Zap,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -13,6 +13,7 @@ const settingsNav = [
   { label: 'General',        path: '/settings',                icon: Settings, end: true },
   { label: 'Phone Numbers',  path: '/settings/phone-numbers',  icon: Phone },
   { label: 'Integrations',   path: '/settings/integrations',   icon: Puzzle },
+  { label: 'Automation',     path: '/settings/automation',     icon: Zap },
   { label: 'WhatsApp',       path: '/settings/whatsapp',       icon: MessageSquare },
   { label: 'Plivo',          path: '/settings/plivo',          icon: Radio },
   { label: 'API',            path: '/settings/api',            icon: KeyRound },

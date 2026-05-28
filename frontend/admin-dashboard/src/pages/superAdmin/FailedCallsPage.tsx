@@ -1,9 +1,12 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useState, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Loader2, AlertTriangle, Eye, Sparkles, MessageSquare, ChevronDown, ChevronUp,
+  Search, X, RefreshCw, ArrowUpDown, Clock, Timer,
 } from 'lucide-react';
 import { superAdminApi } from '@/services/superAdmin.api';
+
+const SEV_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 
 const SEV_DOT: Record<string, string> = {
   info:     'bg-sky-500',
@@ -27,17 +30,60 @@ export function SuperAdminFailedCallsPage() {
   const [days, setDays] = useState(7);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
+  // Advanced controls (additive).
+  const [query, setQuery] = useState('');
+  const [sortKey, setSortKey] = useState<'started_at' | 'duration_seconds' | 'severity'>('started_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [lastLoaded, setLastLoaded] = useState<Date | null>(null);
+  const toggleSort = (key: typeof sortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir('desc'); }
+  };
+
+  const load = useCallback((silent = false) => {
     const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-    setData(null);
-    superAdminApi.failedCallsGrouped(since).then(setData);
+    if (!silent) setData(null);
+    return superAdminApi.failedCallsGrouped(since)
+      .then((d) => { setData(d); setLastLoaded(new Date()); })
+      .catch(() => {});
   }, [days]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = setInterval(() => load(true), 15000);
+    return () => clearInterval(id);
+  }, [autoRefresh, load]);
 
   const toggle = (id: string) => {
     const next = new Set(expanded);
     next.has(id) ? next.delete(id) : next.add(id);
     setExpanded(next);
   };
+
+  // Client-side filter + sort over the loaded failure sample.
+  const displaySample = useMemo(() => {
+    const sample: any[] = data?.sample || [];
+    const q = query.trim().toLowerCase();
+    let r = sample;
+    if (q) r = r.filter((c) => [c.failure_reason, c.tenant?.name, c.tenant_id, c.agent?.name, c.agent_id, c.channel, c.caller_number, c.called_number, c.failure_severity]
+      .some((v: any) => String(v || '').toLowerCase().includes(q)));
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...r].sort((a, b) => {
+      if (sortKey === 'duration_seconds') return ((a.duration_seconds || 0) - (b.duration_seconds || 0)) * dir;
+      if (sortKey === 'severity') return ((SEV_ORDER[a.failure_severity] ?? 3) - (SEV_ORDER[b.failure_severity] ?? 3)) * dir;
+      return (new Date(a.started_at).getTime() - new Date(b.started_at).getTime()) * dir;
+    });
+  }, [data, query, sortKey, sortDir]);
+
+  const summary = useMemo(() => {
+    const durs = displaySample.map((c) => c.duration_seconds || 0).filter((d) => d > 0);
+    const sev = { critical: 0, warning: 0, info: 0 };
+    for (const c of displaySample) { const s = c.failure_severity; if (s && s in sev) (sev as any)[s]++; }
+    return { count: displaySample.length, avg: durs.length ? durs.reduce((a, b) => a + b, 0) / durs.length : 0, sev };
+  }, [displaySample]);
+  const fmtDur = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.round(s)}s`);
 
   if (!data) return <div className="flex justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-amber-500" /></div>;
 
@@ -53,11 +99,21 @@ export function SuperAdminFailedCallsPage() {
             <span className="font-semibold text-rose-700">{data.total_failed}</span> failed calls in the last {days} days · grouped by root cause
           </p>
         </div>
-        <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
-          <option value={1}>Last 24 hours</option>
-          <option value={7}>Last 7 days</option>
-          <option value={30}>Last 30 days</option>
-        </select>
+        <div className="flex items-center gap-2">
+          {lastLoaded && <span className="text-[11px] text-slate-400 inline-flex items-center gap-1"><Clock className="h-3 w-3" />{lastLoaded.toLocaleTimeString()}</span>}
+          <button onClick={() => setAutoRefresh((a) => !a)}
+            className={`text-xs px-2.5 py-2 rounded-lg border inline-flex items-center gap-1.5 ${autoRefresh ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'}`}>
+            <span className={`inline-block w-1.5 h-1.5 rounded-full ${autoRefresh ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} /> Auto {autoRefresh ? 'on' : 'off'}
+          </button>
+          <button onClick={() => load(true)} className="text-xs px-2.5 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5" /> Refresh
+          </button>
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+            <option value={1}>Last 24 hours</option>
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+          </select>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -85,10 +141,40 @@ export function SuperAdminFailedCallsPage() {
       <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
           <h2 className="text-sm font-semibold text-slate-900">Recent failed calls</h2>
-          <p className="text-xs text-slate-500">{data.sample.length} shown</p>
+          <p className="text-xs text-slate-500">{displaySample.length}{query ? ' filtered' : ''} shown</p>
         </div>
-        {data.sample.length === 0 ? (
-          <div className="p-12 text-center text-sm text-slate-400">No failures in this window.</div>
+        {/* ── Toolbar: client search, sort, summary ── */}
+        <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search failures — reason, tenant, agent, number…"
+              className="w-full pl-9 pr-8 py-2 rounded-lg border border-slate-200 text-sm" />
+            {query && <button onClick={() => setQuery('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X className="h-3.5 w-3.5" /></button>}
+          </div>
+          <div className="inline-flex items-center gap-1 text-xs">
+            <span className="text-slate-400 uppercase tracking-wider text-[10px]">Sort</span>
+            {([['started_at', 'Newest'], ['duration_seconds', 'Duration'], ['severity', 'Severity']] as const).map(([k, label]) => (
+              <button key={k} onClick={() => toggleSort(k)}
+                className={`px-2 py-1 rounded-lg border inline-flex items-center gap-1 ${sortKey === k ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'}`}>
+                {label}{sortKey === k && <ArrowUpDown className="h-3 w-3" />}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-slate-50 border border-slate-200">
+              <Timer className="h-3 w-3 text-slate-400" /><span className="text-slate-400 uppercase tracking-wider text-[10px]">Avg</span><span className="font-semibold text-slate-700">{fmtDur(summary.avg)}</span>
+            </span>
+            <span className="inline-flex items-center gap-2 text-[11px] px-2 py-1 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-400 uppercase tracking-wider text-[10px]">Severity</span>
+              <span className="text-rose-600 font-semibold">{summary.sev.critical} crit</span>
+              <span className="text-amber-600 font-semibold">{summary.sev.warning} warn</span>
+              <span className="text-sky-600 font-semibold">{summary.sev.info} info</span>
+            </span>
+          </div>
+        </div>
+        {displaySample.length === 0 ? (
+          <div className="p-12 text-center text-sm text-slate-400">{query ? `No failures match “${query}”.` : 'No failures in this window.'}</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -106,7 +192,7 @@ export function SuperAdminFailedCallsPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.sample.map((c: any) => {
+                {displaySample.map((c: any) => {
                   const isOpen = expanded.has(c.id);
                   const sev = c.failure_severity as keyof typeof SEV_DOT;
                   return (

@@ -375,6 +375,30 @@ export const superAdminApi = {
         cost_inr: number; revenue_inr: number; margin_inr: number; margin_pct: number | null;
       }>;
     }>('/super-admin/cost-analysis').then((r) => r.data),
+
+  // ── Phase-1 Global Monitoring (Queues / Reminders / Communications /
+  //    Providers / Analytics / Ops summary) + safe control actions ──────────
+  queues: () => api.get<any>('/super-admin/queues').then((r) => r.data),
+  reminders: () => api.get<any>('/super-admin/reminders').then((r) => r.data),
+  communications: (params: { since?: string } = {}) =>
+    api.get<any>('/super-admin/communications', { params }).then((r) => r.data),
+  providers: () => api.get<any>('/super-admin/providers').then((r) => r.data),
+  analytics: (params: { since?: string } = {}) =>
+    api.get<any>('/super-admin/analytics', { params }).then((r) => r.data),
+  opsSummary: () => api.get<any>('/super-admin/ops-summary').then((r) => r.data),
+
+  retryQueue: (queue: 'crm_lead_retry' | 'lead_recall' | 'communication', id?: string) =>
+    api.post('/super-admin/queues/retry', { queue, id }).then((r) => r.data),
+  resendComm: (id: string) =>
+    api.post(`/super-admin/communications/${id}/resend`).then((r) => r.data),
+  pauseCampaign: (id: string) =>
+    api.post(`/super-admin/campaigns/${id}/pause`).then((r) => r.data),
+  resumeCampaign: (id: string) =>
+    api.post(`/super-admin/campaigns/${id}/resume`).then((r) => r.data),
+  requeueReminder: (id: string, kind: 'task' | 'recall' = 'task') =>
+    api.post(`/super-admin/reminders/${id}/requeue`, { kind }).then((r) => r.data),
+  setTenantAutomation: (id: string, settings: Record<string, unknown>) =>
+    api.post(`/super-admin/tenants/${id}/automation`, { settings }).then((r) => r.data),
 };
 
 // ── F2: CSV export utility (used by every list page) ──────────────────────
