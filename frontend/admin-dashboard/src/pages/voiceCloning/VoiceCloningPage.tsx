@@ -604,7 +604,7 @@ function ClonedVoiceCard({
 
       {voice.status === 'error' ? (
         <div className="space-y-2">
-          <div className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-md px-2 py-1.5">
+          <div className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-md px-2 py-1.5 break-words">
             {voice.error_message || 'Cloning failed'}
           </div>
           {voice.error_message?.includes('missing_permissions') && (

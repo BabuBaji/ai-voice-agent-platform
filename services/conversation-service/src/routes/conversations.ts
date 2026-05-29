@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { pool } from '../index';
 import { analyzeConversation } from '../services/analyzer';
-import { processCallEnd } from '../services/postCallProcessor';
+import { processCallEnd, runFollowupAutomation } from '../services/postCallProcessor';
 
 export const conversationRouter = Router();
 
@@ -276,6 +276,9 @@ conversationRouter.post('/:id/analyze', async (req: Request, res: Response, next
 
     const { id } = req.params;
     const result = await analyzeConversation(id, tenantId);
+    // Advance the brochure→visit→feedback chain when this was a scheduled
+    // follow-up call (gated on followup_task_id; no-op for normal calls).
+    void runFollowupAutomation(id, tenantId, result).catch(() => {});
     res.json(result);
   } catch (err: any) {
     if (err?.message === 'Conversation not found') {

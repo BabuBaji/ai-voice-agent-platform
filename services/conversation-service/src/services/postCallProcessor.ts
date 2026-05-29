@@ -1,6 +1,8 @@
 import { pool } from '../index';
 import { analyzeConversation, AnalysisResult } from './analyzer';
 import { triggerWorkflow, mapStatusToEvent } from './whatsappWorkflowEngine';
+import { updateFollowupFromCallEnd } from './followupScheduler';
+import { config } from '../config';
 import pino from 'pino';
 
 const logger = pino({ name: 'post-call-processor' });
@@ -54,12 +56,14 @@ export async function processCallEnd(
   let crmLeadId: string | null = null;
   let callId: string | null = null;
   let campaignId: string | null = null;
+  let followupTaskId: string | null = null;
   try {
     const r = await pool.query(
       `SELECT
          c.analysis->>'crm_lead_id' AS lead_id,
          ca.id::text AS call_id,
-         ca.metadata->>'campaign_id' AS campaign_id
+         ca.metadata->>'campaign_id' AS campaign_id,
+         ca.metadata->>'followup_task_id' AS followup_task_id
        FROM conversations c
        LEFT JOIN calls ca ON ca.conversation_id = c.id
        WHERE c.id = $1 AND c.tenant_id = $2
@@ -69,6 +73,7 @@ export async function processCallEnd(
     crmLeadId = r.rows[0]?.lead_id || null;
     callId = r.rows[0]?.call_id || null;
     campaignId = r.rows[0]?.campaign_id || null;
+    followupTaskId = r.rows[0]?.followup_task_id || null;
   } catch { /* non-fatal — audit row just won't have these refs */ }
 
   // Audit row — always written, even on failure, so the dashboard surfaces
@@ -110,6 +115,14 @@ export async function processCallEnd(
   // Schedule follow-up task(s) based on extended lead_status.
   await scheduleFollowUpTasks(conversationId, tenantId, analysis!, crmLeadId);
 
+  // Post-brochure → visit → feedback automation. ONLY fires when this call was
+  // a scheduled follow-up (the scheduler stamped metadata.followup_task_id) —
+  // a no-op for normal inbound/outbound calls, so the existing flow is untouched.
+  if (followupTaskId) {
+    await handleFollowupCallAutomation(conversationId, tenantId, analysis!, followupTaskId, callId)
+      .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'follow-up automation hook failed'));
+  }
+
   // Fire the WhatsApp workflow for the resolved lead_status. Best-effort —
   // post-call success path does NOT depend on the WhatsApp send succeeding.
   // Idempotency in the engine prevents re-firing when re-analysis runs.
@@ -121,6 +134,124 @@ export async function processCallEnd(
     lead_status: analysis!.lead_status,
     lead_id: crmLeadId,
   };
+}
+
+/**
+ * Gated entry point for the live call-end path (`POST /conversations/:id/analyze`,
+ * which telephony-adapter calls on hang-up). Runs the follow-up automation ONLY
+ * when the call carried a followup_task_id — a no-op for every normal call, so
+ * the existing analyze flow is untouched. Best-effort, never throws.
+ */
+export async function runFollowupAutomation(
+  conversationId: string, tenantId: string, analysis: AnalysisResult,
+): Promise<void> {
+  try {
+    const r = await pool.query(
+      `SELECT ca.id::text AS call_id, ca.metadata->>'followup_task_id' AS followup_task_id
+         FROM conversations c
+         LEFT JOIN calls ca ON ca.conversation_id = c.id
+        WHERE c.id = $1 AND c.tenant_id = $2
+        LIMIT 1`,
+      [conversationId, tenantId],
+    );
+    const followupTaskId = r.rows[0]?.followup_task_id || null;
+    if (!followupTaskId) return;
+    await handleFollowupCallAutomation(conversationId, tenantId, analysis, followupTaskId, r.rows[0]?.call_id || null);
+  } catch (e: any) {
+    logger.warn({ conv: conversationId, err: e?.message }, 'runFollowupAutomation failed');
+  }
+}
+
+/**
+ * Drives the brochure → visit → feedback chain off a completed FOLLOW-UP call.
+ * Best-effort, never throws. Only invoked when the call carried a
+ * followup_task_id, so it can't affect normal calls.
+ *   1. Advance/complete the follow-up task (chains the next task per outcome).
+ *   2. If the analyzer captured a visit date/time, auto-create a visit row.
+ *   3. If this was the post-visit feedback call, store the feedback.
+ */
+async function handleFollowupCallAutomation(
+  conversationId: string, tenantId: string, analysis: AnalysisResult,
+  followupTaskId: string, callId: string | null,
+): Promise<void> {
+  const interestLevel = typeof analysis.interest_level === 'number' ? analysis.interest_level : 0;
+  const callOutcome = String(analysis.call_outcome || (analysis as any).outcome || '').toLowerCase();
+
+  // 1. Complete the task + chain the next one (existing engine logic).
+  await updateFollowupFromCallEnd(pool, { followupTaskId, conversationId, callOutcome, interestLevel, analysis });
+
+  const tr = await pool.query(`SELECT tenant_id, lead_id, type FROM followup_tasks WHERE id = $1`, [followupTaskId]);
+  const task = tr.rows[0];
+  if (!task) return;
+
+  // 2. AI-extracted visit → create a visit_schedules row (when a date/time was captured).
+  const ke: any = analysis.key_entities || {};
+  const apptRaw = ke.appointment_time || (analysis as any).appointment_time || analysis.recommended_follow_up_time;
+  const visitWhen = parseFollowUpTimeLocal(apptRaw);
+  const wantsVisit = callOutcome.includes('visit') || callOutcome.includes('appointment') || !!ke.appointment_time;
+  if (visitWhen && wantsVisit) {
+    const existing = await pool.query(
+      `SELECT id FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`,
+      [task.lead_id],
+    );
+    if (existing.rows.length === 0) {
+      const y = visitWhen.getFullYear();
+      const mo = String(visitWhen.getMonth() + 1).padStart(2, '0');
+      const d = String(visitWhen.getDate()).padStart(2, '0');
+      const hh = String(visitWhen.getHours()).padStart(2, '0');
+      const mm = String(visitWhen.getMinutes()).padStart(2, '0');
+      await pool.query(
+        `INSERT INTO visit_schedules
+           (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, visitor_type, notes)
+         VALUES ($1, $2, $3, $4, $5, 'SCHEDULED', 'AI_FOLLOW_UP_CALL', $6, $7)`,
+        [task.tenant_id, task.lead_id, followupTaskId, `${y}-${mo}-${d}`, `${hh}:${mm}`,
+         ke.visitor_type || null, (analysis as any).short_summary?.slice(0, 300) || null],
+      );
+      await updateLeadPipeline(task.tenant_id, task.lead_id, 'VISIT_SCHEDULED');
+      logger.info({ conv: conversationId, lead: task.lead_id, visit_date: `${y}-${mo}-${d}` }, 'AI follow-up: visit auto-created');
+    }
+  }
+
+  // 3. Post-visit feedback call → store feedback linked to the visit.
+  if (task.type === 'post_visit_feedback_call') {
+    const visit = await pool.query(
+      `SELECT id FROM visit_schedules WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 1`, [task.lead_id],
+    );
+    const notInterested = callOutcome.includes('not interested') || callOutcome.includes('not_interested');
+    const rating = notInterested ? 'NEGATIVE' : interestLevel >= 60 ? 'POSITIVE' : interestLevel >= 35 ? 'NEUTRAL' : 'NEGATIVE';
+    await pool.query(
+      `INSERT INTO feedback_logs
+         (tenant_id, lead_id, followup_task_id, call_id, visit_id, rating, rating_score,
+          feedback_text, interest_after_visit, admission_readiness, objections, next_action, visited_status)
+       VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)`,
+      [task.tenant_id, task.lead_id, followupTaskId, callId, visit.rows[0]?.id || null,
+       rating, Math.max(1, Math.min(5, Math.round(interestLevel / 20))),
+       (analysis as any).short_summary || null,
+       interestLevel >= 60 ? 'high' : interestLevel >= 35 ? 'medium' : 'low',
+       notInterested ? 'NOT_INTERESTED' : interestLevel >= 80 ? 'READY' : 'NEEDS_FOLLOWUP',
+       JSON.stringify(analysis.objections || []), (analysis as any).next_best_action || null, 'VISITED'],
+    );
+    await updateLeadPipeline(task.tenant_id, task.lead_id,
+      notInterested ? 'NOT_INTERESTED' : interestLevel >= 80 ? 'ADMISSION_READY' : 'FEEDBACK_COLLECTED');
+    logger.info({ conv: conversationId, lead: task.lead_id, rating }, 'post-visit feedback stored');
+  } else {
+    await updateLeadPipeline(task.tenant_id, task.lead_id, 'BROCHURE_FOLLOWUP_COMPLETED');
+  }
+}
+
+/** Best-effort lead pipeline-stage write into crm custom_fields (merge). */
+async function updateLeadPipeline(tenantId: string, leadId: string, stage: string): Promise<void> {
+  try {
+    const res = await fetch(`${config.crmServiceUrl}/leads/${leadId}`, { headers: { 'x-tenant-id': tenantId } });
+    if (!res.ok) return;
+    const lead: any = await res.json();
+    const merged = { ...(lead.custom_fields || {}), pipeline_stage: stage };
+    await fetch(`${config.crmServiceUrl}/leads/${leadId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+      body: JSON.stringify({ custom_fields: merged }),
+    });
+  } catch { /* best-effort */ }
 }
 
 async function fireWorkflowFromAnalysis(

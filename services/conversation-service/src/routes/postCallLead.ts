@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { pool } from '../index';
 import { sendEmail, sendWhatsApp, sendSms } from '../services/communications';
+import { recordBrochureDelivery } from '../services/brochureDelivery';
 import { enqueueLeadRecall } from '../services/recallScheduler';
 
 /**
@@ -539,6 +540,16 @@ postCallLeadRouter.post('/communications/email/brochure', async (req: Request, r
     const out = await sendEmail({ tenant_id: tenantId, ...data });
     if (out.ok && data.lead_id) {
       void enqueueRecallFromBrochureSend(tenantId, data.lead_id, data.recipient, data.conversation_id);
+    }
+    // Track in the brochure-delivery layer (additive, best-effort).
+    if (data.lead_id) {
+      const att = Array.isArray(data.attachments) ? data.attachments[0] : null;
+      void recordBrochureDelivery({
+        tenantId, leadId: data.lead_id, conversationId: data.conversation_id || null,
+        channel: 'email', recipientEmail: data.recipient,
+        brochureName: att?.name || null, brochureUrl: att?.url || null,
+        result: out,
+      });
     }
     res.json(out);
   } catch (err: any) {

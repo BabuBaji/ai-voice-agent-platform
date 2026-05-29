@@ -22,6 +22,7 @@ import { config } from '../config';
 import { sendEmail, sendWhatsApp, sendSms } from './communications';
 import { enqueueLeadRecall } from './recallScheduler';
 import { getTenantSettings } from './privacy';
+import { recordBrochureDelivery } from './brochureDelivery';
 
 const AUTO_EMAIL_TEMPLATE_ID = 'AUTO_BROCHURE';
 const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -276,7 +277,15 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
       `Brochure: ${brochure.url}\n\n` +
       `Our counselor will contact you shortly.`;
 
-    // 7. Fire enabled channels in parallel — best-effort.
+    // 7. Fire enabled channels in parallel — best-effort. Each send result is
+    //    ALSO recorded into lead_brochure_deliveries (additive tracking layer);
+    //    recordBrochureDelivery never throws, so it can't affect the send flow.
+    const brochureCtx = {
+      tenantId, leadId, conversationId,
+      brochureId: brochure.id, brochureName: brochure.name, brochureUrl: brochure.url,
+      collegeName: college || null, courseName: course || null, branchName: branch || null,
+      brochureMatched: brochure.matched,
+    };
     const jobs: Array<Promise<{ channel: string; ok: boolean }>> = [];
     if (wantEmail) {
       jobs.push(
@@ -284,7 +293,10 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
           tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
           recipient: String(email).trim(), subject: emailSubject, body: emailBody,
           attachments, template_id: AUTO_EMAIL_TEMPLATE_ID,
-        }).then((r) => ({ channel: 'email', ok: !!r.ok })).catch(() => ({ channel: 'email', ok: false })),
+        }).then(async (r) => {
+          await recordBrochureDelivery({ ...brochureCtx, channel: 'email', recipientEmail: String(email).trim(), result: r });
+          return { channel: 'email', ok: !!r.ok };
+        }).catch(() => ({ channel: 'email', ok: false })),
       );
     }
     if (wantWhatsApp) {
@@ -294,7 +306,10 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
         sendWhatsApp({
           tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
           recipient: phoneE164!, message: waMessage, attachments,
-        }).then((r) => ({ channel: 'whatsapp', ok: !!r.ok })).catch(() => ({ channel: 'whatsapp', ok: false })),
+        }).then(async (r) => {
+          await recordBrochureDelivery({ ...brochureCtx, channel: 'whatsapp', recipientMobile: phoneE164!, result: r });
+          return { channel: 'whatsapp', ok: !!r.ok };
+        }).catch(() => ({ channel: 'whatsapp', ok: false })),
       );
     }
     if (wantSms) {
@@ -302,7 +317,10 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
         sendSms({
           tenant_id: tenantId, lead_id: leadId, conversation_id: conversationId,
           recipient: phoneE164!, message: waMessage,
-        }).then((r) => ({ channel: 'sms', ok: !!r.ok })).catch(() => ({ channel: 'sms', ok: false })),
+        }).then(async (r) => {
+          await recordBrochureDelivery({ ...brochureCtx, channel: 'sms', recipientMobile: phoneE164!, result: r });
+          return { channel: 'sms', ok: !!r.ok };
+        }).catch(() => ({ channel: 'sms', ok: false })),
       );
     }
 
@@ -315,6 +333,7 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
     if (anyOk) {
       const prevChannels = Array.from(sentChannelsFor(currentCustom));
       const mergedChannels = Array.from(new Set([...prevChannels, ...okChannels]));
+      const alreadyFollowedUp = !!currentCustom?.brochure_followup_task_created;
       await updateLeadBrochureState(tenantId, leadId, currentCustom, {
         brochure_sent: true,
         brochure_sent_at: new Date().toISOString(),
@@ -322,7 +341,34 @@ export async function maybeAutoSendBrochure(args: AutoBrochureArgs): Promise<voi
         brochure_id: brochure.id,
         brochure_name: brochure.name,
         brochure_send_failed: false,
+        // Brochure follow-up workflow fields (kept in custom_fields — no leads
+        // schema change). Drive the disabled "Send Brochure" button + the
+        // follow-up pipeline.
+        brochure_status: 'SENT',
+        brochure_sent_by: 'SYSTEM',
+        brochure_followup_required: true,
+        brochure_resend_count: currentCustom?.brochure_resend_count || 0,
+        brochure_followup_task_created: true,
+        pipeline_stage: 'BROCHURE_FOLLOWUP_SCHEDULED',
       });
+
+      // Auto-create a BROCHURE_CONFIRMATION follow-up (+4h) so the lead enters
+      // the follow-up workflow visible on the Follow-ups page (followup_tasks
+      // table). Guarded so a re-analyze of the same call doesn't duplicate it.
+      if (!alreadyFollowedUp) {
+        try {
+          const { createFollowupForLead } = await import('./followupScheduler');
+          await createFollowupForLead(pool, {
+            tenantId, leadId, conversationId, agentId: agentId || undefined,
+            type: 'brochure_follow_up_call',
+            scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            notes: `Brochure sent via ${okChannels.join(', ')}. Follow-up: confirm receipt, discuss college/course/fee, and ask preferred visit date & time.`,
+          });
+          console.info(`[auto-brochure] brochure follow-up call scheduled (lead=${leadId}, +24h)`);
+        } catch (e: any) {
+          console.warn(`[auto-brochure] follow-up task creation failed (lead=${leadId}): ${e?.message}`);
+        }
+      }
     } else {
       await updateLeadBrochureState(tenantId, leadId, currentCustom, {
         brochure_send_failed: true,

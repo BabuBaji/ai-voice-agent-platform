@@ -440,6 +440,46 @@ This is an automated report from MyLeadX Follow-up Scheduler.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Visit → post-visit feedback chaining
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Auto-complete past visits, then schedule a post-visit feedback call (+24h)
+ *  for any COMPLETED visit that doesn't have one yet. */
+async function sweepVisitsForFeedback(pool: Pool): Promise<void> {
+  try {
+    // 1. Mark visits whose date/time has passed as COMPLETED.
+    await pool.query(
+      `UPDATE visit_schedules
+          SET status = 'COMPLETED', updated_at = NOW()
+        WHERE status IN ('SCHEDULED', 'CONFIRMED')
+          AND (visit_date + COALESCE(visit_time, '00:00:00'::time)) < NOW()`,
+    );
+    // 2. Schedule a feedback call (+24h) for COMPLETED visits lacking one.
+    const due = await pool.query(
+      `SELECT v.id, v.tenant_id, v.lead_id
+         FROM visit_schedules v
+        WHERE v.status = 'COMPLETED'
+          AND NOT EXISTS (
+            SELECT 1 FROM followup_tasks f
+             WHERE f.lead_id = v.lead_id AND f.type = 'post_visit_feedback_call'
+          )
+        LIMIT 20`,
+    );
+    for (const v of due.rows) {
+      await createFollowupForLead(pool, {
+        tenantId: v.tenant_id, leadId: v.lead_id,
+        type: 'post_visit_feedback_call',
+        scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        notes: 'Post-visit feedback call — ask about the visit experience, counselor meeting, and admission interest.',
+      });
+      logger.info({ visit: v.id, lead: v.lead_id }, 'Post-visit feedback call scheduled (+24h)');
+    }
+  } catch (err: any) {
+    logger.warn({ err: err.message }, 'visit→feedback sweeper error');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public: start the scheduler
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -465,6 +505,10 @@ export function startFollowupScheduler(pool: Pool): void {
 
   // Process reminders every 5 minutes
   setInterval(() => processReminders(pool).catch(() => {}), 5 * 60_000);
+
+  // Visit → post-visit feedback sweeper every 10 minutes: auto-complete past
+  // visits and schedule the +24h feedback call.
+  setInterval(() => sweepVisitsForFeedback(pool).catch(() => {}), 10 * 60_000);
 
   // Daily report check every hour
   setInterval(() => generateDailyReport(pool).catch(() => {}), 60 * 60_000);

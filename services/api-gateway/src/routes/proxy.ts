@@ -130,6 +130,8 @@ proxyRouter.all('/api/v1/recalls', authMiddleware, forwardRequest(config.service
 // Follow-up scheduler (auto follow-ups, visits, reminders, feedback)
 proxyRouter.all('/api/v1/followups/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 proxyRouter.all('/api/v1/followups', authMiddleware, forwardRequest(config.services.conversation, keepPath));
+// Brochure-delivery tracking (sent/not-sent/pending queues + send/retry/status)
+proxyRouter.all('/api/v1/brochures/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 // Per-tenant WhatsApp integration config (encrypted creds at rest)
 proxyRouter.all('/api/v1/integrations/*', authMiddleware, forwardRequest(config.services.conversation, keepPath));
 proxyRouter.all('/api/v1/integrations', authMiddleware, forwardRequest(config.services.conversation, keepPath));

@@ -740,7 +740,7 @@ const SPOKEN_DIGIT_MAP: Record<string, string> = {
   'शून्य': '0', 'जीरो': '0', 'एक': '1', 'दो': '2', 'तीन': '3', 'चार': '4', 'पांच': '5', 'पाँच': '5', 'छह': '6', 'सात': '7', 'आठ': '8', 'नौ': '9',
   // English digits spoken (Sarvam emits these on bilingual lines)
   'नैन': '9', 'नाइन': '9', 'फोर': '4', 'थ्री': '3', 'टू': '2', 'वन': '1', 'फाइव': '5', 'सिक्स': '6', 'सेवन': '7', 'एट': '8', 'ओह': '0',
-  'నైన్': '9', 'ఫోర్': '4', 'త్రీ': '3', 'టు': '2', 'వన్': '1', 'ఎయిట్': '8', 'సెవెన్': '7', 'సిక్స్': '6', 'ఫైవ్': '5', 'ఫైవు': '5', 'ఫైవ్‌': '5', 'జీరో': '0', 'ఓ': '0',
+  'నైన్': '9', 'నైను': '9', 'ఫోర్': '4', 'ఫోర': '4', 'త్రీ': '3', 'త్రి': '3', 'టు': '2', 'టూ': '2', 'వన్': '1', 'వన': '1', 'ఎయిట్': '8', 'ఏట్': '8', 'సెవెన్': '7', 'సెవన్': '7', 'సిక్స్': '6', 'సిక్': '6', 'ఫైవ్': '5', 'ఫైవు': '5', 'ఫైవ్‌': '5', 'జీరో': '0', 'ఓ': '0', 'ఓహ్': '0',
 };
 
 /**
@@ -798,7 +798,7 @@ export function decodeIndicSpelling(text: string, language: string): string | nu
     'డబల్': 2, 'ట్రిపుల్': 3, 'డబుల్': 2,
   };
   const repeatPreprocessed = (text || '').replace(
-    /(double|triple|quadruple|डबल|ट्रिपल|డబల్|డబుల్|ట్రిపుల్)\s+(zero|one|two|three|four|five|six|seven|eight|nine|शून्य|एक|दो|तीन|चार|पांच|छह|सात|आठ|नौ|సున్నా|ఒకటి|రెండు|మూడు|నాలుగు|ఐదు|ఆరు|ఏడు|ఎనిమిది|తొమ్మిది|నైన్|ఫోర్|ఫైవ్|త్రీ|టు|వన్|ఎయిట్|సెవెన్|సిక్స్|जीरो|नैन|नाइन|फोर|थ्री|टू|वन|फाइव|सिक्स|सेवन|एट|0|1|2|3|4|5|6|7|8|9)\b/giu,
+    /(double|triple|quadruple|डबल|ट्रिपल|డబల్|డబుల్|ట్రిపుల్)\s+(zero|one|two|three|four|five|six|seven|eight|nine|शून्य|एक|दो|तीन|चार|पांच|छह|सात|आठ|नौ|సున్నా|ఒకటి|రెండు|మూడు|నాలుగు|ఐదు|ఆరు|ఏడు|ఎనిమిది|తొమ్మిది|నైన్|ఫోర్|ఫైవ్|త్రీ|టు|టూ|వన్|ఎయిట్|సెవెన్|సిక్స్|जीरो|नैन|नाइन|फोर|थ्री|टू|वन|फाइव|सिक्स|सेवन|एट|0|1|2|3|4|5|6|7|8|9)\b/giu,
     (_full, repeatWord: string, digitWord: string) => {
       const n = REPEAT_WORD_MAP[repeatWord.toLowerCase()] || 2;
       const digit = SPOKEN_DIGIT_MAP[digitWord.toLowerCase()] || SPOKEN_DIGIT_MAP[digitWord] || (/^[0-9]$/.test(digitWord) ? digitWord : null);
@@ -834,7 +834,15 @@ export function decodeIndicSpelling(text: string, language: string): string | nu
     .replace(/(^|\s)డాట్\s+ఇన్(\s|$)/giu, '$1.in$2')
     .replace(/(^|\s)एट\s+द\s+रेट(\s|$)/giu, '$1@$2')
     .replace(/(^|\s)डॉट\s+कॉम(\s|$)/giu, '$1.com$2')
-    .replace(/(^|\s)डॉट\s+इन(\s|$)/giu, '$1.in$2');
+    .replace(/(^|\s)डॉट\s+इन(\s|$)/giu, '$1.in$2')
+    // Email punctuation words → symbols. "dot com"/"dot in" are handled above;
+    // a remaining standalone "dot" becomes "." (e.g. "rahul dot reddy").
+    .replace(/\bunder[\s-]?score\b/giu, '_')
+    .replace(/\b(hyphen|dash)\b/giu, '-')
+    .replace(/\bdot\b/giu, '.')
+    .replace(/(^|\s)డాట్(\s|$)/giu, '$1.$2')
+    .replace(/(^|\s)అండర్\s*స్కోర్(\s|$)/giu, '$1_$2')
+    .replace(/(^|\s)హైఫన్(\s|$)/giu, '$1-$2');
 
   // Tokenise on whitespace + common separators (commas/hyphens).
   const tokens = normalised
@@ -857,8 +865,8 @@ export function decodeIndicSpelling(text: string, language: string): string | nu
     if (/^[a-zA-Z]$/.test(t)) { decoded.push(t.toLowerCase()); mappedCount++; continue; }
     // ASCII digit run — keep
     if (/^[0-9]+$/.test(t)) { decoded.push(t); mappedCount++; continue; }
-    // Embedded email atoms — keep
-    if (/[@.]/.test(t)) { decoded.push(t.toLowerCase()); mappedCount++; continue; }
+    // Embedded email atoms — keep (incl. _ and - from underscore/hyphen words)
+    if (/[@._-]/.test(t)) { decoded.push(t.toLowerCase()); mappedCount++; continue; }
     // Devanagari / Telugu / Tamil etc. digit codepoint runs (rare but seen).
     if (/^[०-९૦-૯௦-௯౦-౯೦-೯൦-൯]+$/.test(t)) {
       const ascii = t.replace(/./g, (ch) => {
@@ -3250,7 +3258,7 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
       const callSidRef = session.callSid;
       playText(wsRef, session, farewell)
         .catch(() => { /* swallow */ })
-        .then(() => new Promise((r) => setTimeout(r, 1800)))
+        .then(() => new Promise((r) => setTimeout(r, estimatedPlayoutMs(farewell))))
         .then(async () => {
           if (!callSidRef) return;
           logger.info(
@@ -3515,7 +3523,7 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
       : 'Thank you! Our team will contact you shortly. Have a great day!';
     logger.warn({ callSid: session.callSid, turns: session.history.length }, 'Stream: max-turns safety — auto-closing call');
     if (session.plivoWs) {
-      playText(session.plivoWs, session, autoClose).catch(() => {}).then(() => new Promise(r => setTimeout(r, 2000))).then(async () => {
+      playText(session.plivoWs, session, autoClose).catch(() => {}).then(() => new Promise(r => setTimeout(r, estimatedPlayoutMs(autoClose)))).then(async () => {
         try { await plivoProvider.endCall(session.callSid); } catch {}
       });
     }
@@ -3624,12 +3632,13 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
     const closingPattern = /24\s*hours|have a great day|good\s*day|శుభదినం|శుభ\s*దినం|ధన్యవాదాలు.*బ్రోచర్|brochure.*send|team will connect|our team|మా టీమ్/i;
     if (!session.callEnded && closingPattern.test(spoken)) {
       session.callEnded = true;
-      logger.info({ callSid: session.callSid, spoken: spoken.slice(0, 80) }, 'Stream: auto-close detected — hanging up after farewell');
+      const farewellMs = estimatedPlayoutMs(spoken);
+      logger.info({ callSid: session.callSid, spoken: spoken.slice(0, 80), farewellMs }, 'Stream: auto-close detected — hanging up after full farewell');
       setTimeout(async () => {
         if (!session.callSid) return;
         try { await plivoProvider.endCall(session.callSid); }
         catch (e: any) { logger.warn({ callSid: session.callSid, err: e?.message }, 'Auto-hangup failed'); }
-      }, 3000);
+      }, farewellMs);
     }
 
     // If the caller barged in mid-playback, only the first ~10-20% of the
@@ -3832,6 +3841,22 @@ async function streamAndPlayReply(
 
   const full = await llmPromise.catch(() => '');
   return (full || sentencesEmitted.join(' ')).trim();
+}
+
+/**
+ * Estimate how long synthesized speech actually plays out at the caller's ear.
+ * The TTS send loops push mulaw chunks ~5x faster than real-time (20ms sleep
+ * per 100ms chunk), so Plivo keeps playing buffered audio for roughly the full
+ * clip duration AFTER playText/streamAndPlayReply resolve. Farewell hang-ups
+ * must wait this long or they cut the goodbye off mid-sentence (the original
+ * fixed 1.8-3s delays were far too short for a ~6s Telugu farewell). Errs
+ * slightly long (safe — a complete goodbye matters more than a little dead
+ * air) and is capped so a stuck case can't hold the line open forever.
+ */
+function estimatedPlayoutMs(text: string): number {
+  const t = (text || '').trim();
+  if (!t) return 2000;
+  return Math.min(16000, Math.max(4000, Math.round(t.length * 50) + 1800));
 }
 
 async function playText(plivoWs: WebSocket, session: StreamSession, text: string): Promise<void> {

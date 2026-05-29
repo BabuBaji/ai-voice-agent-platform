@@ -39,33 +39,33 @@ export function sarvamConfigured(): boolean {
 // own demo also uses it for natural-conversation flows). All `anushka`
 // voices remain selectable per-agent via agent.voice_config.voice_id; this
 // default just changes what an unspecified voice resolves to.
-// Sarvam speaker defaults. 'kavya' is a natural female voice with warm
-// conversational delivery and clear Indic pronunciation. Change to 'arvind'
-// for male or 'maitreyi' for an alternative female.
+// Sarvam speaker defaults. 'manisha' is a warm, friendly, conversational
+// female voice with clear Telugu pronunciation and natural code-mixed
+// Telugu+English delivery — chosen for the admissions-counselor experience.
+// NOTE: bulbul:v2 ONLY accepts anushka, abhilash, manisha, vidya, arya,
+// karun, hitesh. Older names (e.g. 'kavya') return HTTP 400 on v2 and must
+// not be used as a default here.
 const SARVAM_VOICE_DEFAULTS: Record<string, string> = {
-  'te-in': 'kavya',
-  'hi-in': 'kavya',
-  'ta-in': 'kavya',
-  'kn-in': 'kavya',
-  'ml-in': 'kavya',
-  'mr-in': 'kavya',
-  'bn-in': 'kavya',
-  'gu-in': 'kavya',
-  'pa-in': 'kavya',
-  'or-in': 'kavya',
-  'as-in': 'kavya',
-  'en-in': 'kavya',
+  'te-in': 'manisha',
+  'hi-in': 'manisha',
+  'ta-in': 'manisha',
+  'kn-in': 'manisha',
+  'ml-in': 'manisha',
+  'mr-in': 'manisha',
+  'bn-in': 'manisha',
+  'gu-in': 'manisha',
+  'pa-in': 'manisha',
+  'or-in': 'manisha',
+  'as-in': 'manisha',
+  'en-in': 'manisha',
 };
 
-// Sarvam's public speaker catalog. Any voice_id from another provider
-// (ElevenLabs, OpenAI, cartesia, etc.) is ignored; we fall back to the
+// Sarvam's bulbul:v2 speaker catalog — ONLY these seven are accepted by the
+// model. Any voice_id from another provider (ElevenLabs, OpenAI, cartesia,
+// etc.) or a deprecated bulbul:v1 name is ignored; we fall back to the
 // language default so the call doesn't 400 out.
 const SARVAM_SPEAKERS = new Set([
-  'anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun',
-  'hitesh', 'aditya', 'ritu', 'priya', 'neha', 'rahul',
-  'pooja', 'rohan', 'simran', 'kavya', 'amol', 'amartya',
-  'diya', 'maitreyi', 'arvind', 'amit', 'ishaan', 'kabir',
-  'vivaan',
+  'anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh',
 ]);
 
 function normalizeLang(raw: string | undefined | null): string {
@@ -145,9 +145,10 @@ export function mulawToWav(mulaw: Buffer): Buffer {
 /**
  * Parse a WAV buffer that Sarvam TTS returns, extract PCM16 samples at
  * whatever sample rate the header says, resample to 8 kHz, then encode to
- * mulaw and return base64 ready for Plivo playAudio.
+ * mulaw and return the raw mulaw bytes ready for Plivo playAudio. Returns a
+ * Buffer so multiple TTS segments can be concatenated before base64-encoding.
  */
-function wavToMulaw8kBase64(wav: Buffer): string | null {
+function wavToMulaw8k(wav: Buffer): Buffer | null {
   if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
     return null;
   }
@@ -214,7 +215,39 @@ function wavToMulaw8kBase64(wav: Buffer): string | null {
   // Encode PCM16 → mulaw (1 byte per sample).
   const mulaw = Buffer.alloc(resampled.length);
   for (let i = 0; i < resampled.length; i++) mulaw[i] = pcm16ToMulawSample(resampled[i]);
-  return mulaw.toString('base64');
+  return mulaw;
+}
+
+// G.711 mu-law silence byte (PCM 0 encodes to 0xFF). A short run of these,
+// appended after the speech, guarantees the final word/syllable is fully
+// rendered before Plivo stops playback — prevents end-of-sentence clipping.
+const MULAW_SILENCE_BYTE = 0xff;
+// Kept deliberately small: this is appended to EACH sentence chunk, so a large
+// value creates audible gaps between sentences (choppy "breaking"). 40ms is
+// below the ~50ms pause-perception threshold — it guards the final word from
+// clipping without breaking the conversational flow.
+const TTS_TRAILING_SILENCE_MS = 40;
+
+/**
+ * Split text into chunks no longer than Sarvam's hard 500-char per-input
+ * limit. Breaks at the last whitespace before the limit so a word, name,
+ * number, email or college name is never cut across two chunks. The chunks
+ * are sent together in the TTS `inputs[]` array and their audio is
+ * concatenated, so no text is ever dropped (the old `.slice(0,500)` silently
+ * discarded everything past 500 chars → truncated speech).
+ */
+function splitTextForSarvam(text: string, maxLen = 500): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > maxLen) {
+    let cut = rest.lastIndexOf(' ', maxLen);
+    if (cut < maxLen * 0.6) cut = maxLen; // no decent break point — hard cut
+    chunks.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
 }
 
 // ---- STT with energy-based VAD -------------------------------------------
@@ -674,7 +707,7 @@ export async function synthesizeSarvamTtsMulaw(
   const overrideLower = (voiceOverride || '').toLowerCase();
   const speaker = SARVAM_SPEAKERS.has(overrideLower)
     ? overrideLower
-    : (SARVAM_VOICE_DEFAULTS[lang.toLowerCase()] || 'anushka');
+    : (SARVAM_VOICE_DEFAULTS[lang.toLowerCase()] || 'manisha');
 
   try {
     const resp = await fetch(`${API_BASE}/text-to-speech`, {
@@ -684,12 +717,18 @@ export async function synthesizeSarvamTtsMulaw(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        inputs: [clean.slice(0, 500)],
+        inputs: splitTextForSarvam(clean),
         target_language_code: lang,
         speaker,
         speech_sample_rate: 8000,
         enable_preprocessing: true,
         model: TTS_MODEL,
+        // Voice settings for a natural, professional delivery: slightly slower
+        // pace (0.9x) so speech isn't rushed and Telugu words stay crisp,
+        // neutral pitch. enable_preprocessing above normalizes code-mixed
+        // Telugu+English, names and numbers for clearer pronunciation.
+        pace: 0.9,
+        pitch: 0,
       }),
     });
     if (!resp.ok) {
@@ -698,18 +737,27 @@ export async function synthesizeSarvamTtsMulaw(
       return null;
     }
     const data = await resp.json().catch(() => null) as any;
-    const b64wav = data?.audios?.[0];
-    if (!b64wav) {
+    const audios: string[] = Array.isArray(data?.audios) ? data.audios : [];
+    if (audios.length === 0) {
       logger.warn('Sarvam TTS: empty audios[]');
       return null;
     }
-    const wav = Buffer.from(b64wav, 'base64');
-    const b64mulaw = wavToMulaw8kBase64(wav);
-    if (!b64mulaw) {
-      logger.warn({ wavLen: wav.length }, 'Sarvam TTS: WAV decode/resample failed');
+    // Decode every returned segment and concatenate, so multi-chunk inputs
+    // (long sentences split across the 500-char limit) play as one continuous
+    // utterance with nothing dropped.
+    const parts: Buffer[] = [];
+    for (const b64wav of audios) {
+      const m = wavToMulaw8k(Buffer.from(b64wav, 'base64'));
+      if (m) parts.push(m);
+    }
+    if (parts.length === 0) {
+      logger.warn('Sarvam TTS: WAV decode/resample failed for all segments');
       return null;
     }
-    return b64mulaw;
+    // Pad the tail with mu-law silence so Plivo finishes rendering the last
+    // word instead of clipping it at the audio boundary.
+    parts.push(Buffer.alloc(Math.round(8000 * TTS_TRAILING_SILENCE_MS / 1000), MULAW_SILENCE_BYTE));
+    return Buffer.concat(parts).toString('base64');
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Sarvam TTS error');
     return null;

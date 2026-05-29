@@ -60,7 +60,11 @@ followupRouter.get('/', async (req: Request, res: Response, next: NextFunction) 
       pool.query(`SELECT * FROM followup_tasks WHERE ${where} ORDER BY scheduled_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...params, limit, offset]),
       pool.query(`SELECT COUNT(*) FROM followup_tasks WHERE ${where}`, params),
     ]);
-    res.json({ data: data.rows, total: parseInt(count.rows[0].count), page, limit });
+    // Enrich with lead profile (name/mobile/college/marks/rank) from crm_db.
+    const { fetchLeadProfiles } = await import('../services/brochureDelivery');
+    const profiles = await fetchLeadProfiles(tenantId, data.rows.map((r: any) => r.lead_id));
+    const enriched = data.rows.map((r: any) => ({ ...r, lead: profiles[r.lead_id] || null }));
+    res.json({ data: enriched, total: parseInt(count.rows[0].count), page, limit });
   } catch (err) { next(err); }
 });
 
@@ -132,6 +136,7 @@ const visitSchema = z.object({
   location: z.string().optional(),
   counselor_name: z.string().optional(),
   counselor_phone: z.string().optional(),
+  visitor_type: z.string().optional(),
 });
 
 followupRouter.post('/visits', async (req: Request, res: Response, next: NextFunction) => {
@@ -139,9 +144,9 @@ followupRouter.post('/visits', async (req: Request, res: Response, next: NextFun
     const tenantId = getTenantId(req, res); if (!tenantId) return;
     const d = visitSchema.parse(req.body);
     const r = await pool.query(
-      `INSERT INTO visit_schedules (tenant_id, lead_id, followup_task_id, visit_date, visit_time, location, counselor_name, counselor_phone)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [tenantId, d.lead_id, d.followup_task_id || null, d.visit_date, d.visit_time || null, d.location || null, d.counselor_name || null, d.counselor_phone || null],
+      `INSERT INTO visit_schedules (tenant_id, lead_id, followup_task_id, visit_date, visit_time, location, counselor_name, counselor_phone, visitor_type, created_from)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'MANUAL') RETURNING *`,
+      [tenantId, d.lead_id, d.followup_task_id || null, d.visit_date, d.visit_time || null, d.location || null, d.counselor_name || null, d.counselor_phone || null, d.visitor_type || null],
     );
     res.status(201).json(r.rows[0]);
   } catch (err: any) {
@@ -161,7 +166,25 @@ followupRouter.get('/visits', async (req: Request, res: Response, next: NextFunc
     if (status) { where += ` AND status = $${idx++}`; params.push(status); }
     if (leadId) { where += ` AND lead_id = $${idx++}`; params.push(leadId); }
     const r = await pool.query(`SELECT * FROM visit_schedules WHERE ${where} ORDER BY visit_date DESC LIMIT 50`, params);
-    res.json({ data: r.rows, total: r.rows.length });
+    const { fetchLeadProfiles } = await import('../services/brochureDelivery');
+    const profiles = await fetchLeadProfiles(tenantId, r.rows.map((x: any) => x.lead_id));
+    res.json({ data: r.rows.map((x: any) => ({ ...x, lead: profiles[x.lead_id] || null })), total: r.rows.length });
+  } catch (err) { next(err); }
+});
+
+// Generic visit status update (Mark Completed / Cancelled / No-show from the UI).
+followupRouter.put('/visits/:id/status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = getTenantId(req, res); if (!tenantId) return;
+    const status = String(req.body?.status || '').toUpperCase();
+    const allowed = ['SCHEDULED', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULED', 'NO_SHOW'];
+    if (!allowed.includes(status)) { res.status(400).json({ error: 'Invalid status' }); return; }
+    const r = await pool.query(
+      `UPDATE visit_schedules SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+      [status, req.params.id, tenantId],
+    );
+    if (!r.rows.length) { res.status(404).json({ error: 'Not Found' }); return; }
+    res.json(r.rows[0]);
   } catch (err) { next(err); }
 });
 
@@ -200,11 +223,18 @@ const feedbackSchema = z.object({
   lead_id: z.string().uuid(),
   followup_task_id: z.string().uuid().optional(),
   call_id: z.string().uuid().optional(),
+  visit_id: z.string().uuid().optional(),
   rating: z.enum(['POSITIVE', 'NEUTRAL', 'NEGATIVE']),
   rating_score: z.number().min(1).max(5).optional(),
   reason: z.string().optional(),
   feedback_text: z.string().optional(),
   requires_escalation: z.boolean().optional(),
+  interest_after_visit: z.string().optional(),
+  admission_readiness: z.string().optional(),
+  objections: z.any().optional(),
+  next_action: z.string().optional(),
+  callback_required: z.boolean().optional(),
+  visited_status: z.string().optional(),
 });
 
 followupRouter.post('/feedback', async (req: Request, res: Response, next: NextFunction) => {
@@ -212,9 +242,13 @@ followupRouter.post('/feedback', async (req: Request, res: Response, next: NextF
     const tenantId = getTenantId(req, res); if (!tenantId) return;
     const d = feedbackSchema.parse(req.body);
     const r = await pool.query(
-      `INSERT INTO feedback_logs (tenant_id, lead_id, followup_task_id, call_id, rating, rating_score, reason, feedback_text, requires_escalation)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [tenantId, d.lead_id, d.followup_task_id || null, d.call_id || null, d.rating, d.rating_score || null, d.reason || null, d.feedback_text || null, d.requires_escalation || false],
+      `INSERT INTO feedback_logs
+         (tenant_id, lead_id, followup_task_id, call_id, visit_id, rating, rating_score, reason, feedback_text,
+          requires_escalation, interest_after_visit, admission_readiness, objections, next_action, callback_required, visited_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16) RETURNING *`,
+      [tenantId, d.lead_id, d.followup_task_id || null, d.call_id || null, d.visit_id || null, d.rating, d.rating_score || null,
+       d.reason || null, d.feedback_text || null, d.requires_escalation || false, d.interest_after_visit || null,
+       d.admission_readiness || null, JSON.stringify(d.objections || []), d.next_action || null, d.callback_required || false, d.visited_status || null],
     );
     res.status(201).json(r.rows[0]);
   } catch (err: any) {
@@ -234,7 +268,9 @@ followupRouter.get('/feedback', async (req: Request, res: Response, next: NextFu
     if (leadId) { where += ` AND lead_id = $${idx++}`; params.push(leadId); }
     if (rating) { where += ` AND rating = $${idx++}`; params.push(rating); }
     const r = await pool.query(`SELECT * FROM feedback_logs WHERE ${where} ORDER BY collected_at DESC LIMIT 50`, params);
-    res.json({ data: r.rows, total: r.rows.length });
+    const { fetchLeadProfiles } = await import('../services/brochureDelivery');
+    const profiles = await fetchLeadProfiles(tenantId, r.rows.map((x: any) => x.lead_id));
+    res.json({ data: r.rows.map((x: any) => ({ ...x, lead: profiles[x.lead_id] || null })), total: r.rows.length });
   } catch (err) { next(err); }
 });
 

@@ -107,6 +107,18 @@ export async function initFollowupTables(pool: Pool): Promise<void> {
         escalation_notes TEXT,
         collected_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      -- Post-brochure → visit → feedback automation: additive columns.
+      ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS visitor_type VARCHAR(20);
+      ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS created_from VARCHAR(40) DEFAULT 'MANUAL';
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS visit_id UUID;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS interest_after_visit VARCHAR(20);
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS admission_readiness VARCHAR(30);
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS objections JSONB;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS next_action TEXT;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS callback_required BOOLEAN DEFAULT FALSE;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS callback_time TIMESTAMPTZ;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS visited_status VARCHAR(30);
     `);
     logger.info('Follow-up scheduler tables initialized');
   } finally {

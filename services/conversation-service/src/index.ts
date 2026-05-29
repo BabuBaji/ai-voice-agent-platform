@@ -15,6 +15,7 @@ import { startCampaignWorker } from './services/whatsappCampaignWorker';
 import { startRetrySweeper } from './services/whatsappRetrySweeper';
 import { initFollowupTables } from './db/followupTables';
 import { initFollowupFeatureTables } from './db/followupFeaturesInit';
+import { initBrochureDeliveryTable } from './db/brochureDeliveryInit';
 import { startFollowupScheduler } from './services/followupScheduler';
 import pino from 'pino';
 
@@ -40,6 +41,7 @@ async function start(): Promise<void> {
     await initContactTables(pool);
     await initFollowupTables(pool);
     await initFollowupFeatureTables(pool);
+    await initBrochureDeliveryTable(pool);
 
     const server = http.createServer(app);
 

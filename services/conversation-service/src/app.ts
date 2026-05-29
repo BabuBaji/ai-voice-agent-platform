@@ -22,6 +22,7 @@ import { whatsappRetryQueueRouter } from './routes/whatsappRetryQueue';
 import { whatsappAnalyticsRouter } from './routes/whatsappAnalytics';
 import { followupRouter } from './routes/followups';
 import { followupFeaturesRouter } from './routes/followupFeatures';
+import { brochureDeliveryRouter } from './routes/brochureDeliveries';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -93,6 +94,9 @@ app.use('/api/v1/whatsapp', whatsappAnalyticsRouter);
 // Follow-up scheduler: auto follow-ups, visits, reminders, feedback
 app.use('/api/v1/followups', followupRouter);
 app.use('/api/v1/followups', followupFeaturesRouter);
+
+// Brochure-delivery tracking (sent / not-sent / pending queues + send/retry/status)
+app.use('/api/v1', brochureDeliveryRouter);
 
 app.use(errorHandler);
 

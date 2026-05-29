@@ -984,7 +984,6 @@ async function createLeadFromAnalysis(
     const rawName = (ke.customer_name || '').trim() || csvName;
     const rawEmail = (ke.email || '').trim();
     const rawAltPhone = (ke.alt_phone || '').trim();
-    const validEmail = rawEmail.includes('@') && rawEmail.includes('.');
     // Prefer the number the customer explicitly gave during the call
     // (alt_phone from slot store) over the dialed number. Store both:
     // primary = confirmed mobile, alt = dialed number.
@@ -1000,21 +999,41 @@ async function createLeadFromAnalysis(
       outcome.includes('qualified') ||
       outcome.includes('appointment') ||
       outcome.includes('demo');
-    if (!interested) {
-      console.info(`[analyzer] auto-lead skipped — caller not interested (conv=${conversationId})`);
-      return;
-    }
-    // Hard requirements: name + mobile. Both are needed for ANY useful CRM
-    // entry — without a name or a number we have nothing to follow up on.
-    if (!rawName || !mobile) {
+
+    // ── Strict admissions lead gate ───────────────────────────────────────
+    // A call becomes a lead ONLY when the counsellor captured EVERY key
+    // admissions field on the call: name, mobile, a valid email, the
+    // college/course of interest, intermediate (12th) marks, and an entrance
+    // exam result. A call that dropped mid-conversation cannot have all of
+    // these, so it is naturally excluded. When anything is missing we do NOT
+    // create a CRM lead — the post_call_lead_analysis audit row (lead_id null
+    // + missing_fields) records it as an incomplete item for manual review,
+    // kept out of the converted-leads pipeline.
+    const present = (v: any) => String(v ?? '').trim().length > 0;
+    const GATE_EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+    const requiredFieldOk: Record<string, boolean> = {
+      name: present(rawName) && rawName.trim().length >= 2,
+      mobile: present(mobile),
+      email: present(rawEmail) && GATE_EMAIL_RE.test(rawEmail.trim()),
+      college_or_course:
+        present(ke.interested_university) || present(ke.interested_course) || present(ke.interested_branch),
+      intermediate_marks: present(ke.intermediate_marks) || present(ke.intermediate_percentage),
+      entrance_exam: present(ke.eamcet_rank) || present(ke.jee_rank),
+    };
+    const missingForLead = Object.entries(requiredFieldOk)
+      .filter(([, ok]) => !ok)
+      .map(([field]) => field);
+
+    if (!interested || missingForLead.length > 0) {
+      const reasons = [...missingForLead];
+      if (!interested) reasons.push('not_interested');
+      // Surface the gap on the analysis so the audit row / review queue show
+      // exactly why this call did NOT convert to a lead.
+      result.missing_fields = Array.from(new Set([...(result.missing_fields || []), ...missingForLead]));
       console.info(
-        `[analyzer] auto-lead skipped — missing critical fields (conv=${conversationId}, name=${!!rawName}, phone=${!!mobile})`,
+        `[analyzer] strict lead gate: NOT a lead — incomplete call (conv=${conversationId}, missing=[${reasons.join(',')}])`,
       );
       return;
-    }
-    // Track everything we'll surface as review reasons (drives NEEDS_REVIEW).
-    if (!validEmail) {
-      console.info(`[analyzer] auto-lead PROCEEDING with NEEDS_REVIEW — email missing (conv=${conversationId})`);
     }
 
     const parts = rawName.split(/\s+/);

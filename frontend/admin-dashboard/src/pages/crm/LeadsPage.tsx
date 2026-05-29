@@ -67,7 +67,9 @@ export function LeadsPage() {
   useEffect(() => { fetchLeads(); }, [fetchLeads]);
   useEffect(() => { setPage(1); }, [statusFilter, sourceFilter, search]);
 
-  const displayed = error
+  // Hide low-quality leads from the list — only show leads scoring 60+.
+  const MIN_LEAD_SCORE = 60;
+  const displayed = (error
     ? leads.filter((l) => {
         const q = search.toLowerCase();
         const matchSearch = !search || l.name.toLowerCase().includes(q) ||
@@ -78,7 +80,8 @@ export function LeadsPage() {
         const matchSource = sourceFilter === 'all' || l.source === sourceFilter;
         return matchSearch && matchStatus && matchSource;
       })
-    : leads;
+    : leads
+  ).filter((l) => (l.score ?? 0) >= MIN_LEAD_SCORE);
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]);
@@ -563,6 +566,11 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
   const notInterested = lead.status === 'lost' || (lead.tags || []).includes('not_interested');
   const followUpDue = !!cf.recommended_follow_up_time || (lead.tags || []).includes('callback_requested');
 
+  // Brochure already auto-sent → disable the Send button (show "Brochure Sent"),
+  // allow an explicit Resend (counselor/admin/failed/not-received).
+  const brochureAlreadySent = !!cf.brochure_sent;
+  const [resendMode, setResendMode] = useState(false);
+
   // Inline email edit — lets the user correct/add an address before clicking
   // Send Brochure without leaving this modal.
   const [editingEmail, setEditingEmail] = useState(false);
@@ -859,15 +867,30 @@ function ViewLeadModal({ lead, onClose, onSendBrochure, onLeadUpdated }: {
 
         <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-2">
           <Button variant="outline" onClick={onClose} className="rounded-xl">Close</Button>
-          <Button
-            variant="gradient"
-            onClick={handleSendBrochure}
-            className="rounded-xl"
-            disabled={savingEmail || (!lead.email && !lead.phone && !emailDraft.trim())}
-          >
-            {savingEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            Send Brochure
-          </Button>
+          {brochureAlreadySent && !resendMode ? (
+            <div className="flex items-center gap-3">
+              <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-sm font-semibold">
+                <CheckCircle2 className="h-4 w-4" /> Brochure Sent
+              </span>
+              <button
+                onClick={() => setResendMode(true)}
+                className="text-xs text-primary-600 hover:text-primary-700 underline font-medium"
+                title="Resend the brochure (e.g. caller didn't receive it)"
+              >
+                Resend
+              </button>
+            </div>
+          ) : (
+            <Button
+              variant="gradient"
+              onClick={handleSendBrochure}
+              className="rounded-xl"
+              disabled={savingEmail || (!lead.email && !lead.phone && !emailDraft.trim())}
+            >
+              {savingEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              {resendMode ? 'Resend Brochure' : 'Send Brochure'}
+            </Button>
+          )}
         </div>
       </div>
     </div>
