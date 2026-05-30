@@ -293,7 +293,7 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "timeline": "" | extracted,
     "city": "" | extracted,
     "product_interest": "" | extracted,
-    "appointment_time": "" | extracted ISO or natural-language,
+    "appointment_time": "" | If the customer agreed to ANY visit / counsellor meeting / callback on a specific date or time, output it as ISO 8601 (YYYY-MM-DD, append THH:MM only if a time was given). CONVERT relative and spoken dates to absolute using the call date — e.g. "2nd June 2026" / "June 2" / "రెండవ జూన్" / "जून दो" → "2026-06-02"; "tomorrow 5pm" → next-day ISO with T17:00. Empty string ONLY if no date was discussed,
     "customer_name": "" | extracted,
     "email": "" | extracted (only if explicitly stated, must contain @),
     "alt_phone": "" | extracted (E.164 if possible, only if explicitly stated as alternate/secondary contact),

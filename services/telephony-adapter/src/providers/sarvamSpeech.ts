@@ -727,6 +727,8 @@ export async function synthesizeSarvamTtsMulaw(
         // pace (0.9x) so speech isn't rushed and Telugu words stay crisp,
         // neutral pitch. enable_preprocessing above normalizes code-mixed
         // Telugu+English, names and numbers for clearer pronunciation.
+        // NOTE: do NOT raise loudness above ~1.1 — 1.5 over-drove the 8kHz
+        // mulaw phone audio and caused audible distortion/disturbance.
         pace: 0.9,
         pitch: 0,
       }),

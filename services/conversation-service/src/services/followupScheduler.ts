@@ -248,6 +248,40 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
   const phone = String(lead.phone).replace(/[^\d]/g, '');
   const to = phone.length === 10 ? `+91${phone}` : (phone.startsWith('91') ? `+${phone}` : `+${phone}`);
 
+  // Build the lead context the voice agent needs so it does NOT re-ask known
+  // details and can open by naming the college/course. The telephony WS handler
+  // injects metadata.campaign_instruction into the system prompt and metadata.vars
+  // into the greeting (see plivoAudioStream.ts onStart campaign overlay).
+  const cf = (lead.custom_fields || {}) as Record<string, any>;
+  const studentName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+  const college = cf.interested_university || cf.interested_college || '';
+  const course = cf.interested_course || '';
+  const branch = cf.interested_branch || '';
+  const knownDetails = [
+    studentName && `Student name: ${studentName}`,
+    lead.phone && `Mobile number: ${lead.phone}`,
+    lead.email && `Email: ${lead.email}`,
+    college && `Interested college: ${college}`,
+    course && `Interested course: ${course}`,
+    branch && `Interested branch: ${branch}`,
+    cf.eamcet_rank && `EAMCET rank: ${cf.eamcet_rank}`,
+    cf.jee_rank && `JEE rank: ${cf.jee_rank}`,
+    cf.intermediate_marks && `Intermediate marks: ${cf.intermediate_marks}`,
+    cf.preferred_location && `Preferred location: ${cf.preferred_location}`,
+  ].filter(Boolean).join('. ');
+  const isFeedbackCall = task.type === 'post_visit_feedback_call';
+  const directive = isFeedbackCall
+    ? `This is a post-visit feedback call. Ask ${studentName || 'the student'} about their experience visiting ${college || 'the college'} and their admission decision. Do NOT re-ask details you already know.`
+    : `You are calling to help plan a college visit. You already know the details below — DO NOT ask for them again. Greet ${studentName || 'the student'} politely, mention they showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}, confirm they are still interested, answer any doubts about fees/placements/hostel/scholarship briefly, then ask their preferred date and time to visit ${college || 'the college'} and confirm it back clearly.`;
+  // Acronym colleges ("SRM") get mispronounced by Indic TTS (callers heard
+  // "OYO University"). Give the agent a spaced spelling + an explicit
+  // letter-by-letter pronunciation instruction so the name is understood.
+  const collegeSpoken = college.replace(/\b([A-Z]{2,5})\b/g, (a: string) => a.split('').join(' '));
+  const pronunciationHint = college && collegeSpoken !== college
+    ? ` PRONUNCIATION: when saying the college name "${college}", say the acronym slowly letter-by-letter and clearly (like "${collegeSpoken}") so the caller understands it.`
+    : '';
+  const campaignInstruction = `${directive}${knownDetails ? ` Known details — ${knownDetails}.` : ''}${pronunciationHint}`;
+
   // Initiate the call
   try {
     const resp = await fetch(`${TELEPHONY_URL}/api/v1/calls/initiate`, {
@@ -263,8 +297,12 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
         metadata: {
           followup_task_id: task.id,
           followup_type: task.type,
-          contact_name: `${lead.first_name || ''} ${lead.last_name || ''}`.trim(),
+          contact_name: studentName,
           is_followup: true,
+          // Drives the voice agent's system prompt + greeting (campaign overlay).
+          target_name: studentName,
+          campaign_instruction: campaignInstruction,
+          vars: { name: studentName, college, college_spoken: collegeSpoken, course, branch, mobile: lead.phone || '', email: lead.email || '' },
         },
       }),
     });

@@ -1111,6 +1111,7 @@ async function callLLM(
     language: language || undefined,
     campaignInstruction: campaignContext?.instruction || null,
     contactVariables: campaignContext?.variables || null,
+    isFollowup: !!(campaignContext as any)?.isFollowup,
   });
 
   // Latency optimization 2: trim history to the last 14 turns. Sarvam-M is
@@ -1134,6 +1135,7 @@ async function callLLM(
       language: language || undefined,
       campaignInstruction: campaignContext?.instruction || null,
       contactVariables: campaignContext?.variables || null,
+      isFollowup: !!(campaignContext as any)?.isFollowup,
     });
     const sarvamHistory = trimmedHistory.length > 10 ? trimmedHistory.slice(-10) : trimmedHistory;
     let sarvamReply = await callSarvamLLM({
@@ -1269,6 +1271,7 @@ async function streamLLMReply(
     language: language || undefined,
     campaignInstruction: campaignContext?.instruction || null,
     contactVariables: campaignContext?.variables || null,
+    isFollowup: !!(campaignContext as any)?.isFollowup,
   });
   const trimmedHistory = history.length > 10 ? history.slice(-10) : history;
 
@@ -1292,6 +1295,7 @@ async function streamLLMReply(
       language: language || undefined,
       campaignInstruction: campaignContext?.instruction || null,
       contactVariables: campaignContext?.variables || null,
+      isFollowup: !!(campaignContext as any)?.isFollowup,
     });
     const sarvamHistory = trimmedHistory.length > 6 ? trimmedHistory.slice(-6) : trimmedHistory;
 
@@ -1575,6 +1579,7 @@ type CampaignContext = {
   variables: Record<string, any>;
   targetName: string | null;
   campaignId: string | null;
+  isFollowup?: boolean;
 };
 
 interface StreamSession {
@@ -1925,6 +1930,7 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
             ? md.campaign_instruction.trim() : null,
           variables: (md.vars && typeof md.vars === 'object') ? md.vars : {},
           targetName: md.target_name || null,
+          isFollowup: !!md.is_followup,
         };
         logger.info(
           { callSid: session.callSid, campaignId: session.campaignContext.campaignId, hasInstruction: !!session.campaignContext.instruction, varKeys: Object.keys(session.campaignContext.variables) },
@@ -2029,6 +2035,12 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
       'TTS routed to Sarvam for Indic language (Aura has no native Indic voices)',
     );
   }
+
+  // NOTE: STT stays on Deepgram for Indic (do NOT force Sarvam STT here).
+  // Sarvam-primary STT was tried and reverted twice — it hits HTTP 429 under
+  // real call load (STT+LLM+TTS on one Sarvam account) causing 11-13s stalls.
+  // Deepgram handles conversational Telugu fine; spelled digits/email are
+  // recovered by decodeIndicSpelling. See [[sarvam-voice-config]] memory.
 
   session.sttBackend = stt;
   session.ttsBackend = tts;
@@ -3767,6 +3779,7 @@ async function streamAndPlayReply(
   // Consumer: walks synthPromises in order. Plays each as its audio resolves,
   // pausing for newly-arriving promises until the LLM signals done.
   let playIdx = 0;
+  let totalAudioBytes = 0;  // mulaw bytes pushed to Plivo — used to wait for real playout
   try {
     while (true) {
       if (session.bargeInRequested) break;
@@ -3787,6 +3800,7 @@ async function streamAndPlayReply(
       if (session.bargeInRequested) break;
 
       const fullBytes = Buffer.from(b64, 'base64');
+      totalAudioBytes += fullBytes.length;
       session.agentMulawEvents.push({ offsetBytes: session.callerBytes, mulaw: fullBytes });
 
       let aborted = false;
@@ -3820,8 +3834,25 @@ async function streamAndPlayReply(
       if (aborted) break;
     }
   } finally {
-    const wasInterrupted = session.bargeInRequested;
     clearTimeout(agentSpeakingWatchdog);
+    // The send loop pushes mulaw to Plivo ~5x faster than real-time, so Plivo
+    // is STILL PLAYING the buffered audio when we reach here. If we flip to
+    // LISTENING now, the caller hears the sentence cut off mid-way and the
+    // agent's own tail/echo (or a caller "uh-huh") starts a new turn. So stay
+    // in AGENT_SPEAKING and wait for the audio to actually finish playing at
+    // the caller's ear. mulaw @ 8kHz = 8 bytes/ms. Barge-in still cuts it: we
+    // poll session.bargeInRequested and clear Plivo's buffer if the caller
+    // genuinely interrupts.
+    if (!session.bargeInRequested && !session.callEnded && totalAudioBytes > 0) {
+      const playoutDeadline = (session.turn.ttsStartAt || Date.now()) + Math.min(15000, Math.round(totalAudioBytes / 8));
+      while (Date.now() < playoutDeadline && !session.bargeInRequested && !session.callEnded && plivoWs.readyState === WebSocket.OPEN) {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      if (session.bargeInRequested) {
+        try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch { /* socket may be gone */ }
+      }
+    }
+    const wasInterrupted = session.bargeInRequested;
     session.isAgentSpeaking = false;
     session.currentAgentText = '';
     if (wasInterrupted) emit(session, 'TTS_CANCELLED', { duration_ms: Date.now() - session.turn.ttsStartAt });

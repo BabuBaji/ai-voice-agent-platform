@@ -200,12 +200,23 @@ async function handleFollowupCallAutomation(
       const d = String(visitWhen.getDate()).padStart(2, '0');
       const hh = String(visitWhen.getHours()).padStart(2, '0');
       const mm = String(visitWhen.getMinutes()).padStart(2, '0');
+      // Link the originating call so the Visit Card carries the recording + full
+      // summary. recording_url lives on the conversation row (written by the
+      // telephony WS handler on stream stop); may be null if the WAV write lost
+      // the race with analysis — that's fine, it stays null.
+      const rec = await pool.query(
+        `SELECT recording_url FROM conversations WHERE id = $1 LIMIT 1`, [conversationId],
+      );
+      const recordingUrl = rec.rows[0]?.recording_url || null;
+      const callSummary = (analysis as any).detailed_summary || (analysis as any).short_summary || null;
       await pool.query(
         `INSERT INTO visit_schedules
-           (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, visitor_type, notes)
-         VALUES ($1, $2, $3, $4, $5, 'SCHEDULED', 'AI_FOLLOW_UP_CALL', $6, $7)`,
+           (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, visitor_type, notes,
+            conversation_id, confirmation_call_id, recording_url, call_summary)
+         VALUES ($1, $2, $3, $4, $5, 'SCHEDULED', 'AI_FOLLOW_UP_CALL', $6, $7, $8, $9::uuid, $10, $11)`,
         [task.tenant_id, task.lead_id, followupTaskId, `${y}-${mo}-${d}`, `${hh}:${mm}`,
-         ke.visitor_type || null, (analysis as any).short_summary?.slice(0, 300) || null],
+         ke.visitor_type || null, (analysis as any).short_summary?.slice(0, 300) || null,
+         conversationId, callId, recordingUrl, callSummary],
       );
       await updateLeadPipeline(task.tenant_id, task.lead_id, 'VISIT_SCHEDULED');
       logger.info({ conv: conversationId, lead: task.lead_id, visit_date: `${y}-${mo}-${d}` }, 'AI follow-up: visit auto-created');
@@ -451,6 +462,43 @@ function parseFollowUpTimeLocal(raw: string | null | undefined): Date | null {
   if (s.includes('next week')) {
     const d = new Date(now); d.setDate(d.getDate() + 7); d.setHours(10, 0, 0, 0);
     return d;
+  }
+
+  // Absolute dates: "2nd June 2026", "June 2 2026", "2 June", "02/06/2026".
+  // Strip ordinal suffixes (2nd → 2) and optional weekday words first.
+  const cleaned = s.replace(/(\d{1,2})(st|nd|rd|th)/g, '$1').replace(/[,]/g, ' ').trim();
+  const months: Record<string, number> = {
+    january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2, april: 3, apr: 3,
+    may: 4, june: 5, jun: 5, july: 6, jul: 6, august: 7, aug: 7,
+    september: 8, sept: 8, sep: 8, october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11,
+  };
+  const monthAlt = Object.keys(months).join('|');
+  // Optional trailing time like "5 pm" / "17:00" / "10:30 am".
+  const timeMatch = cleaned.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/) || cleaned.match(/\b(\d{1,2}):(\d{2})\b/);
+  let hour = 10, minute = 0;
+  if (timeMatch) {
+    hour = parseInt(timeMatch[1], 10);
+    minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+    const ap = timeMatch[3];
+    if (ap === 'pm' && hour < 12) hour += 12;
+    if (ap === 'am' && hour === 12) hour = 0;
+  }
+  // "<day> <month> [year]" or "<month> <day> [year]".
+  let day: number | null = null, mon: number | null = null, year = now.getFullYear();
+  let m = cleaned.match(new RegExp(`\\b(\\d{1,2})\\s+(${monthAlt})(?:\\s+(\\d{4}))?`, 'i'));
+  if (m) { day = parseInt(m[1], 10); mon = months[m[2].toLowerCase()]; if (m[3]) year = parseInt(m[3], 10); }
+  if (mon === null) {
+    m = cleaned.match(new RegExp(`\\b(${monthAlt})\\s+(\\d{1,2})(?:\\s+(\\d{4}))?`, 'i'));
+    if (m) { mon = months[m[1].toLowerCase()]; day = parseInt(m[2], 10); if (m[3]) year = parseInt(m[3], 10); }
+  }
+  if (mon === null) {
+    // Numeric day-first (Indian): dd/mm/yyyy or dd-mm-yyyy.
+    m = cleaned.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/);
+    if (m) { day = parseInt(m[1], 10); mon = parseInt(m[2], 10) - 1; year = parseInt(m[3].length === 2 ? `20${m[3]}` : m[3], 10); }
+  }
+  if (mon !== null && day !== null && day >= 1 && day <= 31 && mon >= 0 && mon <= 11) {
+    const d = new Date(year, mon, day, hour, minute, 0, 0);
+    if (!isNaN(d.getTime())) return d;
   }
   return null;
 }

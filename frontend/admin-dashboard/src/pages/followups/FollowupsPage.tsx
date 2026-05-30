@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Phone, Calendar, Clock, CheckCircle2, XCircle, Loader2, RefreshCw,
   AlertCircle, MapPin, User, Star, MessageSquare, TrendingUp,
-  PhoneCall, ChevronRight, Plus, Filter, FileText, Mail, Send,
+  PhoneCall, ChevronRight, Plus, Filter, FileText, Mail, Send, Headphones,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api from '@/services/api';
 
 type Tab = 'followups' | 'visits' | 'feedback' | 'report' | 'analytics' | 'brochure';
@@ -193,6 +194,7 @@ function ChipRow({ chips }: { chips: { label: string; value: string }[] }) {
 }
 
 function VisitsTab() {
+  const navigate = useNavigate();
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -248,6 +250,27 @@ function VisitsTab() {
                   </div>
                 )}
               </div>
+              {(v.call_summary || v.recording_url || v.conversation_id) && (
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #f3f4f6' }}>
+                  {v.call_summary && (
+                    <div style={{ fontSize: 12, color: '#4b5563', lineHeight: 1.5, marginBottom: 8 }}>
+                      <span style={{ fontWeight: 600, color: '#374151' }}>Call summary: </span>{v.call_summary}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {v.recording_url && (
+                      <span style={{ fontSize: 10, color: '#0ea5e9', background: '#e0f2fe', borderRadius: 8, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Headphones size={11} />Recording
+                      </span>
+                    )}
+                    {v.conversation_id && (
+                      <button onClick={() => navigate(`/calls/${v.conversation_id}`)} style={{ padding: '4px 10px', border: '1px solid #6366f1', color: '#6366f1', background: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <FileText size={11} />View call &amp; transcript
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}

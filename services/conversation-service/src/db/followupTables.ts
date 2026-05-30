@@ -111,6 +111,10 @@ export async function initFollowupTables(pool: Pool): Promise<void> {
       -- Post-brochure → visit → feedback automation: additive columns.
       ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS visitor_type VARCHAR(20);
       ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS created_from VARCHAR(40) DEFAULT 'MANUAL';
+      -- Visit Card: link the originating call so the visit row carries recording + summary.
+      ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS conversation_id UUID;
+      ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS recording_url TEXT;
+      ALTER TABLE visit_schedules ADD COLUMN IF NOT EXISTS call_summary TEXT;
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS visit_id UUID;
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS interest_after_visit VARCHAR(20);
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS admission_readiness VARCHAR(30);
