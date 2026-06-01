@@ -42,6 +42,10 @@ export interface LeadProfile {
   city: string | null;
   parent_name: string | null;
   parent_mobile: string | null;
+  pipeline_stage: string | null;
+  rejection_reason: string | null;
+  rejection_stage: string | null;
+  rejection_at: string | null;
 }
 
 /** Batch-fetch lead profiles (from crm_db) for a set of lead ids. Returns a
@@ -78,6 +82,10 @@ export async function fetchLeadProfiles(
         city: cf.city || null,
         parent_name: cf.parent_name || null,
         parent_mobile: cf.parent_mobile || null,
+        pipeline_stage: cf.pipeline_stage || null,
+        rejection_reason: cf.rejection_reason || null,
+        rejection_stage: cf.rejection_stage || null,
+        rejection_at: cf.rejection_at || null,
       };
     }
   } catch (e: any) {

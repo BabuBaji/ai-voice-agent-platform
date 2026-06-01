@@ -33,10 +33,12 @@ import { buildVoiceAgentPrompt, buildVoiceAgentPromptSlim } from '../prompts/voi
 import { recordingsDir } from '../routes/recordings';
 import { startAzureStt, synthesizeAzureTtsMulaw, deepgramCanHandle, azureSpeechConfigured, AzureSttHandle } from '../providers/azureSpeech';
 import { startSarvamStt, synthesizeSarvamTtsMulaw, sarvamCanHandle, sarvamConfigured, callSarvamLLM, callSarvamLLMStream, SarvamSttHandle } from '../providers/sarvamSpeech';
+import { SarvamTtsStream, sarvamStreamConfigured } from '../providers/sarvamStreamTts';
 import { startWhisperStt, whisperConfigured, WhisperSttHandle } from '../providers/whisperSpeech';
 import { plivoProvider } from '../providers/plivo.provider';
 import { resolveDeployedAgent } from '../services/deployedAgentResolver';
 import { updateTargetFromCallEnd } from '../routes/campaigns';
+import { normalizePronunciation } from '../utils/pronunciation';
 
 const logger = pino({
   transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
@@ -116,6 +118,9 @@ function bargeInGraceMs(session: { language?: string; agentBargeInGraceMs?: numb
   const isIndic = INDIC_LANG_PREFIXES.some((p) => lang === p || lang.startsWith(p + '-'));
   if (isIndic) {
     const envIndic = Number(process.env.BARGE_IN_GRACE_MS_INDIC);
+    // 3500ms for Indic — long enough that the agent isn't cut off mid-sentence
+    // by carrier echo / the caller's natural pauses. (Reverted from a 2800ms
+    // experiment that contributed to clipped Telugu replies.)
     return Number.isFinite(envIndic) && envIndic > 0 ? envIndic : 3500;
   }
   const envEn = Number(process.env.BARGE_IN_GRACE_MS_EN);
@@ -183,6 +188,16 @@ async function persistLiveState(session: StreamSession, event: LiveEvent, fields
  */
 let geminiCooldownUntilMs = 0;
 const GEMINI_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * Sarvam bulbul:v2 speaker catalog (mirror of SARVAM_SPEAKERS in
+ * sarvamSpeech.ts). Used to validate an agent's configured voice_id before we
+ * pin it as the call's single premium voice — anything outside this set falls
+ * back to PREMIUM_VOICE_ID (default 'abhilash').
+ */
+const SARVAM_PREMIUM_SPEAKERS = new Set([
+  'anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh',
+]);
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -1112,6 +1127,7 @@ async function callLLM(
     campaignInstruction: campaignContext?.instruction || null,
     contactVariables: campaignContext?.variables || null,
     isFollowup: !!(campaignContext as any)?.isFollowup,
+    isFeedback: !!(campaignContext as any)?.isFeedback,
   });
 
   // Latency optimization 2: trim history to the last 14 turns. Sarvam-M is
@@ -1136,6 +1152,7 @@ async function callLLM(
       campaignInstruction: campaignContext?.instruction || null,
       contactVariables: campaignContext?.variables || null,
       isFollowup: !!(campaignContext as any)?.isFollowup,
+    isFeedback: !!(campaignContext as any)?.isFeedback,
     });
     const sarvamHistory = trimmedHistory.length > 10 ? trimmedHistory.slice(-10) : trimmedHistory;
     let sarvamReply = await callSarvamLLM({
@@ -1272,6 +1289,7 @@ async function streamLLMReply(
     campaignInstruction: campaignContext?.instruction || null,
     contactVariables: campaignContext?.variables || null,
     isFollowup: !!(campaignContext as any)?.isFollowup,
+    isFeedback: !!(campaignContext as any)?.isFeedback,
   });
   const trimmedHistory = history.length > 10 ? history.slice(-10) : history;
 
@@ -1296,6 +1314,7 @@ async function streamLLMReply(
       campaignInstruction: campaignContext?.instruction || null,
       contactVariables: campaignContext?.variables || null,
       isFollowup: !!(campaignContext as any)?.isFollowup,
+    isFeedback: !!(campaignContext as any)?.isFeedback,
     });
     const sarvamHistory = trimmedHistory.length > 6 ? trimmedHistory.slice(-6) : trimmedHistory;
 
@@ -1315,17 +1334,43 @@ async function streamLLMReply(
       ? `\n\nCALL SUMMARY SO FAR (DO NOT re-ask these):\n${histSummaryParts.slice(0, -4).map(l => `- ${l}`).join('\n')}`
       : '';
 
-    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply ONLY in ${langName} script. Never reply in English unless the caller explicitly asks. Keep replies to 1-2 SHORT sentences. Complete every sentence fully.\n\nCRITICAL: Read the conversation history AND the CALL SUMMARY below. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer in 2-3 words, then ask the NEXT question. Move FORWARD every turn. If the caller says "already told you", apologize briefly and ask the NEXT new question.${histSummary}`;
+    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply ONLY in ${langName} script. Never reply in English unless the caller explicitly asks.\n\nBREVITY (HARD RULE — this is a phone call, long replies sound robotic and get cut off):\n- Reply in ONE short sentence whenever possible; TWO only if the caller asked a real question. Target under 18 words.\n- Answer the question in a few words, then ask ONE short next question. Do NOT explain, elaborate, or give background.\n- NEVER list more than TWO items. If asked for options/colleges/fees, name at most two, then ask if they want more — do not enumerate everything.\n- Always COMPLETE the sentence fully (proper ending punctuation). Never trail off.\n\nONE QUESTION PER TURN (STRICT):\n- Ask EXACTLY ONE thing per reply. NEVER combine two asks in one sentence. Forbidden: "your group and marks?" — ask group THIS turn, marks the NEXT turn.\n- No "and"/"మరియు"/"&" joining two questions. One '?' per reply, maximum.\n- Phrase questions simply and naturally — ask WHAT, not WHY. Forbidden: "why are you interested in this college / ఎందుకు ఆసక్తి". Correct: "which college are you interested in? / మీరు ఏ కళాశాల ఆసక్తి?".\n- Capture order, one per turn: group → marks → EAMCET rank → college → branch → name → mobile → email. Ask only the NEXT uncaptured field.\n\nCRITICAL: Read the conversation history AND the CALL SUMMARY below. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer in 2-3 words, then ask the NEXT question. Move FORWARD every turn. If the caller says "already told you", apologize briefly and ask the NEXT new question.${histSummary}`;
 
-    // Single-model strategy: Groq llama-3.3-70b is the fastest and most
-    // reliable for Indic voice. Only fall back to Sarvam if Groq is down.
+    // Single-model strategy: Groq llama is the fastest and most reliable for
+    // Indic voice. Only fall back to Sarvam if Groq is down.
     let finalReply: string | null = null;
+    // True once we've emitted sentences to onSentence DURING streaming, so the
+    // tail emit below doesn't double-speak the reply.
+    let streamedSentences = false;
     const t0 = Date.now();
+
+    // Incremental sentence emitter: as Groq streams tokens we flush each
+    // COMPLETE sentence to onSentence the instant its terminator arrives, so
+    // the first sentence's TTS starts ~300ms in instead of after the whole
+    // reply finishes generating. This is the main latency win for Telugu/Hindi.
+    let emitBuf = '';
+    const SENT_BOUNDARY_INDIC = /^[\s\S]*?[.!?।॥](?=\s|$|["')\]])/u;
+    const flushIndicSentences = (force: boolean) => {
+      while (true) {
+        const m = emitBuf.match(SENT_BOUNDARY_INDIC);
+        if (!m) break;
+        const s = m[0].trim();
+        emitBuf = emitBuf.slice(m[0].length).replace(/^\s+/, '');
+        if (s) { onSentence(s); streamedSentences = true; }
+      }
+      if (force && emitBuf.trim()) { onSentence(emitBuf.trim()); emitBuf = ''; streamedSentences = true; }
+    };
 
     // PRIMARY: Groq — try multiple models with separate rate-limit pools.
     // llama-3.1-8b-instant (fastest, 500K TPD) → llama-3.3-70b-versatile (best, 100K TPD).
     const groqKey = config.groq?.apiKey || process.env.GROQ_API_KEY || '';
     const groqModels = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'];
+    // Telugu/Indic is token-heavy in the llama tokenizer — 120 tokens cut
+    // replies mid-word ("…ఈశ్వరుని ఆ."). 300 gives a 1-2 sentence Telugu reply
+    // room to FINISH; brevity is enforced by the prompt (model stops naturally
+    // at end-of-reply, finish_reason=stop, well before this cap), so this only
+    // prevents mid-sentence truncation, it does NOT make replies longer.
+    const groqMaxTokens = Number(process.env.GROQ_MAX_TOKENS) || 300;
     if (groqKey) {
       for (const groqModel of groqModels) {
         if (finalReply) break;
@@ -1343,16 +1388,47 @@ async function streamLLMReply(
                 ...sarvamHistory,
               ],
               temperature: 0.4,
-              max_tokens: 200,
+              max_tokens: groqMaxTokens,
+              stream: true,
             }),
-            signal: AbortSignal.timeout(4000),
+            signal: AbortSignal.timeout(8000),
           });
-          if (groqResp.ok) {
-            const groqData = await groqResp.json() as any;
-            const groqText = groqData?.choices?.[0]?.message?.content?.trim();
-            if (groqText && groqText.length > 2) {
-              finalReply = groqText;
-              logger.info({ language, model: groqModel, replyLen: groqText.length, latencyMs: Date.now() - t0, preview: groqText.slice(0, 80) }, 'streamLLMReply (Indic): Groq hit');
+          if (groqResp.ok && (groqResp as any).body) {
+            const reader = (groqResp.body as any).getReader();
+            const decoder = new TextDecoder();
+            let acc = '';
+            let sseAccum = '';
+            let firstTokenAt = 0;
+            while (true) {
+              // NOTE: no session handle in this function — barge-in is handled
+              // downstream (onSentence no-ops + playback aborts on barge-in), so
+              // we just let the cheap token stream finish.
+              const { done, value } = await reader.read();
+              if (done) break;
+              sseAccum += decoder.decode(value, { stream: true });
+              let nl;
+              while ((nl = sseAccum.indexOf('\n')) >= 0) {
+                const line = sseAccum.slice(0, nl).trim();
+                sseAccum = sseAccum.slice(nl + 1);
+                if (!line.startsWith('data:')) continue;
+                const payload = line.slice(5).trim();
+                if (!payload || payload === '[DONE]') continue;
+                try {
+                  const obj = JSON.parse(payload) as any;
+                  const delta = obj?.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    if (!firstTokenAt) { firstTokenAt = Date.now(); logger.info({ model: groqModel, ms: firstTokenAt - t0 }, '[LLM_FIRST_TOKEN_RECEIVED]'); }
+                    acc += delta;
+                    emitBuf += delta;
+                    flushIndicSentences(false);
+                  }
+                } catch { /* skip malformed SSE chunk */ }
+              }
+            }
+            flushIndicSentences(true); // emit any trailing partial sentence
+            if (acc.trim().length > 2) {
+              finalReply = acc.trim();
+              logger.info({ language, model: groqModel, replyLen: finalReply.length, ttftMs: firstTokenAt ? firstTokenAt - t0 : null, latencyMs: Date.now() - t0, preview: finalReply.slice(0, 80) }, 'streamLLMReply (Indic): Groq stream hit');
             }
           } else {
             const errBody = await groqResp.text().catch(() => '');
@@ -1396,12 +1472,16 @@ async function streamLLMReply(
       onSentence(sayAgain);
       return sayAgain;
     }
-    // Sentence-split and emit so TTS synthesizes each part in parallel.
-    const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
-    if (sents.length === 0) {
-      onSentence(finalReply);
-    } else {
-      for (const s of sents) onSentence(s);
+    // If Groq streamed, sentences were already emitted incrementally above —
+    // don't re-emit (that would double-speak). Only the buffered Sarvam
+    // fallback path needs to sentence-split and emit here.
+    if (!streamedSentences) {
+      const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
+      if (sents.length === 0) {
+        onSentence(finalReply);
+      } else {
+        for (const s of sents) onSentence(s);
+      }
     }
     return finalReply;
   }
@@ -1546,7 +1626,13 @@ async function ttsDeepgramMulaw(text: string, voiceIdRaw?: string): Promise<stri
     }
     const buf = Buffer.from(await resp.arrayBuffer());
     if (buf.length < 200) return null;
-    return buf.toString('base64');
+    // Append a short mulaw-silence tail (parity with Sarvam) so the final word
+    // isn't clipped at the audio boundary on jittery PSTN paths. Deepgram is
+    // only a last-resort fallback now (Sarvam is the pinned premium voice), but
+    // keep the guard so a fallback turn doesn't sound truncated.
+    const tailMs = Number(process.env.TTS_TRAILING_SILENCE_MS) || 60;
+    const tail = Buffer.alloc(Math.round(8000 * tailMs / 1000), 0xff);
+    return Buffer.concat([buf, tail]).toString('base64');
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Deepgram TTS (mulaw) error');
     return null;
@@ -1580,6 +1666,10 @@ type CampaignContext = {
   targetName: string | null;
   campaignId: string | null;
   isFollowup?: boolean;
+  /** True when this follow-up is a POST-VISIT FEEDBACK call (task type
+   *  post_visit_feedback_call) — selects the feedback FLOW vs the
+   *  visit-planning FLOW in the prompt builders. */
+  isFeedback?: boolean;
 };
 
 interface StreamSession {
@@ -1600,6 +1690,21 @@ interface StreamSession {
   language: string;          // agent voice_config.language, normalized
   sttBackend: 'deepgram' | 'azure' | 'sarvam' | 'whisper' | null;
   ttsBackend: 'deepgram' | 'azure' | 'sarvam';
+  /** Pinned Sarvam speaker id for the single-premium-voice path. Locked once
+   *  in onStart and reused for every turn / language switch / STT fallback so
+   *  the caller hears ONE consistent voice for the whole call. */
+  ttsVoiceId?: string | null;
+  /** Persistent Sarvam streaming-TTS WebSocket (opened lazily, reused across
+   *  turns). Null until first use; ttsStreamFailed latches HTTP fallback. */
+  ttsStream?: any | null;
+  ttsStreamFailed?: boolean;
+  /** Per-turn streaming-TTS scratch state (reset each turn). */
+  ttsChunkQueue?: Buffer[];
+  ttsTurnDone?: boolean;
+  ttsStreamError?: string | null;
+  /** Consecutive Sarvam STT 429s (reset on any successful transcript). Used to
+   *  retry Sarvam on transient rate-limits before downshifting to Deepgram. */
+  sarvamStt429Count?: number;
   dgWs: WebSocket | null;
   /** Mulaw frame batcher — accumulates incoming 20ms frames and flushes
    *  every ~60ms (3 frames). Cuts WebSocket overhead ~3x under high
@@ -1771,6 +1876,7 @@ export function setupPlivoAudioStream(server: http.Server): WebSocketServer {
       language: 'en-IN',
       sttBackend: null,
       ttsBackend: 'deepgram',
+      ttsVoiceId: null,
       dgWs: null,
       dgFrameBatch: [],
       dgBatchFlushTimer: null,
@@ -1931,6 +2037,7 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
           variables: (md.vars && typeof md.vars === 'object') ? md.vars : {},
           targetName: md.target_name || null,
           isFollowup: !!md.is_followup,
+          isFeedback: md.followup_type === 'post_visit_feedback_call',
         };
         logger.info(
           { callSid: session.callSid, campaignId: session.campaignContext.campaignId, hasInstruction: !!session.campaignContext.instruction, varKeys: Object.keys(session.campaignContext.variables) },
@@ -2036,11 +2143,51 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     );
   }
 
-  // NOTE: STT stays on Deepgram for Indic (do NOT force Sarvam STT here).
-  // Sarvam-primary STT was tried and reverted twice — it hits HTTP 429 under
-  // real call load (STT+LLM+TTS on one Sarvam account) causing 11-13s stalls.
-  // Deepgram handles conversational Telugu fine; spelled digits/email are
-  // recovered by decodeIndicSpelling. See [[sarvam-voice-config]] memory.
+  // ── Single premium voice (one voice for the WHOLE call) ─────────────────
+  // Premium-voice requirement: the caller must hear ONE consistent voice
+  // across Telugu / Hindi / English / mixed — never a mid-call voice switch.
+  // Only Sarvam bulbul:v2 covers all of these in a single speaker, so when
+  // Sarvam is configured we pin TTS to Sarvam for EVERY language (English
+  // included) and lock the speaker for the rest of the call. STT routing is
+  // left untouched (Deepgram stays primary for English etc.) — STT never
+  // affects the heard voice. Set PREMIUM_VOICE_ENABLED=0 to opt out and keep
+  // the legacy per-language TTS routing above.
+  const premiumVoiceEnabled = process.env.PREMIUM_VOICE_ENABLED !== '0';
+  if (premiumVoiceEnabled && sarvamConfigured()) {
+    tts = 'sarvam';
+    // Resolve the pinned speaker once: a valid Sarvam speaker from the agent's
+    // voice_config wins; otherwise the platform premium default (abhilash —
+    // a mature, warm male counsellor voice). Locked onto the session so every
+    // turn, language switch, and STT fallback reuses the exact same voice.
+    const cfgVoice = String(voiceCfg.voice_id || '').toLowerCase();
+    session.ttsVoiceId = SARVAM_PREMIUM_SPEAKERS.has(cfgVoice)
+      ? cfgVoice
+      : (process.env.PREMIUM_VOICE_ID || 'abhilash');
+    logger.info(
+      { callSid: session.callSid, lang, stt, tts, voice: session.ttsVoiceId },
+      'Stream: premium single-voice pinned (Sarvam) for whole call',
+    );
+  }
+
+  // ── Indic STT → Sarvam ───────────────────────────────────────────────────
+  // Deepgram's en-IN model CANNOT transcribe Telugu/Indic speech — on live
+  // calls it returns garbage ("When", Japanese) or no final at all, so the
+  // conversation never advances past the greeting. Sarvam saarika:v2.5 DOES
+  // transcribe Telugu natively. So for Indic-language calls we route STT to
+  // Sarvam (English stays on Deepgram — faster + accurate there). The Sarvam
+  // 429-under-load risk is handled by retrying Sarvam on transient rate-limits
+  // (see startSarvamStt onError below) — we only downshift to Deepgram as a
+  // last resort after MAX consecutive 429s, since Deepgram can't do Telugu.
+  // Set INDIC_STT_SARVAM=0 to fall back to the old Deepgram-for-everything.
+  const indicSttSarvam = process.env.INDIC_STT_SARVAM !== '0';
+  const isIndicForStt = /^(hi|te|ta|kn|ml|mr|bn|gu|pa|or|as)/i.test(lang);
+  if (indicSttSarvam && isIndicForStt && sarvamConfigured() && stt === 'deepgram') {
+    stt = 'sarvam';
+    logger.info(
+      { callSid: session.callSid, lang },
+      'STT routed to Sarvam for Indic language (Deepgram en-IN cannot transcribe Telugu/Indic)',
+    );
+  }
 
   session.sttBackend = stt;
   session.ttsBackend = tts;
@@ -2097,29 +2244,43 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
   if (session.sttBackend === 'sarvam') {
     session.sarvamStt = startSarvamStt({
       language: lang,
-      onFinal: (text) => dispatchUserUtterance(session, text),
+      // Reset the 429 streak on every successful transcript — a 429 is only
+      // "persistent" if SEVERAL land back-to-back with no success between.
+      onFinal: (text) => { session.sarvamStt429Count = 0; dispatchUserUtterance(session, text); },
       onError: (msg) => {
-        logger.warn({ callSid: session.callSid, err: msg }, 'Sarvam STT error');
-        // Quota / 429 fallback: when Sarvam credits are exhausted the call
-        // goes dead because no user utterance ever transcribes. Detect that
-        // specific failure mode and dynamically switch the session over to
-        // Deepgram STT so the conversation continues. Deepgram's Telugu/
-        // Hindi accuracy is approximate but vastly better than silence.
-        // Only fires ONCE per session — subsequent Sarvam errors are
-        // ignored after the switch.
-        const isQuota = /429|No credits|insufficient_quota|quota/i.test(String(msg || ''));
-        if (isQuota && !session.sarvamSttDownshifted) {
+        const isQuota = /429|No credits|insufficient_quota|quota|rate.?limit/i.test(String(msg || ''));
+        if (!isQuota) {
+          logger.warn({ callSid: session.callSid, err: msg }, 'Sarvam STT error (non-quota)');
+          return;
+        }
+        // 429 / rate-limit. The Sarvam STT handler STAYS ALIVE and re-POSTs on
+        // the next utterance automatically (natural backoff between turns, since
+        // the caller pauses while the agent speaks). For Indic we keep RETRYING
+        // Sarvam rather than downshifting to Deepgram — Deepgram's en-IN cannot
+        // transcribe Telugu, so downshifting on a transient blip is what broke
+        // the back half of calls. Only after MAX consecutive 429s (with zero
+        // success between) do we downshift as a last resort to avoid silence.
+        session.sarvamStt429Count = (session.sarvamStt429Count || 0) + 1;
+        const MAX_429 = Number(process.env.SARVAM_STT_MAX_429) || 5;
+        if (isIndicForStt && session.sarvamStt429Count < MAX_429) {
+          emit(session, 'SARVAM_FALLBACK_TRIGGERED', { stage: 'stt_429_retry', count: session.sarvamStt429Count, max: MAX_429 });
+          logger.warn(
+            { callSid: session.callSid, count: session.sarvamStt429Count, max: MAX_429 },
+            'Sarvam STT 429 — transient rate-limit; retrying Sarvam on next utterance (NOT downshifting)',
+          );
+          return; // keep sarvamStt; it retries the next utterance
+        }
+        if (!session.sarvamSttDownshifted) {
           session.sarvamSttDownshifted = true;
           logger.warn(
-            { callSid: session.callSid },
-            'Sarvam STT quota exhausted — downshifting to Deepgram for the rest of this call',
+            { callSid: session.callSid, count: session.sarvamStt429Count, indic: isIndicForStt },
+            isIndicForStt
+              ? 'Sarvam STT 429 persisted past retries — last-resort downshift to Deepgram (Telugu accuracy will degrade)'
+              : 'Sarvam STT quota exhausted — downshifting to Deepgram for the rest of this call',
           );
           try { session.sarvamStt?.close(); } catch { /* ignore */ }
           session.sarvamStt = null;
           session.sttBackend = 'deepgram';
-          // Re-open Deepgram with the same language. Best-effort; if
-          // Deepgram doesn't support this language code it falls back to
-          // en-US which is still better than zero transcription.
           connectDeepgram(session, lang).catch((err: any) => {
             logger.error({ callSid: session.callSid, err: err?.message }, 'Deepgram fallback open failed');
           });
@@ -2287,6 +2448,11 @@ async function onStop(session: StreamSession): Promise<void> {
   if (session.dgKeepaliveTimer) { clearInterval(session.dgKeepaliveTimer); session.dgKeepaliveTimer = null; }
   // Clear any pending LLM watchdog so it doesn't fire after teardown.
   if (session.inFlightWatchdog) { clearTimeout(session.inFlightWatchdog); session.inFlightWatchdog = null; }
+  // Close the persistent streaming-TTS WebSocket (if opened) on call end.
+  if (session.ttsStream) {
+    try { (session.ttsStream as SarvamTtsStream).close(); } catch { /* ignore */ }
+    session.ttsStream = null;
+  }
   if (session.dgWs && session.dgWs.readyState === WebSocket.OPEN) {
     try { session.dgWs.send(JSON.stringify({ type: 'CloseStream' })); } catch { /* ignore */ }
     try { session.dgWs.close(1000, 'session-end'); } catch { /* ignore */ }
@@ -2410,8 +2576,16 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
     // `is_final:true` so we never trigger duplicate LLM turns from partials.
     interim_results: 'true',
     smart_format: 'true',
-    endpointing: '600',         // ms of silence before finalising an utterance
-    utterance_end_ms: '1000',   // emit UtteranceEnd 1s after speech stops (extra signal)
+    // Balanced latency tuning: 400ms endpointing finalises a turn faster than
+    // the old 600ms (snappier replies) while still tolerating natural pauses.
+    // Indic callers' longer pauses are protected separately by the barge-in
+    // grace window, not by endpointing. Override via DEEPGRAM_ENDPOINTING_MS.
+    endpointing: String(Number(process.env.DEEPGRAM_ENDPOINTING_MS) || 400),
+    // NOTE: Deepgram REQUIRES utterance_end_ms >= 1000 — values below 1000
+    // (e.g. the spec's 800) make the WS handshake fail with HTTP 400 and STT
+    // goes dead. 1000 is the floor; endpointing (400ms above) is what actually
+    // controls turn-finalisation latency, so this doesn't slow responses.
+    utterance_end_ms: String(Math.max(1000, Number(process.env.DEEPGRAM_UTTERANCE_END_MS) || 1000)),
     vad_events: 'true',         // emit SpeechStarted — used for early barge-in detection
     language: lang,
     punctuate: 'true',
@@ -2442,7 +2616,7 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
   };
 
   dg.on('open', () => {
-    logger.info({ callSid: session.callSid, lang, attempt: session.dgReconnectAttempts }, 'Deepgram STT WS opened');
+    logger.info({ callSid: session.callSid, lang, attempt: session.dgReconnectAttempts }, '[STT_STREAM_CONNECTED] Deepgram STT WS opened');
     if (session.dgReconnectAttempts > 0) {
       emit(session, 'WEBSOCKET_RECONNECTED', { provider: 'deepgram', attempts: session.dgReconnectAttempts });
     } else {
@@ -2483,10 +2657,17 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
         // prove the transcription pipeline is healthy.
         emit(session, 'SPEECH_STARTED', {});
         if (!session.isAgentSpeaking) setCallState(session, 'USER_SPEAKING', 'vad_speech_started');
-        // Early barge-in: caller started talking while agent mid-TTS, past
-        // the grace window. Set the flag immediately; the chunk loop will
-        // abort on next tick and flush Plivo's queued audio.
+        // Early barge-in on RAW VAD is DISABLED by default. On a PSTN line the
+        // agent's own TTS echoes back through the carrier and Deepgram emits a
+        // SpeechStarted for it — with no transcript to echo-reject against, a
+        // raw-VAD barge-in cuts the agent off mid-sentence (incomplete +
+        // choppy/"breaking" audio from the repeated clearAudio flush). So we do
+        // NOT barge in here; genuine interrupts are handled by the
+        // transcript-based path in dispatchUserUtterance, which DOES echo-reject
+        // (tokenOverlapRatio) and requires real words / a question. Opt back in
+        // with VAD_BARGE_IN=1 on a clean (echo-cancelled) line if ever desired.
         if (
+          process.env.VAD_BARGE_IN === '1' &&
           session.isAgentSpeaking &&
           !session.bargeInRequested &&
           Date.now() >= session.bargeInAllowedAt
@@ -2548,6 +2729,7 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
         session.dgEmptyPartials = [];
         session.lastSttEventAt = Date.now();
         emit(session, 'STT_PARTIAL', { len: text.length, preview: text.slice(0, 60) });
+        logger.debug({ callSid: session.callSid, preview: text.slice(0, 40) }, '[STT_PARTIAL_RECEIVED]');
 
         // Mid-TTS escalation: a long substantive partial (≥4 words OR a
         // question-mark) means the caller is clearly speaking over the
@@ -2560,9 +2742,16 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
           !session.bargeInRequested &&
           Date.now() >= session.bargeInAllowedAt
         ) {
+          // Echo guard: on PSTN the agent's own reply leaks back and Deepgram
+          // transcribes it as a multi-word partial. If this partial overlaps
+          // heavily with what the agent is currently saying, it's echo — do NOT
+          // barge in (that's what was clipping replies + breaking up the audio).
+          const echoOverlap = session.currentAgentText
+            ? tokenOverlapRatio(text, session.currentAgentText)
+            : 0;
           const wordCount = text.split(/\s+/).filter(Boolean).length;
           const isQuestion = /[?]\s*$/.test(text);
-          if (wordCount >= 4 || isQuestion) {
+          if (echoOverlap < 0.5 && (wordCount >= 4 || isQuestion)) {
             session.bargeInRequested = true;
             emit(session, 'INTERRUPT_DETECTED', { trigger: 'partial_substantive', word_count: wordCount });
           }
@@ -2576,6 +2765,7 @@ async function openDeepgramSocket(session: StreamSession, apiKey: string): Promi
       session.turn.sttFinalAt = Date.now();
       session.lastSttEventAt = Date.now();
       emit(session, 'STT_FINAL', { len: text.length, preview: text.slice(0, 60) });
+      logger.info({ callSid: session.callSid, preview: text.slice(0, 40) }, '[STT_FINAL_RECEIVED]');
       await dispatchUserUtterance(session, text);
     } catch {
       /* ignore malformed frames */
@@ -3313,15 +3503,16 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   }
 
   // ACK-DEBOUNCE: when the customer says a SINGLE short ack word like
-  // "ఓకే", "OK", "సరే", "yes" in response to a question, wait 1.5s to see
+  // "ఓకే", "OK", "సరే", "yes" in response to a question, wait briefly to see
   // if they continue speaking. Multi-word sentences are NEVER debounced.
-  // The _ackBypass flag prevents infinite re-entry when the timer fires.
+  // Tuned 1500→900ms for snappier turns (balanced latency); still long enough
+  // to catch a continuation. The _ackBypass flag prevents infinite re-entry.
   const ackBypass = (session as any)._ackBypass === true;
   if (!ackBypass) {
     const ackWordCount = text.split(/\s+/).filter(Boolean).length;
     const isShortAck = ackWordCount === 1 && /^(ok(ay)?|yes|yeah|yep|haa|ha|hmm|hm|ఓకే|సరే|అవును|ఊ|ఆ|हाँ|हां|ठीक|अच्छा|हा|ஓகே|சரி|ಸರಿ|ശരി)[\s.!]*$/i.test(text.trim());
     if (isShortAck && lastAssistantAskedQuestion && !session.isAgentSpeaking) {
-      const debounceMs = 1500;
+      const debounceMs = Number(process.env.ACK_DEBOUNCE_MS) || 900;
       const pending = (session as any)._ackDebounce as { text: string; timer: any } | undefined;
       if (pending?.timer) clearTimeout(pending.timer);
       (session as any)._ackDebounce = {
@@ -3548,6 +3739,7 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   // Compute ttft (time-to-first-token) once the LLM kicks off — measures
   // how long Deepgram→dispatch took to hand off.
   const ttftFromStt = session.turn.sttFinalAt ? Date.now() - session.turn.sttFinalAt : null;
+  logger.info({ callSid: session.callSid }, '[LLM_STREAM_STARTED]');
   emit(session, 'LLM_RESPONSE_STARTED', {
     history_len: session.history.length,
     ttft_from_stt_ms: ttftFromStt,
@@ -3690,12 +3882,238 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
  * the transcript / apply dedupeReply / etc. Returns '' if the LLM produced no
  * usable content — caller should fall back to a "could you repeat" line.
  */
+/** True when this call should use the Sarvam streaming-TTS WebSocket transport
+ *  (provider-locked: only when the pinned TTS backend is Sarvam). Set
+ *  SARVAM_TTS_STREAM=0 to force the legacy HTTP path. */
+function shouldStreamTts(session: StreamSession): boolean {
+  return (
+    process.env.SARVAM_TTS_STREAM !== '0' &&
+    session.ttsBackend === 'sarvam' &&
+    sarvamStreamConfigured() &&
+    !session.ttsStreamFailed
+  );
+}
+
+/** Get-or-open the persistent per-call Sarvam TTS stream. Returns null (and
+ *  latches HTTP fallback) on failure. Callbacks push into per-turn scratch
+ *  state on the session so one socket serves every turn. */
+async function getTtsStream(session: StreamSession): Promise<any | null> {
+  if (session.ttsStreamFailed) return null;
+  if (session.ttsStream && (session.ttsStream as SarvamTtsStream).connected) return session.ttsStream;
+  if (session.ttsStream) return session.ttsStream; // connecting/known-open instance
+  const stream = new SarvamTtsStream({
+    language: session.language,
+    voiceId: session.ttsVoiceId,
+    onChunk: (buf: Buffer) => { (session.ttsChunkQueue ||= []).push(buf); },
+    onTurnEnd: () => { session.ttsTurnDone = true; },
+    onError: (m: string) => { session.ttsStreamError = m; },
+  });
+  try {
+    await stream.connect();
+    session.ttsStream = stream;
+    logger.info({ callSid: session.callSid, voice: session.ttsVoiceId }, '[STT/TTS] Sarvam TTS stream connected');
+    return stream;
+  } catch (err: any) {
+    session.ttsStreamFailed = true;
+    emit(session, 'SARVAM_FALLBACK_TRIGGERED', { stage: 'tts_stream_connect', reason: err?.message || 'connect failed' });
+    logger.warn({ callSid: session.callSid, err: err?.message }, '[STREAM_FALLBACK_TRIGGERED] TTS stream connect failed — using HTTP TTS');
+    return null;
+  }
+}
+
+/**
+ * Streaming-TTS turn handler. Mirrors streamAndPlayReply's state/barge-in/
+ * playout semantics but pipes the LLM's sentences into the persistent Sarvam
+ * TTS WebSocket and forwards the returned mulaw chunks to Plivo paced at
+ * ~real-time (no 5x blast). Returns the full reply text. On any streaming
+ * failure it returns the sentinel null so the caller falls back to the HTTP
+ * path for this turn.
+ */
+async function streamReplyViaSarvamStream(
+  plivoWs: WebSocket,
+  session: StreamSession,
+  stream: SarvamTtsStream,
+): Promise<string | null> {
+  // ~real-time pacing: mulaw 8k = 8 bytes/ms. Send 800-byte (100ms) frames and
+  // sleep slightly LESS than 100ms so Plivo keeps a small jitter buffer without
+  // being flooded — the fix for tunnel-induced "breaking".
+  const FRAME_BYTES = 800;
+  const FRAME_SLEEP_MS = Number(process.env.TTS_FRAME_SLEEP_MS) || 85;
+  const BACKPRESSURE_BYTES = 256 * 1024;
+
+  // Reset per-turn scratch state (the stream is persistent across turns).
+  session.ttsChunkQueue = [];
+  session.ttsTurnDone = false;
+  session.ttsStreamError = null;
+  (stream as any)._flushed = false;
+  stream.cancelTurn();
+
+  const BARGE_IN_GRACE_MS = bargeInGraceMs(session);
+  session.isAgentSpeaking = true;
+  session.bargeInRequested = false;
+  session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
+  session.currentAgentText = '';
+  session.turn.ttsStartAt = Date.now();
+  setCallState(session, 'AGENT_SPEAKING', 'tts_start');
+  const ttsFromLlm = session.turn.llmStartAt ? Date.now() - session.turn.llmStartAt : null;
+  emit(session, 'TTS_STARTED', { mode: 'stream_ws', ttsFromLlm_ms: ttsFromLlm });
+  logger.info({ callSid: session.callSid }, '[TTS_STREAM_STARTED]');
+
+  const agentSpeakingWatchdog = setTimeout(() => {
+    if (!session.isAgentSpeaking) return;
+    logger.warn({ callSid: session.callSid }, 'AGENT_SPEAKING stuck >15s — forcing recovery');
+    emit(session, 'STATE_FORCED_RECOVERY', { from: 'AGENT_SPEAKING', reason: 'tts_stuck' });
+    session.isAgentSpeaking = false;
+    session.bargeInRequested = false;
+    setCallState(session, 'LISTENING', 'stuck_state_recovery');
+  }, 15000);
+
+  const sentencesEmitted: string[] = [];
+  let llmDone = false;
+  let spokeAny = false;
+
+  // Producer: stream the LLM; push each completed sentence into the TTS stream.
+  const llmPromise = streamLLMReply(
+    session.agent,
+    session.history,
+    session.campaignContext.targetName,
+    session.isInbound ? 'inbound' : 'outbound',
+    session.language,
+    session.campaignContext,
+    (sentence: string) => {
+      if (session.bargeInRequested) return;
+      const clean = normalizePronunciation(sanitizeForTts(sentence), session.language);
+      if (!clean) return;
+      sentencesEmitted.push(clean);
+      session.currentAgentText = sentencesEmitted.join(' ');
+      spokeAny = true;
+      stream.speak(clean);
+    },
+  ).then((full) => { llmDone = true; return full; }).catch(() => { llmDone = true; return ''; });
+
+  let totalAudioBytes = 0;
+  let firstChunkLogged = false;
+  let leftover: Buffer | null = null;
+  try {
+    // Drain loop: forward queued mulaw chunks to Plivo, paced ~real-time, until
+    // the LLM is done AND the stream signalled turn-end AND the queue is empty.
+    while (true) {
+      if (session.bargeInRequested) break;
+      if (session.ttsStreamError) break; // stream errored mid-turn → fall back
+
+      // Once the LLM has produced all sentences, flush the TTS stream so it
+      // renders the tail and emits turn-end.
+      if (llmDone && !(stream as any)._flushed) {
+        (stream as any)._flushed = true;
+        if (spokeAny) stream.flush(); else session.ttsTurnDone = true;
+      }
+
+      const q = session.ttsChunkQueue || [];
+      let buf: Buffer | null = leftover;
+      leftover = null;
+      if (!buf && q.length > 0) buf = q.shift() as Buffer;
+
+      if (!buf) {
+        // Nothing to send yet. Done if LLM finished, stream said done, queue empty.
+        if (llmDone && session.ttsTurnDone && q.length === 0) break;
+        await new Promise((r) => setTimeout(r, 10));
+        continue;
+      }
+
+      if (!firstChunkLogged) {
+        firstChunkLogged = true;
+        session.turn.audioFirstByteAt = Date.now();
+        emit(session, 'TTS_FIRST_AUDIO', { ms_from_tts_start: Date.now() - (session.turn.ttsStartAt || Date.now()) });
+        logger.info({ callSid: session.callSid }, '[TTS_FIRST_AUDIO_CHUNK]');
+      }
+      // Capture for the stereo recording at the current caller-timeline offset.
+      session.agentMulawEvents.push({ offsetBytes: session.callerBytes, mulaw: buf });
+
+      // Forward this buffer to Plivo in real-time-paced FRAME_BYTES slices.
+      let off = 0;
+      let aborted = false;
+      for (; off < buf.length; off += FRAME_BYTES) {
+        if (session.bargeInRequested) { aborted = true; break; }
+        const slice = buf.subarray(off, Math.min(off + FRAME_BYTES, buf.length));
+        while ((plivoWs as any).bufferedAmount > BACKPRESSURE_BYTES) {
+          await new Promise((r) => setTimeout(r, 20));
+          if (session.bargeInRequested || plivoWs.readyState !== WebSocket.OPEN) break;
+        }
+        try {
+          plivoWs.send(JSON.stringify({ event: 'playAudio', media: { contentType: 'audio/x-mulaw', sampleRate: '8000', payload: slice.toString('base64') } }));
+          totalAudioBytes += slice.length;
+        } catch (err: any) {
+          logger.warn({ callSid: session.callSid, err: err.message }, 'streamReplyViaSarvamStream: send failed');
+          aborted = true; break;
+        }
+        // Pace ~real-time (slightly ahead) so Plivo's buffer stays healthy
+        // without flooding the tunnel.
+        await new Promise((r) => setTimeout(r, FRAME_SLEEP_MS));
+      }
+      if (aborted) {
+        if (session.bargeInRequested) {
+          try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch { /* socket gone */ }
+          emit(session, 'INTERRUPT_DETECTED', { trigger: 'barge_in_during_stream' });
+          logger.info({ callSid: session.callSid }, '[INTERRUPTION_DETECTED] [TTS_STREAM_CANCELLED]');
+        }
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(agentSpeakingWatchdog);
+    stream.cancelTurn();
+    // Real-time pacing means Plivo has played most audio already; a short
+    // residual wait covers the last in-flight frame, with barge-in still cutting.
+    if (!session.bargeInRequested && !session.callEnded && totalAudioBytes > 0) {
+      const playoutDeadline = Date.now() + 250;
+      while (Date.now() < playoutDeadline && !session.bargeInRequested && !session.callEnded && plivoWs.readyState === WebSocket.OPEN) {
+        await new Promise((r) => setTimeout(r, 60));
+      }
+      if (session.bargeInRequested) { try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch {} }
+    }
+    const wasInterrupted = session.bargeInRequested;
+    session.isAgentSpeaking = false;
+    session.currentAgentText = '';
+    if (wasInterrupted) emit(session, 'TTS_CANCELLED', { duration_ms: Date.now() - session.turn.ttsStartAt });
+    emit(session, 'TTS_STOPPED', { reason: wasInterrupted ? 'interrupted' : 'completed', duration_ms: session.turn.ttsStartAt ? Date.now() - session.turn.ttsStartAt : null });
+    if (!wasInterrupted) logger.info({ callSid: session.callSid }, '[TTS_STREAM_COMPLETED] [AUDIO_PLAYBACK_COMPLETED]');
+    if (!session.callEnded) {
+      setCallState(session, 'LISTENING', wasInterrupted ? 'tts_interrupted' : 'tts_completed');
+      emit(session, 'LISTENING_RESUMED', { after: wasInterrupted ? 'interrupt' : 'reply' });
+    }
+  }
+
+  const full = await llmPromise.catch(() => '');
+  // If the stream errored before producing any audio, signal fallback to caller.
+  if (session.ttsStreamError && totalAudioBytes === 0) {
+    emit(session, 'SARVAM_FALLBACK_TRIGGERED', { stage: 'tts_stream_turn', reason: session.ttsStreamError });
+    logger.warn({ callSid: session.callSid, reason: session.ttsStreamError }, '[STREAM_FALLBACK_TRIGGERED] TTS stream produced no audio — HTTP fallback');
+    return null;
+  }
+  return (full || sentencesEmitted.join(' ')).trim();
+}
+
 async function streamAndPlayReply(
   plivoWs: WebSocket,
   session: StreamSession,
 ): Promise<string> {
   session.plivoWs = plivoWs;
   if (plivoWs.readyState !== WebSocket.OPEN) return '';
+
+  // Streaming-TTS transport (Sarvam WebSocket). When active, pipe LLM sentences
+  // straight into the stream and forward mulaw chunks to Plivo paced real-time.
+  // On any streaming failure we fall through to the legacy HTTP path below so
+  // the call never goes silent. Provider is locked per shouldStreamTts().
+  if (shouldStreamTts(session)) {
+    const stream = await getTtsStream(session);
+    if (stream) {
+      const streamed = await streamReplyViaSarvamStream(plivoWs, session, stream);
+      if (streamed !== null) return streamed;
+      // null → stream failed mid-turn; latch HTTP fallback for the rest of call.
+      session.ttsStreamFailed = true;
+    }
+    // else: connect failed → ttsStreamFailed latched in getTtsStream; fall through.
+  }
 
   // 800 bytes = 100ms of mulaw 8kHz. Doubled from 400 (50ms) after callers
   // reported voice "breaking" mid-sentence — smaller chunks paid too much
@@ -3740,9 +4158,12 @@ async function streamAndPlayReply(
   const sentencesEmitted: string[] = [];
   let llmDone = false;
 
+  // Pinned single voice (set in onStart) wins for Sarvam; agent voice_config
+  // is the legacy fallback. Deepgram/Azure are last-resort only (Sarvam down).
+  const sarvamVoice = session.ttsVoiceId || session.agent?.voice_config?.voice_id;
   const synthOne = async (s: string): Promise<string | null> => {
     if (session.ttsBackend === 'sarvam') {
-      const b = await synthesizeSarvamTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      const b = await synthesizeSarvamTtsMulaw(s, session.language, sarvamVoice);
       if (b) return b;
       return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
     }
@@ -3765,7 +4186,10 @@ async function streamAndPlayReply(
     session.campaignContext,
     (sentence: string) => {
       if (session.bargeInRequested) return;
-      const clean = sanitizeForTts(sentence);
+      // Sanitize markdown/emoji, then deterministically spell college acronyms
+      // (SRM → "S R M") + apply name pronunciation overrides so the voice never
+      // garbles them regardless of how the LLM wrote them.
+      const clean = normalizePronunciation(sanitizeForTts(sentence), session.language);
       if (!clean) return;
       sentencesEmitted.push(clean);
       session.currentAgentText = sentencesEmitted.join(' ');
@@ -3912,7 +4336,7 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   // Sanitize once at the top so every sentence handed to a TTS provider is
   // free of markdown/emoji/multi-punctuation. KB chunks + LLM occasionally
   // produce `**bold**` or 🎯 which some voices read aloud literally.
-  const cleanText = sanitizeForTts(text);
+  const cleanText = normalizePronunciation(sanitizeForTts(text), session.language);
   if (!cleanText) {
     logger.warn({ callSid: session.callSid, preview: (text || '').slice(0, 60) }, 'playText: empty after sanitize, skipping');
     return;
@@ -3940,9 +4364,12 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
   session.bargeInAllowedAt = Date.now() + BARGE_IN_GRACE_MS;
   session.currentAgentText = cleanText;
 
+  // Pinned single voice (set in onStart) wins for Sarvam; agent voice_config
+  // is the legacy fallback. Deepgram/Azure are last-resort only (Sarvam down).
+  const sarvamVoice = session.ttsVoiceId || session.agent?.voice_config?.voice_id;
   const synthOne = async (s: string): Promise<string | null> => {
     if (session.ttsBackend === 'sarvam') {
-      const b = await synthesizeSarvamTtsMulaw(s, session.language, session.agent?.voice_config?.voice_id);
+      const b = await synthesizeSarvamTtsMulaw(s, session.language, sarvamVoice);
       if (b) return b;
       logger.warn({ callSid: session.callSid, lang: session.language }, 'Sarvam TTS failed — falling back to Deepgram Aura');
       return ttsDeepgramMulaw(s, session.agent?.voice_config?.voice_id);
@@ -3958,6 +4385,12 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
 
   // Kick all syntheses off immediately so they overlap with playback.
   const synthPromises = effectiveSentences.map((s) => synthOne(s));
+
+  // Track total bytes streamed + when playback started so the finally block
+  // can wait for Plivo to actually render the audio before flipping to
+  // LISTENING (anti-clip guarantee — see finally below).
+  let totalAudioBytes = 0;
+  const ttsPlayStartAt = Date.now();
 
   try {
     for (let i = 0; i < effectiveSentences.length; i++) {
@@ -4019,9 +4452,31 @@ async function playText(plivoWs: WebSocket, session: StreamSession, text: string
           await new Promise((r) => setImmediate(r));
         }
       }
+      totalAudioBytes += sentBytes;
       if (aborted) break;
     }
   } finally {
+    // Anti-clip: the send loop pushes mulaw ~5x faster than real-time, so
+    // Plivo is STILL PLAYING the tail when we get here. Flipping to LISTENING
+    // immediately makes the caller hear the last word/number/college cut off
+    // (and risks the agent's own tail re-triggering a turn). Mirror
+    // streamAndPlayReply: hold AGENT_SPEAKING until Plivo has had time to
+    // render every byte (1 byte = 1/8 ms at 8kHz mulaw), unless the caller
+    // barged in or the call ended. Capped at 15s as a safety bound.
+    if (!session.bargeInRequested && !session.callEnded && totalAudioBytes > 0) {
+      const playoutDeadline = ttsPlayStartAt + Math.min(15000, Math.round(totalAudioBytes / 8));
+      while (
+        Date.now() < playoutDeadline &&
+        !session.bargeInRequested &&
+        !session.callEnded &&
+        plivoWs.readyState === WebSocket.OPEN
+      ) {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      if (session.bargeInRequested) {
+        try { plivoWs.send(JSON.stringify({ event: 'clearAudio' })); } catch { /* socket may be gone */ }
+      }
+    }
     session.isAgentSpeaking = false;
     session.currentAgentText = '';
     // Drain any still-in-flight syntheses so we don't leave dangling
@@ -4564,7 +5019,7 @@ async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLan
   const oldLang = session.language;
   if (oldLang === newLang || session.closed) return;
 
-  // Pick backends for the new language using the same priority as onStart:
+  // Pick STT backend for the new language using the same priority as onStart:
   // any Indic language → Sarvam (native accent), else Deepgram for English.
   const isIndicLang = sarvamCanHandle(newLang) && !/^en/i.test(newLang);
   let stt: 'deepgram' | 'azure' | 'sarvam' = 'deepgram';
@@ -4579,7 +5034,15 @@ async function switchLanguage(plivoWs: WebSocket, session: StreamSession, newLan
     }
   }
 
-  logger.info({ callSid: session.callSid, oldLang, newLang, stt, tts }, 'Stream: switching language mid-call');
+  // SINGLE PREMIUM VOICE: the language may change, but the VOICE must not.
+  // When a premium voice is pinned (set in onStart), keep TTS on Sarvam with
+  // the same locked speaker — Sarvam bulbul:v2 renders the new language in the
+  // identical voice, so the caller never hears a mid-call voice switch.
+  if (session.ttsVoiceId && sarvamConfigured()) {
+    tts = 'sarvam';
+  }
+
+  logger.info({ callSid: session.callSid, oldLang, newLang, stt, tts, voice: session.ttsVoiceId || null }, 'Stream: switching language mid-call');
 
   // Tear down whichever STT was active.
   if (session.dgBatchFlushTimer) { clearTimeout(session.dgBatchFlushTimer); session.dgBatchFlushTimer = null; }

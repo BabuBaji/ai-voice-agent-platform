@@ -140,13 +140,26 @@ function renderCampaignBlock(
   vars: Record<string, any> | null | undefined,
   customerName: string | null | undefined,
   isFollowup?: boolean,
+  isFeedback?: boolean,
 ): string {
   const sections: string[] = [];
-  if (isFollowup) {
-    // Follow-up call: the lead's details are already captured. This block sits
+  if (isFeedback) {
+    // POST-VISIT FEEDBACK call: the visit already happened. Details are on file.
+    sections.push(`## POST_VISIT_FEEDBACK_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
+This is a POST-VISIT FEEDBACK call to an existing lead whose details (name, mobile, email, marks, rank, college, course) are ALREADY ON FILE (see CONTACT_CONTEXT). NEVER ask for any of those — asking again is a failure. OPEN by stating the purpose: "this call is regarding your recent visit to <college>". Then run ONLY this flow, one question per turn:
+1. Ask how their visit experience was.
+2. If they are INTERESTED in admission: ask if they need counsellor assistance or have any fee/document doubts; answer briefly. (Outcome: interested.)
+3. If they are NOT interested: say "I understand. Would you like me to suggest alternative colleges that match your rank and marks?" — if yes, suggest AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick a new college, confirm it and plan a visit there: ask date + time, then READ BACK "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
+4. If they reject all options (or already joined elsewhere / not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture the reason.`);
+  } else if (isFollowup) {
+    // VISIT-PLANNING follow-up call: details already captured. This block sits
     // ABOVE the capture flow and overrides it — the agent must not re-ask.
-    sections.push(`## FOLLOW-UP_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
-This is a FOLLOW-UP call to an existing lead. Their name, mobile number, email, intermediate marks, rank, college and course are ALREADY ON FILE (see CONTACT_CONTEXT / CAMPAIGN_CONTEXT). DO NOT run the capture flow. NEVER ask for name, mobile number, email, marks, rank, college, or course — asking again annoys the caller and is a failure. Your ONLY objective is the campaign instruction's goal (confirm interest, answer doubts briefly, then capture and confirm a visit / counsellor date and time).`);
+    sections.push(`## VISIT_PLANNING_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
+This is a VISIT-PLANNING follow-up call to an existing lead. Their name, mobile number, email, intermediate marks, rank, college and course are ALREADY ON FILE (see CONTACT_CONTEXT). DO NOT run the capture flow. NEVER ask for name, mobile number, email, marks, rank, college, or course — asking again is a failure. OPEN by stating the purpose: "this call is regarding your planned visit for <college> <course>". Then your ONLY objective is to plan the campus visit:
+1. Confirm they are still interested in <college> for <course>.
+2. If NOT interested, offer AT MOST TWO alternative colleges that fit their rank and marks (use your knowledge base); if they pick a new one, confirm it and plan the visit for that college instead.
+3. Answer doubts briefly (fees / placements / hostel / scholarship).
+4. Capture a visit DATE and TIME, then READ IT BACK in one clear line — "Just to confirm, your visit to <college> for <course> is scheduled on <date> at <time>, correct?" — wait for yes, then say it's successfully scheduled and close.`);
   }
   if (instruction && instruction.trim()) {
     sections.push(`## CAMPAIGN_CONTEXT (temporary, applies to this call only)
@@ -184,6 +197,7 @@ export function buildVoiceAgentPrompt(
     campaignInstruction?: string | null;
     contactVariables?: Record<string, any> | null;
     isFollowup?: boolean | null;
+    isFeedback?: boolean | null;
   }
 ): string {
   const businessType = deriveBusinessType(agent);
@@ -207,6 +221,7 @@ export function buildVoiceAgentPrompt(
     opts?.contactVariables,
     sanitizeCustomerName(opts?.customerName) || null,
     !!opts?.isFollowup,
+    !!opts?.isFeedback,
   );
   const tools = toolsBlock(agent);
   const callCfg = agent.call_config || {};
@@ -428,6 +443,7 @@ export function buildVoiceAgentPromptSlim(
     campaignInstruction?: string | null;
     contactVariables?: Record<string, any> | null;
     isFollowup?: boolean | null;
+    isFeedback?: boolean | null;
   }
 ): string {
   const agentRole = deriveAgentRole(agent);
@@ -461,15 +477,24 @@ export function buildVoiceAgentPromptSlim(
   // Follow-up calls already have the lead's details on file → swap the cold
   // name/mobile/email capture flow for a visit-confirmation flow so the agent
   // never re-asks known details.
-  const flowBlock = opts?.isFollowup
-    ? `8. FLOW (FOLLOW-UP call — the caller's details are ALREADY ON FILE, see CONTACT):
-  a. Greet warmly by name, confirm it's a good time to talk.
-  b. Remind them of their interest (use college + course from CONTACT) and confirm they are still interested.
-  c. Answer any doubts briefly (fees / placements / hostel / scholarship) — 1-2 sentences.
-  d. Ask their preferred DATE and TIME to visit the college / meet the counsellor, then read it back and confirm.
-  e. CLOSE: confirm the visit date + time, thank them by name, say the team will assist. Then STOP.
-- CRITICAL — DO NOT COLLECT DETAILS: you ALREADY HAVE their name, mobile number, email, intermediate marks, EAMCET rank, college and course (see CONTACT). NEVER ask for any of these — asking again annoys the caller and is a failure. Your ONLY goal is to confirm the visit / counsellor date and time.
-- If caller says "not interested", politely close immediately. Do not push.`
+  const flowBlock = opts?.isFeedback
+    ? `8. FLOW (POST-VISIT FEEDBACK call — the caller's details are ALREADY ON FILE, see CONTACT):
+  a. OPEN by stating the purpose, by name: "this call is regarding your recent visit to <college from CONTACT>". Keep it one short line.
+  b. Ask: "How was your visit experience?"
+  c. If they are INTERESTED in admission: ask if they need counsellor assistance or have any fee/document doubts; answer briefly (1-2 sentences). Then close warmly.
+  d. If they are NOT interested: say "I understand. Would you like me to suggest alternative colleges that match your rank and marks?" — if yes, name AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick one, confirm it and ask their DATE and TIME to visit it, then READ BACK: "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
+  e. If they reject all options (or say they already joined elsewhere / are not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture their reason.
+- CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, marks, rank, college, course are ALREADY ON FILE (CONTACT). NEVER ask for any of them. ONE question per turn.`
+    : opts?.isFollowup
+    ? `8. FLOW (VISIT-PLANNING call — the caller's details are ALREADY ON FILE, see CONTACT):
+  a. OPEN by stating the purpose, by name: "this call is regarding your planned visit for <college> <course>". Keep it one short line.
+  b. Confirm they are still interested in <college> for <course>.
+  c. If they are NOT interested in that college: offer alternatives — "shall I suggest a couple of colleges that match your rank and marks?" — then name AT MOST TWO suitable colleges (use your knowledge base), and if they pick one, confirm the new college and plan the visit for THAT college.
+  d. Answer any doubts briefly (fees / placements / hostel / scholarship) — 1-2 sentences.
+  e. Ask their preferred DATE and TIME to visit.
+  f. CONFIRM read-back (REQUIRED): "Just to confirm, your visit to <college> for <course> is scheduled on <date> at <time>, correct?" and wait for yes; then say it's successfully scheduled.
+  g. CLOSE: thank them by name. Then STOP.
+- CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, marks, rank, college, course are ALREADY ON FILE (CONTACT). NEVER ask for any of them — asking again is a failure. ONE question per turn.`
     : `8. FLOW (follow this order strictly):
   a. Greet warmly, confirm availability.
   b. Ask about intermediate (group, marks, EAMCET rank) — ONE question per turn.

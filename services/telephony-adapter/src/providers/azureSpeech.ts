@@ -216,7 +216,11 @@ export async function synthesizeAzureTtsMulaw(
       logger.warn({ size: buf.length }, 'Azure TTS returned tiny buffer');
       return null;
     }
-    return buf.toString('base64');
+    // Append a short mulaw-silence tail (parity with Sarvam/Deepgram) so the
+    // final word isn't clipped at the audio boundary on jittery PSTN paths.
+    const tailMs = Number(process.env.TTS_TRAILING_SILENCE_MS) || 60;
+    const tail = Buffer.alloc(Math.round(8000 * tailMs / 1000), 0xff);
+    return Buffer.concat([buf, tail]).toString('base64');
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Azure TTS error');
     return null;

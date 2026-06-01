@@ -74,7 +74,9 @@ export function startWhisperStt(opts: WhisperSttOptions): WhisperSttHandle {
   // 80ms minimum so short Indic affirmations ("ha", "avunu", "haan") aren't
   // dropped as noise — matches the loosened threshold in sarvamSpeech.ts.
   const MIN_SPEECH_FRAMES = 4;
-  const SILENCE_FRAMES_TO_FINALIZE = 30;
+  // 22 frames ≈ 440ms (down from 30/600ms) — matches sarvamSpeech.ts for
+  // snappier turn finalisation. Override via SARVAM_SILENCE_FRAMES.
+  const SILENCE_FRAMES_TO_FINALIZE = Number(process.env.SARVAM_SILENCE_FRAMES) || 22;
   const MAX_BUFFER_BYTES = 8000 * 20;
 
   let buffer: Buffer[] = [];

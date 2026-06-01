@@ -56,6 +56,31 @@ export async function createFollowupForLead(pool: Pool, opts: {
   priority?: number;
   notes?: string;
 }): Promise<string> {
+  // Rejection guard (central): never schedule ANY further AI follow-up for a
+  // lead that has been marked rejected / not-interested (e.g. declined all
+  // alternative colleges on a post-visit feedback call). This one check covers
+  // every follow-up type that routes through here (visit_confirmation,
+  // call_reminder, counselor_scheduling, admission_interest,
+  // post_visit_feedback_call). ALTERNATIVE_COLLEGE_INTERESTED is NOT rejected,
+  // so its new-visit chain still flows. Set FOLLOWUP_REJECT_GATE=0 to disable.
+  if (process.env.FOLLOWUP_REJECT_GATE !== '0') {
+    try {
+      const crm = getCrmPool();
+      const lr = await crm.query(
+        `SELECT status, custom_fields->>'pipeline_stage' AS pipeline_stage FROM leads WHERE id = $1 LIMIT 1`,
+        [opts.leadId],
+      );
+      const st = String(lr.rows[0]?.status || '').toUpperCase();
+      const stage = String(lr.rows[0]?.pipeline_stage || '').toUpperCase();
+      const rejected = ['UNQUALIFIED', 'REJECTED', 'LOST', 'NOT_INTERESTED'].includes(st)
+        || ['REJECTED', 'NOT_INTERESTED'].includes(stage);
+      if (rejected) {
+        logger.info({ leadId: opts.leadId, type: opts.type, status: st, stage }, 'Follow-up skipped — lead is rejected/not-interested');
+        return '';
+      }
+    } catch { /* non-fatal — fall through and create as before */ }
+  }
+
   // Check if lead has a callback_time in custom_fields
   let scheduledAt = opts.scheduledAt || new Date(Date.now() + DEFAULT_FOLLOWUP_DELAY_MS);
   if (!opts.scheduledAt) {
@@ -101,6 +126,34 @@ export async function createFollowupForLead(pool: Pool, opts: {
   return taskId;
 }
 
+/**
+ * Cancel ALL pending automation for a lead. Called when a lead is marked
+ * NOT_INTERESTED at any stage so no further AI calls go out — cancels queued
+ * follow-up tasks (PENDING/IN_PROGRESS) and open visits (SCHEDULED/CONFIRMED).
+ * Reminders ride on those rows, so cancelling them stops reminder calls too.
+ * The just-completed task is already COMPLETED by the caller, so it's untouched.
+ */
+export async function cancelLeadAutomation(pool: Pool, tenantId: string, leadId: string): Promise<{ tasks: number; visits: number }> {
+  try {
+    const t = await pool.query(
+      `UPDATE followup_tasks SET status='CANCELLED', updated_at=NOW()
+        WHERE tenant_id=$1 AND lead_id=$2 AND status IN ('PENDING','IN_PROGRESS') RETURNING id`,
+      [tenantId, leadId],
+    );
+    const v = await pool.query(
+      `UPDATE visit_schedules SET status='CANCELLED', updated_at=NOW()
+        WHERE tenant_id=$1 AND lead_id=$2 AND status IN ('SCHEDULED','CONFIRMED') RETURNING id`,
+      [tenantId, leadId],
+    );
+    const tasks = t.rowCount || 0, visits = v.rowCount || 0;
+    if (tasks || visits) logger.info({ tenantId, leadId, tasks, visits }, 'NOT_INTERESTED — cancelled pending lead automation');
+    return { tasks, visits };
+  } catch (err: any) {
+    logger.warn({ leadId, err: err.message }, 'cancelLeadAutomation failed');
+    return { tasks: 0, visits: 0 };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public: update follow-up from call end
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,10 +177,27 @@ export async function updateFollowupFromCallEnd(pool: Pool, opts: {
       `UPDATE followup_tasks SET status = 'COMPLETED', completed_at = NOW(), result = $1, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify({ outcome: 'NOT_INTERESTED', interestLevel, conversationId }), followupTaskId],
     );
+    // GLOBAL NOT_INTERESTED: record reason + stage on the lead AND stop all
+    // further automation (cancel queued follow-ups + open visits).
+    const stage = t.type === 'post_visit_feedback_call' ? 'FEEDBACK'
+      : /visit|counsel/i.test(String(t.type || '')) ? 'VISIT_PLANNING' : 'FOLLOW_UP';
+    const ke = analysis?.key_entities || {};
+    const reason = String(
+      ke.rejection_reason || ke.feedback_reason
+      || (Array.isArray(analysis?.objections) && analysis.objections[0]) || analysis?.short_summary || 'not interested',
+    ).slice(0, 200);
     try {
       const crm = getCrmPool();
-      await crm.query(`UPDATE leads SET status = 'UNQUALIFIED', updated_at = NOW() WHERE id = $1`, [t.lead_id]);
-    } catch {}
+      const lr = await crm.query(`SELECT custom_fields FROM leads WHERE id = $1`, [t.lead_id]);
+      const cf = {
+        ...(lr.rows[0]?.custom_fields || {}),
+        pipeline_stage: 'NOT_INTERESTED', rejection_reason: reason, rejection_stage: stage,
+        rejection_at: new Date().toISOString(), automation_status: 'STOPPED',
+      };
+      await crm.query(`UPDATE leads SET status = 'UNQUALIFIED', custom_fields = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(cf), t.lead_id]);
+    } catch (e: any) { logger.warn({ lead: t.lead_id, err: e?.message }, 'not-interested lead update failed'); }
+    await cancelLeadAutomation(pool, t.tenant_id, t.lead_id);
   } else if (outcome.includes('visit') || outcome.includes('appointment')) {
     // Visit scheduled
     await pool.query(
@@ -271,8 +341,8 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
   ].filter(Boolean).join('. ');
   const isFeedbackCall = task.type === 'post_visit_feedback_call';
   const directive = isFeedbackCall
-    ? `This is a post-visit feedback call. Ask ${studentName || 'the student'} about their experience visiting ${college || 'the college'} and their admission decision. Do NOT re-ask details you already know.`
-    : `You are calling to help plan a college visit. You already know the details below — DO NOT ask for them again. Greet ${studentName || 'the student'} politely, mention they showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}, confirm they are still interested, answer any doubts about fees/placements/hostel/scholarship briefly, then ask their preferred date and time to visit ${college || 'the college'} and confirm it back clearly.`;
+    ? `This is a POST-VISIT FEEDBACK call about ${studentName || 'the student'}'s recent visit to ${college || 'the college'}${course ? ` for ${course}` : ''}. You already know all their details — do NOT re-ask name, mobile, email, marks, rank, college or course. Follow the POST_VISIT_FEEDBACK flow: ask about the visit experience; if not interested, offer alternative colleges from your knowledge base matching their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks, and plan a new visit if they pick one; if they reject all, close politely and capture the reason.`
+    : `You are calling to help plan a college visit. You already know the details below — DO NOT ask for them again. Greet ${studentName || 'the student'} politely, mention they showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}, confirm they are still interested. If they are NOT interested in ${college || 'that college'}, offer to suggest one or two alternative colleges that fit their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks — use your knowledge base, name at most two, and if they pick a new college confirm it and plan the visit there instead. Answer any doubts about fees/placements/hostel/scholarship briefly, then ask their preferred date and time to visit and confirm it back clearly with the college, course, date and time.`;
   // Acronym colleges ("SRM") get mispronounced by Indic TTS (callers heard
   // "OYO University"). Give the agent a spaced spelling + an explicit
   // letter-by-letter pronunciation instruction so the name is understood.

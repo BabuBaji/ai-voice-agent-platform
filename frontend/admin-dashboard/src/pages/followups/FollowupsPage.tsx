@@ -169,7 +169,13 @@ function LeadHeader({ name, lead, right }: { name: string; lead: any; right?: Re
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 14, fontWeight: 700, color: '#111827' }}>{name}</span>
           {typeof lead.score === 'number' && <span style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', background: '#f3f4f6', borderRadius: 12, padding: '1px 8px' }}>Score {lead.score}</span>}
+          {lead.pipeline_stage === 'NOT_INTERESTED' && <span style={{ fontSize: 10, fontWeight: 700, color: '#fff', background: '#ef4444', borderRadius: 12, padding: '2px 8px' }}>NOT INTERESTED</span>}
         </div>
+        {lead.pipeline_stage === 'NOT_INTERESTED' && (lead.rejection_reason || lead.rejection_stage) && (
+          <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 2 }}>
+            {lead.rejection_reason || 'User not interested'}{lead.rejection_stage ? ` · stage: ${lead.rejection_stage}` : ''}{lead.rejection_at ? ` · ${new Date(lead.rejection_at).toLocaleDateString()}` : ''}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: '#6b7280', display: 'flex', gap: 12, marginTop: 3, flexWrap: 'wrap' }}>
           {lead.mobile && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Phone size={11} />{lead.mobile}</span>}
           {lead.email && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Mail size={11} />{lead.email}</span>}
@@ -284,6 +290,7 @@ function VisitsTab() {
 function FeedbackTab() {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
 
   useEffect(() => {
     api.get('/followups/feedback').then(r => { setData(r.data.data || []); setLoading(false); }).catch(() => setLoading(false));
@@ -307,12 +314,37 @@ function FeedbackTab() {
                 </div>
               } />
               {f.feedback_text && <div style={{ fontSize: 13, color: '#374151', marginTop: 8, lineHeight: 1.4 }}>“{f.feedback_text}”</div>}
+              {(f.feedback_reason || f.rejection_reason) && (
+                <div style={{ fontSize: 12, color: '#b45309', marginTop: 6 }}>
+                  {f.rejection_reason ? `Rejection reason: ${f.rejection_reason}` : `Reason: ${f.feedback_reason}`}
+                </div>
+              )}
               <ChipRow chips={leadChips(lead, [
+                { label: 'Final', value: f.final_interest_status },
                 { label: 'Interest', value: f.interest_after_visit },
                 { label: 'Admission', value: f.admission_readiness },
+                { label: 'Admission %', value: typeof f.admission_probability === 'number' ? `${f.admission_probability}%` : undefined },
                 { label: 'Visited', value: f.visited_status },
+                { label: 'Orig college', value: f.original_college },
+                { label: 'Alt interest', value: f.interested_in_alternative === true ? 'yes' : f.interested_in_alternative === false ? 'no' : undefined },
+                { label: 'New college', value: f.selected_new_college },
+                { label: 'New visit', value: f.new_visit_date ? `${f.new_visit_date}${f.new_visit_time ? ' ' + String(f.new_visit_time).slice(0, 5) : ''}` : undefined },
                 { label: 'Next', value: f.next_action },
               ])} />
+              {(f.recording_url || f.conversation_id) && (
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #f3f4f6', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {f.recording_url && (
+                    <span style={{ fontSize: 10, color: '#0ea5e9', background: '#e0f2fe', borderRadius: 8, padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Headphones size={11} />Recording
+                    </span>
+                  )}
+                  {f.conversation_id && (
+                    <button onClick={() => navigate(`/calls/${f.conversation_id}`)} style={{ padding: '4px 10px', border: '1px solid #6366f1', color: '#6366f1', background: '#fff', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <FileText size={11} />View call &amp; transcript
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

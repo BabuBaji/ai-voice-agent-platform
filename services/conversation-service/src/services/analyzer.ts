@@ -299,6 +299,12 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "alt_phone": "" | extracted (E.164 if possible, only if explicitly stated as alternate/secondary contact),
     "company": "" | extracted (employer or organization name only if stated),
     "interested_university": "" | extracted (the specific university/college the caller named as their preferred choice — e.g. "Joy University", "SRM Chennai", "Marwadi University". Empty string if they didn't name one or said "any" / "I don't know yet"),
+    "new_interested_college": "" | On a follow-up/visit-planning call ONLY: the NEW college the caller decided to switch to during THIS call (e.g. after the agent suggested alternatives because they were no longer interested in their original choice). Empty string if they kept their original college or no switch happened — do NOT echo the college that was already on file,
+    "feedback_reason": "" | On a POST-VISIT FEEDBACK call: the caller's stated reason if they were NOT satisfied / not interested after the visit (e.g. "fees too high", "distance", "hostel not good", "placements concern", "parents not agreed", "selected another college", "not joining this year"). Empty if they were satisfied,
+    "interested_in_alternative": "" | On a post-visit feedback call where they were not interested: "true" if they agreed to consider/visit an ALTERNATIVE college, "false" if they declined all alternatives, "" if not applicable,
+    "suggested_colleges": [] | On a post-visit feedback call: the list of alternative college names the AGENT suggested during this call (best effort, [] if none),
+    "final_interest_status": "" | On a post-visit feedback call, the outcome: "INTERESTED" (still going ahead with the visited college) | "ALTERNATIVE" (switched to a new college, will visit it) | "REJECTED" (not interested in any college / dropping out). Empty for non-feedback calls,
+    "rejection_reason": "" | On a post-visit feedback call that ended REJECTED: the concise reason the caller is not proceeding with any college. Empty otherwise,
 
     // ===== ADMISSIONS-SPECIFIC FIELDS (post-call lead module v1) =====
     // Extract these for B.Tech/B.E./Polytechnic/diploma admission calls.
@@ -334,6 +340,10 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
   // Extended lead status — admissions module enum. Set this in addition to
   // lead_score/outcome. The post-call processor maps this to a CRM status
   // and uses it to decide what follow-up tasks to schedule.
+  // Set NOT_INTERESTED whenever the caller clearly signals they don't want to
+  // proceed — e.g. "not interested", "do not call again", "already joined
+  // another college", "not planning higher studies", "not this year", "no
+  // counselling needed", "not eligible and not interested", or a wrong/uninterested lead.
   "lead_status": "HOT_INTERESTED" | "INTERESTED" | "FOLLOW_UP_REQUIRED" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NO_ANSWER" | "CALLBACK_SCHEDULED" | "COUNSELOR_MEETING_REQUIRED" | "BROCHURE_SENT",
   // Overall extraction confidence 0.00–1.00 (the LLM's own judgement on
   // how reliably it parsed the caller's intent and details).

@@ -1,7 +1,7 @@
 import { pool } from '../index';
 import { analyzeConversation, AnalysisResult } from './analyzer';
 import { triggerWorkflow, mapStatusToEvent } from './whatsappWorkflowEngine';
-import { updateFollowupFromCallEnd } from './followupScheduler';
+import { updateFollowupFromCallEnd, cancelLeadAutomation } from './followupScheduler';
 import { config } from '../config';
 import pino from 'pino';
 
@@ -183,13 +183,38 @@ async function handleFollowupCallAutomation(
   const tr = await pool.query(`SELECT tenant_id, lead_id, type FROM followup_tasks WHERE id = $1`, [followupTaskId]);
   const task = tr.rows[0];
   if (!task) return;
+  const isFeedbackCall = task.type === 'post_visit_feedback_call';
+
+  const ke: any = analysis.key_entities || {};
+
+  // 1b. Alternative-college pick: if the caller switched to a different college
+  // during the visit-planning call, persist the new choice so the Visit Card +
+  // future calls reflect it. Additive merge into crm custom_fields; never
+  // overwrites with an empty value.
+  const newCollege = String(ke.new_interested_college || (analysis as any).new_interested_college || '').trim();
+  if (newCollege && !isFeedbackCall) {
+    await updateLeadFields(task.tenant_id, task.lead_id, { interested_university: newCollege });
+    logger.info({ conv: conversationId, lead: task.lead_id, newCollege }, 'AI follow-up: lead interested college updated');
+  }
+
+  // Rejected-now: the caller said not interested AND did NOT switch to a new
+  // college. updateFollowupFromCallEnd already marked the lead NOT_INTERESTED +
+  // cancelled automation — so we must NOT create a visit or overwrite the
+  // pipeline stage below.
+  const rejectedNow = !newCollege && (
+    callOutcome.includes('not interested') || callOutcome.includes('not_interested')
+    || ['NOT_INTERESTED', 'LOST', 'UNQUALIFIED'].includes(String((analysis as any).lead_status || '').toUpperCase())
+  );
 
   // 2. AI-extracted visit → create a visit_schedules row (when a date/time was captured).
-  const ke: any = analysis.key_entities || {};
   const apptRaw = ke.appointment_time || (analysis as any).appointment_time || analysis.recommended_follow_up_time;
   const visitWhen = parseFollowUpTimeLocal(apptRaw);
-  const wantsVisit = callOutcome.includes('visit') || callOutcome.includes('appointment') || !!ke.appointment_time;
-  if (visitWhen && wantsVisit) {
+  // Relaxed gate: on a visit-planning follow-up call (already gated by
+  // followup_task_id, and excluded for feedback calls), create the Visit Card
+  // whenever a parseable date/time was captured — the old keyword gate
+  // ("visit"/"appointment" in call_outcome) dropped valid visits when the
+  // analyzer's outcome label didn't contain those words. Skip on a reject.
+  if (visitWhen && !isFeedbackCall && !rejectedNow) {
     const existing = await pool.query(
       `SELECT id FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`,
       [task.lead_id],
@@ -223,31 +248,154 @@ async function handleFollowupCallAutomation(
     }
   }
 
-  // 3. Post-visit feedback call → store feedback linked to the visit.
-  if (task.type === 'post_visit_feedback_call') {
+  // 3. Post-visit feedback call → store feedback + handle the not-interested →
+  //    alternative-college / reject flow.
+  if (isFeedbackCall) {
     const visit = await pool.query(
       `SELECT id FROM visit_schedules WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 1`, [task.lead_id],
     );
-    const notInterested = callOutcome.includes('not interested') || callOutcome.includes('not_interested');
-    const rating = notInterested ? 'NEGATIVE' : interestLevel >= 60 ? 'POSITIVE' : interestLevel >= 35 ? 'NEUTRAL' : 'NEGATIVE';
+    // The lead's CURRENT interested college becomes original_college / previous_college on a switch.
+    let originalCollege: string | null = null;
+    try {
+      const lr = await fetch(`${config.crmServiceUrl}/leads/${task.lead_id}`, { headers: { 'x-tenant-id': task.tenant_id } });
+      if (lr.ok) { const ld: any = await lr.json(); const cf = ld.custom_fields || {}; originalCollege = cf.interested_university || cf.interested_college || null; }
+    } catch { /* best-effort */ }
+
+    // Resilient not-interested detection — the Telugu (Sarvam-M) analyzer often
+    // leaves the optional feedback fields empty, so fall back to coarse signals.
+    const leadStatusUp = String((analysis as any).lead_status || '').toUpperCase();
+    const objArr = Array.isArray(analysis.objections) ? analysis.objections : [];
+    const notInterested = callOutcome.includes('not interested') || callOutcome.includes('not_interested')
+      || /(not[_ ]?interested|reject)/i.test(String(ke.final_interest_status || ''))
+      || ['NOT_INTERESTED', 'LOST', 'UNQUALIFIED'].includes(leadStatusUp)
+      || (typeof analysis.interest_level === 'number' && analysis.interest_level < 35);
+    const feedbackReason = String(ke.feedback_reason || '').trim()
+      || (objArr.length ? String(objArr[0]).slice(0, 200) : null);
+    const rejectionReason = String(ke.rejection_reason || '').trim() || (notInterested ? feedbackReason : null);
+    const interestedInAlt = String(ke.interested_in_alternative || '').toLowerCase() === 'true' || !!newCollege;
+    const suggested = Array.isArray(ke.suggested_colleges) ? ke.suggested_colleges : [];
+
+    // Final outcome: explicit from analyzer, else derived.
+    let finalStatus = String(ke.final_interest_status || '').toUpperCase();
+    if (!finalStatus) finalStatus = newCollege ? 'ALTERNATIVE' : notInterested ? 'REJECTED' : 'INTERESTED';
+
+    // Alternative visit date/time (from appointment_time) when switching colleges.
+    let newVisitDate: string | null = null, newVisitTime: string | null = null;
+    if (finalStatus === 'ALTERNATIVE' && visitWhen) {
+      const y = visitWhen.getFullYear(); const mo = String(visitWhen.getMonth() + 1).padStart(2, '0'); const d = String(visitWhen.getDate()).padStart(2, '0');
+      newVisitDate = `${y}-${mo}-${d}`; newVisitTime = `${String(visitWhen.getHours()).padStart(2, '0')}:${String(visitWhen.getMinutes()).padStart(2, '0')}`;
+    }
+
+    const rating = finalStatus === 'REJECTED' ? 'NEGATIVE' : (finalStatus !== 'REJECTED' && interestLevel >= 60) ? 'POSITIVE' : interestLevel >= 35 ? 'NEUTRAL' : 'NEGATIVE';
+    const frec = await pool.query(`SELECT recording_url FROM conversations WHERE id = $1 LIMIT 1`, [conversationId]);
+    const fRecordingUrl = frec.rows[0]?.recording_url || null;
+    const rawProb = (analysis as any).conversion_probability;
+    let admissionProb: number;
+    if (typeof rawProb === 'number') admissionProb = rawProb <= 1 ? Math.round(rawProb * 100) : Math.round(rawProb);
+    else admissionProb = Math.round(interestLevel);
+    admissionProb = Math.max(0, Math.min(100, admissionProb));
+
     await pool.query(
       `INSERT INTO feedback_logs
          (tenant_id, lead_id, followup_task_id, call_id, visit_id, rating, rating_score,
-          feedback_text, interest_after_visit, admission_readiness, objections, next_action, visited_status)
-       VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)`,
+          feedback_text, interest_after_visit, admission_readiness, objections, next_action, visited_status,
+          conversation_id, recording_url, admission_probability,
+          original_college, feedback_reason, interested_in_alternative, suggested_colleges,
+          selected_new_college, new_visit_date, new_visit_time, final_interest_status, rejection_reason)
+       VALUES ($1,$2,$3,$4::uuid,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14::uuid,$15,$16,
+               $17,$18,$19,$20::jsonb,$21,$22,$23,$24,$25)`,
       [task.tenant_id, task.lead_id, followupTaskId, callId, visit.rows[0]?.id || null,
        rating, Math.max(1, Math.min(5, Math.round(interestLevel / 20))),
        (analysis as any).short_summary || null,
-       interestLevel >= 60 ? 'high' : interestLevel >= 35 ? 'medium' : 'low',
-       notInterested ? 'NOT_INTERESTED' : interestLevel >= 80 ? 'READY' : 'NEEDS_FOLLOWUP',
-       JSON.stringify(analysis.objections || []), (analysis as any).next_best_action || null, 'VISITED'],
+       finalStatus !== 'REJECTED' && interestLevel >= 60 ? 'high' : interestLevel >= 35 ? 'medium' : 'low',
+       finalStatus === 'REJECTED' ? 'NOT_INTERESTED' : finalStatus === 'ALTERNATIVE' ? 'ALTERNATIVE' : interestLevel >= 80 ? 'READY' : 'NEEDS_FOLLOWUP',
+       JSON.stringify(analysis.objections || []),
+       finalStatus === 'REJECTED' ? 'CLOSED' : (analysis as any).next_best_action || null, 'VISITED',
+       conversationId, fRecordingUrl, admissionProb,
+       originalCollege, feedbackReason, interestedInAlt, JSON.stringify(suggested),
+       newCollege || null, newVisitDate, newVisitTime, finalStatus, rejectionReason],
     );
-    await updateLeadPipeline(task.tenant_id, task.lead_id,
-      notInterested ? 'NOT_INTERESTED' : interestLevel >= 80 ? 'ADMISSION_READY' : 'FEEDBACK_COLLECTED');
-    logger.info({ conv: conversationId, lead: task.lead_id, rating }, 'post-visit feedback stored');
-  } else {
+
+    if (finalStatus === 'ALTERNATIVE' && newCollege) {
+      // Switch the lead to the new college + create an alternative visit so the
+      // normal visit→feedback chain continues for the new choice.
+      await updateLeadFields(task.tenant_id, task.lead_id, {
+        previous_college: originalCollege || undefined,
+        interested_university: newCollege,
+        college_changed: true,
+        change_reason: feedbackReason || undefined,
+      });
+      await updateLeadPipeline(task.tenant_id, task.lead_id, 'ALTERNATIVE_COLLEGE_INTERESTED');
+      if (newVisitDate) {
+        const dup = await pool.query(`SELECT id FROM visit_schedules WHERE lead_id=$1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`, [task.lead_id]);
+        if (dup.rows.length === 0) {
+          await pool.query(
+            `INSERT INTO visit_schedules
+               (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, notes,
+                conversation_id, confirmation_call_id, recording_url, call_summary)
+             VALUES ($1,$2,$3,$4,$5,'SCHEDULED','ALTERNATIVE_VISIT',$6,$7::uuid,$8,$9,$10)`,
+            [task.tenant_id, task.lead_id, followupTaskId, newVisitDate, newVisitTime,
+             `Alternative visit to ${newCollege} (switched from ${originalCollege || 'previous college'})`.slice(0, 300),
+             conversationId, callId, fRecordingUrl, (analysis as any).detailed_summary || (analysis as any).short_summary || null],
+          );
+          logger.info({ conv: conversationId, lead: task.lead_id, newCollege, newVisitDate }, 'post-visit feedback: alternative college + visit created');
+        }
+      }
+    } else if (finalStatus === 'REJECTED') {
+      // Global NOT_INTERESTED: record reason + stage AND cancel ALL pending
+      // automation (covers the case where updateFollowupFromCallEnd's narrow
+      // outcome-string check didn't fire but our resilient logic says rejected).
+      await markLeadNotInterested(task.tenant_id, task.lead_id, 'FEEDBACK', rejectionReason || feedbackReason);
+      logger.info({ conv: conversationId, lead: task.lead_id, rejectionReason }, 'post-visit feedback: lead NOT_INTERESTED — automation stopped');
+    } else {
+      await updateLeadPipeline(task.tenant_id, task.lead_id, interestLevel >= 80 ? 'ADMISSION_READY' : 'FEEDBACK_COLLECTED');
+    }
+    logger.info({ conv: conversationId, lead: task.lead_id, finalStatus }, 'post-visit feedback stored');
+  } else if (!rejectedNow) {
+    // Non-feedback follow-up that progressed normally. Don't overwrite a
+    // NOT_INTERESTED stage that the reject path just set.
     await updateLeadPipeline(task.tenant_id, task.lead_id, 'BROCHURE_FOLLOWUP_COMPLETED');
   }
+}
+
+/** Best-effort additive merge of arbitrary fields into crm custom_fields.
+ *  Skips empty values so we never clobber existing data. */
+async function updateLeadFields(tenantId: string, leadId: string, fields: Record<string, any>): Promise<void> {
+  try {
+    const clean: Record<string, any> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === null || v === undefined) continue;
+      if (typeof v === 'string' && !v.trim()) continue;
+      clean[k] = v;
+    }
+    if (Object.keys(clean).length === 0) return;
+    const res = await fetch(`${config.crmServiceUrl}/leads/${leadId}`, { headers: { 'x-tenant-id': tenantId } });
+    if (!res.ok) return;
+    const lead: any = await res.json();
+    const merged = { ...(lead.custom_fields || {}), ...clean };
+    await fetch(`${config.crmServiceUrl}/leads/${leadId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+      body: JSON.stringify({ custom_fields: merged }),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Global NOT_INTERESTED writer: record rejection reason + stage on the lead and
+ * STOP all automation (cancel queued follow-ups + open visits). Used at every
+ * stage's terminal not-interested point so the funnel halts immediately.
+ * stage ∈ BULK_CALL | FOLLOW_UP | VISIT_PLANNING | FEEDBACK.
+ */
+async function markLeadNotInterested(tenantId: string, leadId: string, stage: string, reason: string | null): Promise<void> {
+  await updateLeadFields(tenantId, leadId, {
+    pipeline_stage: 'NOT_INTERESTED',
+    rejection_reason: (reason || 'not interested').slice(0, 200),
+    rejection_stage: stage,
+    rejection_at: new Date().toISOString(),
+    automation_status: 'STOPPED',
+  });
+  await cancelLeadAutomation(pool, tenantId, leadId);
 }
 
 /** Best-effort lead pipeline-stage write into crm custom_fields (merge). */
@@ -346,6 +494,14 @@ async function scheduleFollowUpTasks(
 ): Promise<void> {
   const status = analysis.lead_status;
   if (!status || status === 'NOT_INTERESTED' || status === 'WRONG_NUMBER' || status === 'NO_ANSWER') {
+    // Bulk/cold call: an explicit NOT_INTERESTED at this first stage halts the
+    // funnel — record reason + stage and cancel any prior queued automation.
+    // (WRONG_NUMBER/NO_ANSWER are not rejections — leave them be.)
+    if (status === 'NOT_INTERESTED' && leadId) {
+      const ke: any = analysis.key_entities || {};
+      const reason = String(ke.rejection_reason || (Array.isArray(analysis.objections) && analysis.objections[0]) || (analysis as any).short_summary || 'not interested');
+      await markLeadNotInterested(tenantId, leadId, 'BULK_CALL', reason).catch(() => {});
+    }
     return;
   }
 

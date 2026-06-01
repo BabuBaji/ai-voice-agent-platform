@@ -223,10 +223,14 @@ function wavToMulaw8k(wav: Buffer): Buffer | null {
 // rendered before Plivo stops playback — prevents end-of-sentence clipping.
 const MULAW_SILENCE_BYTE = 0xff;
 // Kept deliberately small: this is appended to EACH sentence chunk, so a large
-// value creates audible gaps between sentences (choppy "breaking"). 40ms is
-// below the ~50ms pause-perception threshold — it guards the final word from
-// clipping without breaking the conversational flow.
-const TTS_TRAILING_SILENCE_MS = 40;
+// value creates audible gaps between sentences (choppy "breaking"). 60ms stays
+// at/just-below the pause-perception threshold — enough extra tail to keep the
+// final word/number/college from clipping on jittery PSTN paths, without
+// breaking conversational flow. The HARD anti-clip guarantee is the
+// playout-deadline wait in plivoAudioStream (streamAndPlayReply + playText),
+// which holds the turn open until Plivo has had time to render every byte;
+// this tail is the secondary belt-and-braces. Override via env if needed.
+const TTS_TRAILING_SILENCE_MS = Number(process.env.TTS_TRAILING_SILENCE_MS) || 60;
 
 /**
  * Split text into chunks no longer than Sarvam's hard 500-char per-input
@@ -290,7 +294,10 @@ export function startSarvamStt(opts: SarvamSttOptions): SarvamSttHandle {
   // Lowered 8 → 4 (160ms → 80ms) so short Indic affirmations like "ha",
   // "avunu", "haan", "okay" — typically 100-200ms — aren't dropped as noise.
   const MIN_SPEECH_FRAMES = 4;
-  const SILENCE_FRAMES_TO_FINALIZE = 30; // 600ms of silence after speech
+  // 22 frames ≈ 440ms of silence (down from 30/600ms) — finalises utterances
+  // faster for snappier turns, while still long enough to ride over the brief
+  // gaps inside a sentence. Override via SARVAM_SILENCE_FRAMES if needed.
+  const SILENCE_FRAMES_TO_FINALIZE = Number(process.env.SARVAM_SILENCE_FRAMES) || 22;
   const MAX_BUFFER_BYTES = 8000 * 20;    // safety cap: 20s of audio per utterance
 
   let buffer: Buffer[] = [];
@@ -705,9 +712,18 @@ export async function synthesizeSarvamTtsMulaw(
   // it's a voice_id from a different provider (elevenlabs/openai/cartesia)
   // and Sarvam will 400 with "Speaker not recognized".
   const overrideLower = (voiceOverride || '').toLowerCase();
+  // Premium single-voice default: PREMIUM_VOICE_ID (default 'abhilash', a
+  // mature warm male counsellor voice) is used for EVERY language when no
+  // explicit per-agent voice_id is given, so one consistent voice is heard
+  // across Telugu/Hindi/English. Validate against the bulbul:v2 catalog so a
+  // typo can't 400 the call.
+  const premiumDefault = (process.env.PREMIUM_VOICE_ID || 'abhilash').toLowerCase();
+  const fallbackSpeaker = SARVAM_SPEAKERS.has(premiumDefault)
+    ? premiumDefault
+    : (SARVAM_VOICE_DEFAULTS[lang.toLowerCase()] || 'manisha');
   const speaker = SARVAM_SPEAKERS.has(overrideLower)
     ? overrideLower
-    : (SARVAM_VOICE_DEFAULTS[lang.toLowerCase()] || 'manisha');
+    : fallbackSpeaker;
 
   try {
     const resp = await fetch(`${API_BASE}/text-to-speech`, {

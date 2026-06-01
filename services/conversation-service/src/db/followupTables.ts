@@ -123,6 +123,21 @@ export async function initFollowupTables(pool: Pool): Promise<void> {
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS callback_required BOOLEAN DEFAULT FALSE;
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS callback_time TIMESTAMPTZ;
       ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS visited_status VARCHAR(30);
+      -- Feedback Card: link the feedback call's recording + transcript + an
+      -- admission-probability (0-100) so the Feedback page mirrors the Visit Card.
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS conversation_id UUID;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS recording_url TEXT;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS admission_probability INTEGER;
+      -- Post-visit feedback: not-interested → alternative-college / reject flow.
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS original_college TEXT;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS feedback_reason TEXT;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS interested_in_alternative BOOLEAN;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS suggested_colleges JSONB;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS selected_new_college TEXT;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS new_visit_date DATE;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS new_visit_time TIME;
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS final_interest_status VARCHAR(30);
+      ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
     `);
     logger.info('Follow-up scheduler tables initialized');
   } finally {
