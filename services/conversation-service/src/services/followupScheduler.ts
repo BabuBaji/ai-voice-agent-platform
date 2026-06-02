@@ -340,9 +340,17 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
     cf.preferred_location && `Preferred location: ${cf.preferred_location}`,
   ].filter(Boolean).join('. ');
   const isFeedbackCall = task.type === 'post_visit_feedback_call';
+  // Stage split: visit_confirmation → visit-planning directive; feedback → feedback
+  // directive; anything else (call/call_reminder/admission_interest/…) is a
+  // BROCHURE-REVIEW follow-up — discuss what was shared and warm toward a visit,
+  // rather than jumping straight to a date. Aligns with the FOLLOW_UP stage the
+  // telephony overlay derives from followup_type.
+  const isVisitPlanningCall = task.type === 'visit_confirmation';
   const directive = isFeedbackCall
     ? `This is a POST-VISIT FEEDBACK call about ${studentName || 'the student'}'s recent visit to ${college || 'the college'}${course ? ` for ${course}` : ''}. You already know all their details — do NOT re-ask name, mobile, email, marks, rank, college or course. Follow the POST_VISIT_FEEDBACK flow: ask about the visit experience; if not interested, offer alternative colleges from your knowledge base matching their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks, and plan a new visit if they pick one; if they reject all, close politely and capture the reason.`
-    : `You are calling to help plan a college visit. You already know the details below — DO NOT ask for them again. Greet ${studentName || 'the student'} politely, mention they showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}, confirm they are still interested. If they are NOT interested in ${college || 'that college'}, offer to suggest one or two alternative colleges that fit their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks — use your knowledge base, name at most two, and if they pick a new college confirm it and plan the visit there instead. Answer any doubts about fees/placements/hostel/scholarship briefly, then ask their preferred date and time to visit and confirm it back clearly with the college, course, date and time.`;
+    : isVisitPlanningCall
+    ? `You are calling to help plan a college visit. You already know the details below — DO NOT ask for them again. Greet ${studentName || 'the student'} politely, mention they showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}, confirm they are still interested. If they are NOT interested in ${college || 'that college'}, offer to suggest one or two alternative colleges that fit their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks — use your knowledge base, name at most two, and if they pick a new college confirm it and plan the visit there instead. Answer any doubts about fees/placements/hostel/scholarship briefly, then ask their preferred date and time to visit and confirm it back clearly with the college, course, date and time.`
+    : `This is a FOLLOW-UP call to ${studentName || 'the student'} who previously showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}. You already know the details below — DO NOT re-ask name, mobile, email, marks, rank, college or course. Open by saying our team previously spoke with them about ${college || 'the college'} and you're checking whether they had a chance to review the information/brochure we shared. Answer any questions briefly (fees/placements/scholarship/hostel). If interested, move them toward planning a campus visit and capture a preferred date and time. If NOT interested in ${college || 'that college'}, offer one or two alternative colleges from your knowledge base that fit their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks. If clearly not interested at all, capture the reason and close politely.`;
   // Acronym colleges ("SRM") get mispronounced by Indic TTS (callers heard
   // "OYO University"). Give the agent a spaced spelling + an explicit
   // letter-by-letter pronunciation instruction so the name is understood.
@@ -350,7 +358,53 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
   const pronunciationHint = college && collegeSpoken !== college
     ? ` PRONUNCIATION: when saying the college name "${college}", say the acronym slowly letter-by-letter and clearly (like "${collegeSpoken}") so the caller understands it.`
     : '';
-  const campaignInstruction = `${directive}${knownDetails ? ` Known details — ${knownDetails}.` : ''}${pronunciationHint}`;
+
+  // Carry prior journey context (visit / feedback / brochure history) so the
+  // agent references it naturally and never re-collects. Best-effort: a missing
+  // table or row degrades silently to the prior behaviour. visit_schedules and
+  // feedback_logs live in conversation_db (this service's `pool`); brochure
+  // history is on the CRM lead's custom_fields (already loaded above).
+  const historyParts: string[] = [];
+  const historyVars: Record<string, any> = {};
+  try {
+    const v = await pool.query(
+      `SELECT visit_date, visit_time, status FROM visit_schedules
+        WHERE lead_id = $1 ORDER BY visit_date DESC NULLS LAST, created_at DESC LIMIT 1`,
+      [task.lead_id],
+    );
+    if (v.rows[0]?.visit_date) {
+      const vd = String(v.rows[0].visit_date).slice(0, 10);
+      const vt = v.rows[0].visit_time ? ` at ${String(v.rows[0].visit_time).slice(0, 5)}` : '';
+      const vs = v.rows[0].status ? ` (${String(v.rows[0].status).toLowerCase()})` : '';
+      historyParts.push(`Previous visit to ${college || 'the college'} on ${vd}${vt}${vs}`);
+      historyVars.last_visit_date = vd;
+      if (v.rows[0].status) historyVars.last_visit_status = String(v.rows[0].status);
+    }
+  } catch { /* no visit_schedules row — ignore */ }
+  try {
+    const f = await pool.query(
+      `SELECT final_interest_status, rejection_reason FROM feedback_logs
+        WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [task.lead_id],
+    );
+    if (f.rows[0]?.final_interest_status) {
+      const fs = String(f.rows[0].final_interest_status);
+      const fr = f.rows[0].rejection_reason ? ` — reason: ${f.rows[0].rejection_reason}` : '';
+      historyParts.push(`Last feedback status: ${fs}${fr}`);
+      historyVars.last_feedback_status = fs;
+    }
+  } catch { /* no feedback_logs row — ignore */ }
+  if (cf.brochure_sent_at) {
+    const channels = Array.isArray(cf.brochure_sent_channels) ? cf.brochure_sent_channels.join('/') : '';
+    historyParts.push(`Brochure already sent on ${String(cf.brochure_sent_at).slice(0, 10)}${channels ? ` via ${channels}` : ''}`);
+    historyVars.brochure_sent_at = String(cf.brochure_sent_at).slice(0, 10);
+    if (channels) historyVars.brochure_sent_channels = channels;
+  }
+  const historyContext = historyParts.length
+    ? ` JOURNEY HISTORY (reference naturally, do NOT re-collect) — ${historyParts.join('; ')}.`
+    : '';
+
+  const campaignInstruction = `${directive}${knownDetails ? ` Known details — ${knownDetails}.` : ''}${historyContext}${pronunciationHint}`;
 
   // Initiate the call
   try {
@@ -372,7 +426,7 @@ async function processFollowupTask(pool: Pool, task: any): Promise<void> {
           // Drives the voice agent's system prompt + greeting (campaign overlay).
           target_name: studentName,
           campaign_instruction: campaignInstruction,
-          vars: { name: studentName, college, college_spoken: collegeSpoken, course, branch, mobile: lead.phone || '', email: lead.email || '' },
+          vars: { name: studentName, college, college_spoken: collegeSpoken, course, branch, mobile: lead.phone || '', email: lead.email || '', ...historyVars },
         },
       }),
     });

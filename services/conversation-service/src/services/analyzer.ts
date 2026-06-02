@@ -60,6 +60,9 @@ export interface AnalysisResult {
     brochure_required?: string;
     whatsapp_required?: string;
     email_required?: string;
+    // Post-visit feedback admission-confirmation fields.
+    admission_interest?: string;       // 'yes' | 'no' — caller agreed to proceed with admission
+    expected_joining_date?: string;    // when they plan to join (ISO date if a specific date given, else raw phrase)
   };
   /**
    * Extended lead status enum required by the admissions module spec.
@@ -218,7 +221,11 @@ async function callSarvamForAnalysis(systemPrompt: string, transcript: string): 
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Transcript:\n${transcript}` },
         ],
-        max_tokens: 1800,
+        // 1800 was too low: on longer transcripts sarvam-m exhausted the
+        // budget before closing the (large) CALL_RESULT JSON and returned
+        // empty content ("no JSON braces in response"). 4096 leaves room for
+        // the full key_entities block on a multi-minute call.
+        max_tokens: 4096,
         temperature: 0.2,
         // Disable Sarvam-M's <think> reasoning block — without these flags
         // the model wastes the entire max_tokens budget on internal reasoning
@@ -335,8 +342,10 @@ Return a STRICT JSON object — no prose, no code fences — with exactly these 
     "counselor_meeting_required": "" | "true" | "false",
     "brochure_required": "" | "true" | "false",
     "whatsapp_required": "" | "true" | "false",
-    "email_required": "" | "true" | "false"
-  },
+    "email_required": "" | "true" | "false",
+    // POST-VISIT FEEDBACK admission confirmation (only on feedback calls):
+    "admission_interest": "" | "yes" | "no" — "yes" if the caller agreed to proceed with admission at the college after the visit discussion,
+    "expected_joining_date": "" | the date/term the caller said they plan to join (ISO YYYY-MM-DD if a specific date was given; otherwise the raw phrase like "after results" / "next month" / "జూలై లో"),
   // Extended lead status — admissions module enum. Set this in addition to
   // lead_score/outcome. The post-call processor maps this to a CRM status
   // and uses it to decide what follow-up tasks to schedule.
@@ -483,6 +492,8 @@ Return ONLY the JSON object.`;
         brochure_required: asStr(data?.key_entities?.brochure_required),
         whatsapp_required: asStr(data?.key_entities?.whatsapp_required),
         email_required: asStr(data?.key_entities?.email_required),
+        admission_interest: asStr(data?.key_entities?.admission_interest),
+        expected_joining_date: asStr(data?.key_entities?.expected_joining_date),
       },
       lead_status: (asStr(data.lead_status) || '').toUpperCase() as AnalysisResult['lead_status'],
       confidence_score: Math.max(0, Math.min(1, parseFloat(String(data.confidence_score)) || 0)),
@@ -902,6 +913,47 @@ async function handleLinkedRecallLead(
         recommendedFollowUpTime: result.recommended_follow_up_time || null,
       });
     }
+    // 5. Visit Card: if the caller booked a campus visit on THIS call (a
+    //    date/time was captured), create a visit_schedules row so it appears in
+    //    /followups. Covers recall / brochure-follow-up calls that don't go
+    //    through the scheduler path (handleFollowupCallAutomation). Best-effort.
+    try {
+      const apptRaw = (ke as any).appointment_time || result.recommended_follow_up_time;
+      const when = parseFollowUpTime(apptRaw);
+      const notInterested = ['NOT_INTERESTED', 'LOST', 'UNQUALIFIED', 'WRONG_NUMBER', 'NO_ANSWER']
+        .includes(String(extendedStatus || '').toUpperCase());
+      if (when && !notInterested) {
+        const now = new Date();
+        let w = when;
+        if (when.getTime() < now.getTime()) {
+          w = new Date(when); w.setFullYear(now.getFullYear());
+          if (w.getTime() < now.getTime()) w.setFullYear(now.getFullYear() + 1);
+        }
+        const exists = await pool.query(
+          `SELECT id FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`,
+          [leadId],
+        );
+        if (exists.rows.length === 0) {
+          const y = w.getFullYear(), mo = String(w.getMonth() + 1).padStart(2, '0'), d = String(w.getDate()).padStart(2, '0');
+          const hh = String(w.getHours()).padStart(2, '0'), mm = String(w.getMinutes()).padStart(2, '0');
+          const rec = await pool.query(`SELECT recording_url FROM conversations WHERE id = $1 LIMIT 1`, [conversationId]);
+          await pool.query(
+            `INSERT INTO visit_schedules
+               (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, notes,
+                conversation_id, recording_url, call_summary)
+             VALUES ($1, $2, NULL, $3, $4, 'SCHEDULED', 'AI_CALL', $5, $6, $7, $8)`,
+            [tenantId, leadId, `${y}-${mo}-${d}`, `${hh}:${mm}`,
+             (result as any).short_summary?.slice(0, 300) || null, conversationId,
+             rec.rows[0]?.recording_url || null,
+             (result as any).detailed_summary || (result as any).short_summary || null],
+          );
+          console.info(`[analyzer] visit auto-created from linked call lead=${leadId} ${y}-${mo}-${d} ${hh}:${mm}`);
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[analyzer] linked-lead visit create failed: ${e?.message}`);
+    }
+
     console.info(`[analyzer] recall linked to existing lead=${leadId} (conv=${conversationId}, status=${extendedStatus}, interested=${interested})`);
   } catch (err: any) {
     console.warn(`[analyzer] handleLinkedRecallLead error: ${err?.message}`);

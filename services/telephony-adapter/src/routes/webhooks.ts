@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import pino from 'pino';
 import { randomBytes } from 'crypto';
+import { Pool } from 'pg';
 import { pool } from '../index';
 import { config } from '../config';
 import { cacheAudio } from './audio';
@@ -16,6 +17,56 @@ const logger = pino({
 });
 
 export const webhookRouter = Router();
+
+// CRM pool for matching an inbound caller to a lead (missed-call callback task).
+const MISSED_CRM_URL = process.env.CRM_DB_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/crm_db';
+let missedCrmPool: Pool | null = null;
+function getMissedCrmPool(): Pool {
+  if (!missedCrmPool) missedCrmPool = new Pool({ connectionString: MISSED_CRM_URL });
+  return missedCrmPool;
+}
+
+/**
+ * When an inbound call can't be served (no agent / not deployed / load fail), we
+ * play a warm "we'll call you back" message instead of an abrupt hangup, and —
+ * if the caller matches an existing lead — schedule a callback. We insert a
+ * `missed_inbound_call` followup_task (+15 min) which the follow-up scheduler
+ * dials back automatically. Best-effort, never throws. Unmatched callers are
+ * logged only (followup_tasks.lead_id is NOT NULL, so no task without a lead).
+ */
+async function recordMissedInbound(tenantId: string, from: string, to: string, reason: string): Promise<void> {
+  try {
+    const digits = String(from || '').replace(/\D/g, '').slice(-10);
+    if (digits.length < 10) { logger.info({ from, reason }, '[MISSED_INBOUND] no usable caller number — logged only'); return; }
+    let leadId: string | null = null;
+    let agentId: string | null = null;
+    try {
+      const r = await getMissedCrmPool().query(
+        `SELECT id, custom_fields->>'agent_id' AS agent_id FROM leads
+          WHERE right(regexp_replace(phone, '\\D', '', 'g'), 10) = $1
+          ORDER BY updated_at DESC LIMIT 1`,
+        [digits],
+      );
+      leadId = r.rows[0]?.id || null;
+      agentId = r.rows[0]?.agent_id || null;
+    } catch { /* CRM unreachable — fall through to log-only */ }
+    if (!leadId) { logger.info({ from, reason }, '[MISSED_INBOUND] no lead matched — logged only'); return; }
+    // Dedup: one open callback per lead.
+    const dup = await pool.query(
+      `SELECT id FROM followup_tasks WHERE lead_id = $1 AND type = 'missed_inbound_call' AND status IN ('PENDING','IN_PROGRESS') LIMIT 1`,
+      [leadId],
+    );
+    if (dup.rows.length > 0) { logger.info({ leadId }, '[MISSED_INBOUND] callback already queued — skip'); return; }
+    await pool.query(
+      `INSERT INTO followup_tasks (tenant_id, lead_id, agent_id, type, status, priority, scheduled_at, notes)
+       VALUES ($1, $2, $3::uuid, 'missed_inbound_call', 'PENDING', 8, NOW() + INTERVAL '15 minutes', $4)`,
+      [tenantId, leadId, agentId, `Missed inbound call from ${from} to ${to} (${reason}). Auto-callback scheduled.`],
+    );
+    logger.info({ tenantId, leadId, from, reason }, '[MISSED_INBOUND] callback task created (+15 min)');
+  } catch (e: any) {
+    logger.warn({ err: e?.message, from, reason }, 'recordMissedInbound failed');
+  }
+}
 
 /**
  * Synthesize text to an MP3 and cache it so Plivo/Twilio can fetch it via <Play>.
@@ -1117,8 +1168,9 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
       }
       if (!phoneRow.agent_id) {
         logger.info({ to: To, numberId: phoneRow.id }, '[INBOUND_NO_AGENT_ASSIGNED]');
+        await recordMissedInbound(phoneRow.tenant_id, From, To, 'no_agent_assigned').catch(() => {});
         res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response><Speak>Thank you for calling. No AI agent is assigned to this number yet. Please contact support.</Speak><Hangup/></Response>`);
+<Response><Speak>Thank you for calling our admissions team. Our counsellor will call you back shortly. Have a great day.</Speak><Hangup/></Response>`);
         return;
       }
       agentId = phoneRow.agent_id;
@@ -1223,14 +1275,16 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
 
     const agent = await loadAgent(agentId, tenantId, { numberId });
     if (!agent) {
+      if (isInboundCall) await recordMissedInbound(tenantId, From, To, 'agent_load_failed').catch(() => {});
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response><Speak>I could not load the assistant configuration. Goodbye.</Speak><Hangup/></Response>`);
+<Response><Speak>Thank you for calling our admissions team. Our counsellor will call you back shortly. Have a great day.</Speak><Hangup/></Response>`);
       return;
     }
     if (!isAgentLive(agent)) {
       logger.warn({ agentId, tenantId, status: agent.status }, 'Inbound call rejected — agent not deployed');
+      if (isInboundCall) await recordMissedInbound(tenantId, From, To, 'agent_not_deployed').catch(() => {});
       res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response><Speak>This assistant is not yet deployed. Please try again later.</Speak><Hangup/></Response>`);
+<Response><Speak>Thank you for calling our admissions team. Our counsellor will call you back shortly. Have a great day.</Speak><Hangup/></Response>`);
       return;
     }
 

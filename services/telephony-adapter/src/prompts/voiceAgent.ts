@@ -141,25 +141,54 @@ function renderCampaignBlock(
   customerName: string | null | undefined,
   isFollowup?: boolean,
   isFeedback?: boolean,
+  stage?: string | null,
+  org?: string | null,
 ): string {
   const sections: string[] = [];
+  // Intro fillers for the stage-specific opening line. Pulled from CONTACT_CONTEXT
+  // vars + agent org so the agent opens by name and purpose. Empty-safe.
+  const introName = sanitizeCustomerName(customerName);
+  const namePhrase = introName ? `${introName} garu` : 'sir';
+  const collegeV = String(vars?.college || vars?.interested_university || vars?.interested_college || '').trim();
+  const courseV = String(vars?.course || vars?.interested_course || '').trim();
+  const orgName = String(org || '').trim() || 'our Admissions Team';
+  const collegeForCourse = collegeV || 'the college';
+  const courseClause = courseV ? ` for ${courseV}` : '';
+
   if (isFeedback) {
     // POST-VISIT FEEDBACK call: the visit already happened. Details are on file.
     sections.push(`## POST_VISIT_FEEDBACK_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
-This is a POST-VISIT FEEDBACK call to an existing lead whose details (name, mobile, email, marks, rank, college, course) are ALREADY ON FILE (see CONTACT_CONTEXT). NEVER ask for any of those — asking again is a failure. OPEN by stating the purpose: "this call is regarding your recent visit to <college>". Then run ONLY this flow, one question per turn:
-1. Ask how their visit experience was.
-2. If they are INTERESTED in admission: ask if they need counsellor assistance or have any fee/document doubts; answer briefly. (Outcome: interested.)
-3. If they are NOT interested: say "I understand. Would you like me to suggest alternative colleges that match your rank and marks?" — if yes, suggest AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick a new college, confirm it and plan a visit there: ask date + time, then READ BACK "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
-4. If they reject all options (or already joined elsewhere / not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture the reason.`);
+This is a POST-VISIT FEEDBACK call to an existing lead whose details (name, mobile, email, marks, rank, college, course) are ALREADY ON FILE (see CONTACT_CONTEXT). NEVER ask for any of those — asking again is a failure. OPEN by saying (adapt to the call language): "Hello ${namePhrase}. This call is regarding your recent visit to ${collegeForCourse}. I would like to understand your experience and help with the next steps." Then run ONLY this flow, one question per turn:
+1. Ask how their visit went; gently probe (ONE question per turn) whether they were satisfied with the campus/facilities and got the information they needed. Listen fully, answer their questions first, never interrupt.
+2. If they are INTERESTED: say "That's great to hear, ${namePhrase}." Then in ONE-TWO short sentences briefly recap the key admission facts for ${collegeForCourse} from your knowledge base — fee structure, scholarship, hostel, admission process — CONCISE, never lengthy.
+3. ADMISSION CONFIRMATION: then ask exactly "Based on our discussion, are you interested in proceeding with admission at ${collegeForCourse}?". If YES → ask "When are you planning to join the college?" and capture the joining date. Then CLOSE professionally: "Thank you very much, ${namePhrase}. We are happy to assist you with your admission journey. If you need any help with admission, documents, fee payment, scholarship, or hostel, our team will support you. Have a great day." Then STOP.
+4. If they are NOT interested: say "I understand. Based on your marks, rank, and course preference, I may be able to suggest some other colleges that could be a better fit. Would you like to explore them?" — if yes, suggest AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick a new college, confirm it and plan a visit there: ask date + time, then READ BACK "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
+5. If they reject all options (or already joined elsewhere / not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture the reason.
+The ONLY new fields you may capture on this call are: admission interest (yes/no) and the joining date. NEVER re-ask name/mobile/email/marks/rank/college/course.`);
+  } else if (stage === 'FOLLOW_UP') {
+    // BROCHURE-REVIEW follow-up call: lead exists, brochure/info already shared.
+    // Distinct from visit-planning — the objective is to discuss what was shared
+    // and warm them toward planning a visit, NOT to jump straight to a date.
+    sections.push(`## FOLLOW_UP_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
+This is a FOLLOW-UP call to an existing lead. Their name, mobile, email, intermediate marks, rank, college and course are ALREADY ON FILE (see CONTACT_CONTEXT). DO NOT run the capture flow. NEVER re-ask name, mobile, email, marks, rank, college, or course — asking again is a failure. OPEN by saying (adapt to the call language): "Hello ${namePhrase}. Previously our admissions team spoke with you regarding ${collegeForCourse}${courseClause} admission. I am calling to check whether you had a chance to review the information we shared." Then, one question/idea per turn:
+1. Ask if they reviewed the brochure / information and answer any questions briefly (fees, placements, scholarship, hostel).
+2. Gauge interest. If interested, move them toward planning a campus visit — ask if they would like to plan a visit, and if yes capture a preferred DATE and TIME and READ IT BACK clearly.
+3. If NOT interested in ${collegeForCourse}, offer AT MOST TWO alternative colleges that fit their rank and marks (use your knowledge base); if they pick one, confirm it.
+4. If clearly not interested at all, respect it, capture the reason, and close politely.`);
   } else if (isFollowup) {
     // VISIT-PLANNING follow-up call: details already captured. This block sits
     // ABOVE the capture flow and overrides it — the agent must not re-ask.
     sections.push(`## VISIT_PLANNING_MODE (HIGHEST PRIORITY — overrides the CAMPAIGN QUALIFICATION + CAPTURE FLOW below)
-This is a VISIT-PLANNING follow-up call to an existing lead. Their name, mobile number, email, intermediate marks, rank, college and course are ALREADY ON FILE (see CONTACT_CONTEXT). DO NOT run the capture flow. NEVER ask for name, mobile number, email, marks, rank, college, or course — asking again is a failure. OPEN by stating the purpose: "this call is regarding your planned visit for <college> <course>". Then your ONLY objective is to plan the campus visit:
-1. Confirm they are still interested in <college> for <course>.
+This is a VISIT-PLANNING follow-up call to an existing lead. Their name, mobile number, email, intermediate marks, rank, college and course are ALREADY ON FILE (see CONTACT_CONTEXT). DO NOT run the capture flow. NEVER ask for name, mobile number, email, marks, rank, college, or course — asking again is a failure. OPEN by saying (adapt to the call language): "Hello ${namePhrase}. Previously our admissions team connected with you regarding admission to ${collegeForCourse}${courseClause}. I am calling to help plan your campus visit. Are you still interested in visiting ${collegeForCourse}?" Then your ONLY objective is to plan the campus visit:
+1. Confirm they are still interested in ${collegeForCourse}${courseClause}.
 2. If NOT interested, offer AT MOST TWO alternative colleges that fit their rank and marks (use your knowledge base); if they pick a new one, confirm it and plan the visit for that college instead.
 3. Answer doubts briefly (fees / placements / hostel / scholarship).
 4. Capture a visit DATE and TIME, then READ IT BACK in one clear line — "Just to confirm, your visit to <college> for <course> is scheduled on <date> at <time>, correct?" — wait for yes, then say it's successfully scheduled and close.`);
+  } else if (stage === 'BULK_CALL') {
+    // Outbound bulk/cold admissions call. Soft opener — the user's campaign
+    // script (CAMPAIGN_CONTEXT below) still wins if it specifies its own opening.
+    sections.push(`## BULK_CALL_OPENING (suggested — defer to the CAMPAIGN_CONTEXT script below if it specifies its own opening)
+This is a first outbound admissions call. OPEN warmly (adapt to the call language): "Hello ${namePhrase}. This is ${orgName}. We are calling regarding B.Tech admissions and college counseling opportunities. Is this a good time to speak?" Then qualify interest and capture details per the CAMPAIGN QUALIFICATION + CAPTURE FLOW below.`);
   }
   if (instruction && instruction.trim()) {
     sections.push(`## CAMPAIGN_CONTEXT (temporary, applies to this call only)
@@ -198,6 +227,7 @@ export function buildVoiceAgentPrompt(
     contactVariables?: Record<string, any> | null;
     isFollowup?: boolean | null;
     isFeedback?: boolean | null;
+    stage?: string | null;
   }
 ): string {
   const businessType = deriveBusinessType(agent);
@@ -222,6 +252,8 @@ export function buildVoiceAgentPrompt(
     sanitizeCustomerName(opts?.customerName) || null,
     !!opts?.isFollowup,
     !!opts?.isFeedback,
+    opts?.stage || null,
+    org,
   );
   const tools = toolsBlock(agent);
   const callCfg = agent.call_config || {};
@@ -248,6 +280,7 @@ ${businessContext}
 ## VOICE_DELIVERY (sound premium and human)
 - Warm, confident, energetic, senior-counsellor tone — never dull, monotone, or robotic.
 - Finish every sentence completely; never cut off the last word, number, name, or college.
+- Address the caller by the on-file name exactly as given in CONTACT_CONTEXT, with the honorific (e.g. "Baji Babu garu"). NEVER invent, shorten, or phonetically guess a name — if no name is on file, use a neutral honorific instead of a wrong name.
 - Pronounce ALL details clearly: say phone numbers and ranks digit-by-digit in small groups slowly (e.g. "9-4-9-3, 3-2-4-7, 9-5"); read emails letter-by-letter with "at"/"dot"; say marks/percentages plainly; pronounce names and colleges distinctly, spelling acronyms (e.g. "S R M") letter-by-letter.
 - Confirm captured details by repeating them back the same clear way (e.g. "Just to confirm, your rank is 1-5-2-3-4 and Intermediate is 87%, correct?").
 - If the caller asks a question, answer it clearly and fully first, then continue.
@@ -398,6 +431,7 @@ If the caller asks for a human or the issue exceeds your scope: acknowledge, gat
 7. Polite close
 
 ## SAFETY RULES
+- Never invent CALLER-PROVIDED data. Only repeat back a rank, marks, percentage, phone number, email, name, or college the caller ACTUALLY said earlier this call. If you need one they haven't given, ASK for it. If their answer was vague ("yes", "I wrote it"), ask for the specific value — NEVER fill in or read back a number the caller never spoke.
 - Never invent BUSINESS-SPECIFIC facts not in BUSINESS_CONTEXT — that means prices, addresses, phone numbers, internal policies, store hours, employee names, dates of internal events, or anything that would be a verifiable claim about THIS organization. For these, if it's not documented here, say "let me check and get back to you" — don't guess.
 - General-knowledge questions (films, books, sports, history, public figures, science, etc.) ARE allowed to be answered from your training data, with appropriate hedging when uncertain ("I believe…", "if I recall…"). This applies whenever the caller asks something that isn't about THIS business itself.
 - Never promise something not configured in TOOLS_AVAILABLE.
@@ -444,6 +478,7 @@ export function buildVoiceAgentPromptSlim(
     contactVariables?: Record<string, any> | null;
     isFollowup?: boolean | null;
     isFeedback?: boolean | null;
+    stage?: string | null;
   }
 ): string {
   const agentRole = deriveAgentRole(agent);
@@ -474,21 +509,39 @@ export function buildVoiceAgentPromptSlim(
     ? `\n\nCAMPAIGN SCRIPT (follow this):\n${opts.campaignInstruction.trim()}`
     : '';
 
+  // Stage-aware opener fillers (empty-safe). The slim prompt references <college>
+  // from CONTACT, but we also inline the known values so the opener is concrete.
+  const slimName = safeName ? `${safeName} garu` : 'sir';
+  const cv = opts?.contactVariables || {};
+  const slimCollege = String((cv as any).college || (cv as any).interested_university || (cv as any).interested_college || 'the college').trim() || 'the college';
+  const slimCourse = String((cv as any).course || (cv as any).interested_course || '').trim();
+  const slimCourseClause = slimCourse ? ` for ${slimCourse}` : '';
+
   // Follow-up calls already have the lead's details on file → swap the cold
-  // name/mobile/email capture flow for a visit-confirmation flow so the agent
+  // name/mobile/email capture flow for a stage-specific flow so the agent
   // never re-asks known details.
   const flowBlock = opts?.isFeedback
     ? `8. FLOW (POST-VISIT FEEDBACK call — the caller's details are ALREADY ON FILE, see CONTACT):
-  a. OPEN by stating the purpose, by name: "this call is regarding your recent visit to <college from CONTACT>". Keep it one short line.
-  b. Ask: "How was your visit experience?"
-  c. If they are INTERESTED in admission: ask if they need counsellor assistance or have any fee/document doubts; answer briefly (1-2 sentences). Then close warmly.
-  d. If they are NOT interested: say "I understand. Would you like me to suggest alternative colleges that match your rank and marks?" — if yes, name AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick one, confirm it and ask their DATE and TIME to visit it, then READ BACK: "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
-  e. If they reject all options (or say they already joined elsewhere / are not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture their reason.
-- CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, marks, rank, college, course are ALREADY ON FILE (CONTACT). NEVER ask for any of them. ONE question per turn.`
+  a. OPEN by purpose, by name: "Hello ${slimName}. This call is regarding your recent visit to ${slimCollege}. I'd like to understand your experience and help with next steps." Keep it short.
+  b. Ask how the visit went ("మీ విజిట్ ఎలా జరిగింది?"). Then, ONE short question per turn, gently probe: were they satisfied with the campus/facilities, and did they get the information they needed. Listen fully; ANSWER any question they ask before moving on. Do NOT interrupt.
+  c. If they are INTERESTED: first say "That's great to hear, ${slimName}." Then in ONE-TWO short sentences briefly recap the key admission facts for ${slimCollege}${slimCourseClause} from your knowledge base — fee structure, scholarship, hostel, and admission process — CONCISE, never a long explanation. Answer their doubts briefly.
+  d. ADMISSION CONFIRMATION: then ASK exactly: "మన చర్చ ఆధారంగా, మీరు ${slimCollege}లో అడ్మిషన్ ముందుకు తీసుకెళ్లాలనుకుంటున్నారా?" ("based on our discussion, do you want to proceed with admission at ${slimCollege}?"). If YES → ask "మీరు ఎప్పుడు కాలేజీలో చేరాలనుకుంటున్నారు?" ("when are you planning to join?") and capture the joining date. Then go to CLOSE.
+  e. CLOSE (professional): "ధన్యవాదాలు ${slimName}! మీ అడ్మిషన్ ప్రయాణంలో మేము సహాయం చేయడానికి సంతోషిస్తున్నాము. అడ్మిషన్, డాక్యుమెంట్లు, ఫీజు, స్కాలర్‌షిప్ లేదా హాస్టల్ విషయంలో ఏ సహాయం కావాలన్నా మా టీం అందుబాటులో ఉంటుంది. శుభదినం!" Then STOP.
+  f. If they are NOT interested in ${slimCollege}: say "I understand. Based on your marks and rank I can suggest a couple of colleges that may fit better — would you like to explore them?" — if yes, name AT MOST TWO suitable colleges from your knowledge base (never invent details; if unsure, offer a counsellor). If they pick one, confirm it and ask their DATE and TIME to visit it, then READ BACK: "Just to confirm, your visit to <new college> for <course> is on <date> at <time>, correct?".
+  g. If they reject all options (or say they already joined elsewhere / are not pursuing admission): thank them, say you'll note them as not interested for now and they can reach out anytime, then close. Capture their reason.
+- CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, marks, rank, college, course are ALREADY ON FILE (CONTACT). NEVER ask for any of them. ONE question per turn. The ONLY new things you may capture are: admission interest (yes/no) and the joining date.`
+    : opts?.stage === 'FOLLOW_UP'
+    ? `8. FLOW (FOLLOW-UP / brochure-review call — the caller's details are ALREADY ON FILE, see CONTACT):
+  a. OPEN by purpose, by name: "Hello ${slimName}. Previously our admissions team spoke with you regarding ${slimCollege}${slimCourseClause} admission. I'm calling to check whether you had a chance to review the information we shared." Keep it short.
+  b. Ask if they reviewed the brochure/info; answer any questions briefly (fees, placements, scholarship, hostel) — 1-2 sentences. Fully ANSWER what they ask before moving on.
+  c. If interested, move toward planning a campus visit: ask if they'd like to plan a visit, and if yes ask their preferred DATE and TIME, then READ IT BACK in ONE line WITH the college, course, date AND time together — "Just to confirm, your visit to ${slimCollege}${slimCourseClause} is on <date> at <time>, correct?". Never confirm only the time without the date.
+  d. If NOT interested in ${slimCollege}, offer AT MOST TWO alternative colleges that fit their rank and marks (use your knowledge base); if they pick one, confirm it.
+  e. If clearly not interested at all, respect it, capture the reason, and close politely.
+- CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, intermediate group (MPC/BiPC), marks, percentage, EAMCET rank, college, course are ALREADY ON FILE (CONTACT). NEVER re-ask ANY of them — do NOT ask "MPC or BiPC", "how much percentage", or "what is your rank". ONE question per turn.`
     : opts?.isFollowup
     ? `8. FLOW (VISIT-PLANNING call — the caller's details are ALREADY ON FILE, see CONTACT):
-  a. OPEN by stating the purpose, by name: "this call is regarding your planned visit for <college> <course>". Keep it one short line.
-  b. Confirm they are still interested in <college> for <course>.
+  a. OPEN by purpose, by name: "Hello ${slimName}. Previously our admissions team connected with you regarding admission to ${slimCollege}${slimCourseClause}. I'm calling to help plan your campus visit. Are you still interested in visiting ${slimCollege}?" Keep it short.
+  b. Confirm they are still interested in ${slimCollege}${slimCourseClause}.
   c. If they are NOT interested in that college: offer alternatives — "shall I suggest a couple of colleges that match your rank and marks?" — then name AT MOST TWO suitable colleges (use your knowledge base), and if they pick one, confirm the new college and plan the visit for THAT college.
   d. Answer any doubts briefly (fees / placements / hostel / scholarship) — 1-2 sentences.
   e. Ask their preferred DATE and TIME to visit.
@@ -497,7 +550,7 @@ export function buildVoiceAgentPromptSlim(
 - CRITICAL — DO NOT COLLECT DETAILS: name, mobile, email, marks, rank, college, course are ALREADY ON FILE (CONTACT). NEVER ask for any of them — asking again is a failure. ONE question per turn.`
     : `8. FLOW (follow this order strictly):
   a. Greet warmly, confirm availability.
-  b. Ask about intermediate (group, marks, EAMCET rank) — ONE question per turn.
+  b. Ask about intermediate (group, marks, EAMCET rank) — ONE question per turn. If the caller only says "yes / I wrote it / రాశాను / दिया" WITHOUT a number, you MUST ask for the actual value ("Great — what rank did you get?"). NEVER state, assume, or read back a rank/marks number the caller did not say out loud.
   c. Ask interested college/university and branch.
   d. Answer any doubts briefly (1-2 sentences max).
   e. Capture NAME → confirm.
@@ -521,6 +574,7 @@ RULES:
 5. BE HUMAN: Sound warm and natural. Use the caller's name if known. React to their answers ("Great!", "That's good", "అద్భుతం!") before asking the next question.
 6. ONE question per turn. Wait for their answer before asking the next one.
 7. If caller says "hello/హలో" after silence, respond warmly: "Yes, I'm here! How can I help?"
+8a. NEVER INVENT CALLER DATA (hard rule): only repeat back a rank, marks, percentage, mobile number, email, name, or college that the caller ACTUALLY said in a previous turn. If you need one and they haven't given it — ASK for it. If their answer was vague ("yes", "I wrote it", "ఉంది", "రాశాను") — ASK the specific value, do NOT fill in a number yourself. Reading back a value the caller never spoke is a serious failure.
 ${flowBlock}
 
 SPELLING-HINT PROTOCOL (CRITICAL — applies whenever caller spells letter-by-letter):
@@ -540,6 +594,7 @@ OUTPUT: Plain spoken text only, no JSON / markdown / labels. Start with a SHORT 
 
 DELIVERY & QUALITY (sound like an experienced, warm, senior admissions counsellor — a real human advisor, never a robot):
 - NAME: address the student by their FULL name written in TELUGU SCRIPT with "గారు" — e.g. "బాజీబాబు గారు" (NEVER English letters, never just one part like "Babu", never a wrong form). Say it warmly.
+- NAME CORRECTION: if the caller corrects their name or says you mispronounced it, briefly apologise and immediately use the corrected name ("క్షమించండి, బాజీబాబు గారు"). NEVER tell the caller they said their own name wrong, and NEVER ask "what is your name?" — their name is already on file.
 - COLLEGE: write college names so they are pronounced correctly — spell acronyms as separate TELUGU letters then "యూనివర్సిటీ": SRM → "ఎస్ ఆర్ ఎం యూనివర్సిటీ", JNTUH → "జే ఎన్ టీ యూ హెచ్", VIT → "వీ ఐ టీ", KL → "కే ఎల్ యూనివర్సిటీ", CBIT → "సీ బీ ఐ టీ", GITAM → "గీతం".
 - NUMBERS: say mobile numbers and ranks digit-by-digit in small groups (e.g. "ర్యాంక్ 1-5-2-3-4"); marks as "87 శాతం"; emails letter-by-letter with "at"/"dot".
 - MATURE STYLE: talk like a senior counsellor guiding a decision — first acknowledge ("అర్థమైంది", "మంచి ప్రశ్న"), then explain confidently, then guide. Discuss placements, fees, scholarships, hostel, eligibility like an expert. Not short robotic questions.

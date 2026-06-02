@@ -17,6 +17,7 @@
  * the campaign worker uses, so recordings/analyzer/CRM-retry all flow
  * through their existing pipelines.
  */
+import { Pool } from 'pg';
 import { pool } from '../index';
 import { config } from '../config';
 import { sendWhatsApp, sendSms } from './communications';
@@ -25,6 +26,66 @@ const logger = {
   info: (...a: any[]) => console.info('[recall]', ...a),
   warn: (...a: any[]) => console.warn('[recall]', ...a),
 };
+
+// Recall dials are brochure follow-ups. Build the same flow-aware overlay the
+// followup scheduler sends so the call opens as a FOLLOW_UP (knows name/college/
+// course, references the brochure) instead of running the cold capture flow.
+const CRM_DB_URL = process.env.CRM_DB_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/crm_db';
+let recallCrmPool: Pool | null = null;
+function getRecallCrmPool(): Pool {
+  if (!recallCrmPool) recallCrmPool = new Pool({ connectionString: CRM_DB_URL });
+  return recallCrmPool;
+}
+
+/**
+ * Build flow-aware call metadata for a recall (brochure follow-up) dial.
+ * Best-effort — on any failure returns {} so the dial still proceeds exactly as
+ * before. Does NOT change lead_id/recall flags; only ADDS overlay fields.
+ */
+async function buildRecallOverlay(tenantId: string, leadId: string): Promise<Record<string, any>> {
+  try {
+    const r = await getRecallCrmPool().query(`SELECT * FROM leads WHERE id = $1 LIMIT 1`, [leadId]);
+    const lead = r.rows[0];
+    if (!lead) return {};
+    const cf = (lead.custom_fields || {}) as Record<string, any>;
+    const studentName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+    const college = cf.interested_university || cf.interested_college || '';
+    const course = cf.interested_course || '';
+    const branch = cf.interested_branch || '';
+    const collegeSpoken = String(college).replace(/\b([A-Z]{2,5})\b/g, (a: string) => a.split('').join(' '));
+    const known = [
+      studentName && `Student name: ${studentName}`,
+      lead.phone && `Mobile number: ${lead.phone}`,
+      lead.email && `Email: ${lead.email}`,
+      college && `Interested college: ${college}`,
+      course && `Interested course: ${course}`,
+      branch && `Interested branch: ${branch}`,
+      cf.eamcet_rank && `EAMCET rank: ${cf.eamcet_rank}`,
+      cf.intermediate_marks && `Intermediate marks: ${cf.intermediate_marks}`,
+    ].filter(Boolean).join('. ');
+    const brochureHist = cf.brochure_sent_at
+      ? ` JOURNEY HISTORY (reference naturally, do NOT re-collect) — Brochure already sent on ${String(cf.brochure_sent_at).slice(0, 10)}${Array.isArray(cf.brochure_sent_channels) && cf.brochure_sent_channels.length ? ` via ${cf.brochure_sent_channels.join('/')}` : ''}.`
+      : '';
+    const pron = college && collegeSpoken !== college
+      ? ` PRONUNCIATION: when saying the college name "${college}", say the acronym slowly letter-by-letter (like "${collegeSpoken}").`
+      : '';
+    const directive = `This is a FOLLOW-UP call to ${studentName || 'the student'} who previously showed interest in ${college || 'the college'}${course ? ` for ${course}` : ''}${branch ? ` (${branch})` : ''}. You already know the details below — DO NOT re-ask name, mobile, email, marks, rank, college or course. Open by saying our team previously spoke with them and you're checking whether they reviewed the brochure/information we shared. Answer questions briefly (fees/placements/scholarship/hostel). If interested, move them toward planning a campus visit and capture a preferred date and time. If NOT interested in ${college || 'that college'}, offer one or two alternative colleges from your knowledge base that fit their rank${cf.eamcet_rank ? ` (${cf.eamcet_rank})` : ''} and marks. If clearly not interested, capture the reason and close politely.`;
+    return {
+      is_followup: true,
+      followup_type: 'brochure_followup',
+      target_name: studentName || null,
+      campaign_instruction: `${directive}${known ? ` Known details — ${known}.` : ''}${brochureHist}${pron}`,
+      vars: {
+        name: studentName, college, college_spoken: collegeSpoken, course, branch,
+        mobile: lead.phone || '', email: lead.email || '',
+        ...(cf.brochure_sent_at ? { brochure_sent_at: String(cf.brochure_sent_at).slice(0, 10) } : {}),
+      },
+    };
+  } catch (err: any) {
+    logger.warn(`buildRecallOverlay failed for lead ${leadId}: ${err?.message || err}`);
+    return {};
+  }
+}
 
 const TICK_MS = 60_000;
 const BUSINESS_START_HOUR = 9;   // 9 AM IST
@@ -240,6 +301,10 @@ async function dispatchDial(row: any, nextCount: number): Promise<void> {
   );
 
   const telephonyUrl = process.env.TELEPHONY_SERVICE_URL || 'http://localhost:3002';
+  // Build the flow-aware overlay so this brochure-follow-up dial opens as a
+  // FOLLOW_UP (knows the lead, references the brochure) rather than the cold
+  // capture flow. Best-effort: {} on failure keeps the prior bare metadata.
+  const overlay = await buildRecallOverlay(row.tenant_id, row.lead_id);
   let dialOk = false;
   let dialErr = '';
   try {
@@ -249,7 +314,9 @@ async function dispatchDial(row: any, nextCount: number): Promise<void> {
       // Thread the existing lead_id through call metadata so the recall
       // conversation links to THIS lead (analyzer's linked-lead path) instead
       // of spawning a duplicate. `recall: true` marks the call's origin.
-      body: JSON.stringify({ to: row.phone_number, agent_id: agentId, metadata: { lead_id: row.lead_id, recall: true } }),
+      // The overlay ADDS flow-awareness fields (is_followup/vars/instruction);
+      // lead_id + recall remain untouched so post-call linking is unaffected.
+      body: JSON.stringify({ to: row.phone_number, agent_id: agentId, metadata: { lead_id: row.lead_id, recall: true, ...overlay } }),
     });
     if (!resp.ok) dialErr = (await resp.text().catch(() => '')).slice(0, 300);
     else dialOk = true;

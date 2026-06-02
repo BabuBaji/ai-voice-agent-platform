@@ -303,16 +303,28 @@ async def analyze_transcript(request: Request):
             if start >= 0 and end > start:
                 cleaned = cleaned[start : end + 1]
             parsed = json.loads(cleaned)
-            # Normalize
-            return {
-                "summary": str(parsed.get("summary", ""))[:2000],
-                "sentiment": str(parsed.get("sentiment", "NEUTRAL")).upper(),
-                "interest_level": max(0, min(100, int(parsed.get("interest_level", 50)))),
-                "topics": [str(x) for x in (parsed.get("topics") or [])][:10],
-                "follow_ups": [str(x) for x in (parsed.get("follow_ups") or [])][:10],
-                "key_points": [str(x) for x in (parsed.get("key_points") or [])][:10],
-                "outcome": str(parsed.get("outcome", "Information Inquiry"))[:100],
-            }
+            if not isinstance(parsed, dict):
+                raise ValueError("analysis JSON is not an object")
+            # Pass through the FULL parsed object so the rich CALL_RESULT fields
+            # the caller's system_prompt asks for (key_entities, lead_score,
+            # short_summary, conversation_quality, …) survive. Previously this
+            # rebuilt the response from only the 7 legacy keys, silently dropping
+            # key_entities etc. — which made the conversation-service treat the
+            # response as a heuristic fallback and lose all structured extraction.
+            # We only normalize the legacy keys to guarantee their presence/type;
+            # everything else is preserved as the LLM emitted it.
+            normalized = dict(parsed)
+            normalized["summary"] = str(parsed.get("summary", ""))[:2000]
+            normalized["sentiment"] = str(parsed.get("sentiment", "NEUTRAL")).upper()
+            try:
+                normalized["interest_level"] = max(0, min(100, int(parsed.get("interest_level", 50))))
+            except (TypeError, ValueError):
+                normalized["interest_level"] = 50
+            normalized["topics"] = [str(x) for x in (parsed.get("topics") or [])][:10]
+            normalized["follow_ups"] = [str(x) for x in (parsed.get("follow_ups") or [])][:10]
+            normalized["key_points"] = [str(x) for x in (parsed.get("key_points") or [])][:10]
+            normalized["outcome"] = str(parsed.get("outcome", "Information Inquiry"))[:100]
+            return normalized
         except Exception as e:
             logger.warn("analyze_parse_failed", error=str(e))
 

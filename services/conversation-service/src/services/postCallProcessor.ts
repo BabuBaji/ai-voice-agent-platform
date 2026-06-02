@@ -35,6 +35,68 @@ const PROCESSOR_VERSION = 'v1';
  * with the failure reason so the team can spot calls that didn't make
  * it through. Never throws to the caller.
  */
+/** Bump a parsed visit date into the future when the model emitted a stale year
+ *  (e.g. "2023-06-12" on a 2026 call). Keeps month/day/time; sets the year to
+ *  the current year, and rolls to next year if that date already passed. */
+function clampVisitToFuture(d: Date): Date {
+  const now = new Date();
+  if (d.getTime() >= now.getTime()) return d;
+  const bumped = new Date(d);
+  bumped.setFullYear(now.getFullYear());
+  if (bumped.getTime() < now.getTime()) bumped.setFullYear(now.getFullYear() + 1);
+  return bumped;
+}
+
+/** Additive Visit-Card creation for ANY lead-linked call (recall, brochure
+ *  follow-up, bulk, inbound) that captured an appointment but did NOT come
+ *  through the follow-up scheduler (no followup_task_id). The scheduler path is
+ *  handled by handleFollowupCallAutomation; this covers the rest so a visit
+ *  booked on any call appears in /followups. Best-effort, never throws. */
+async function maybeCreateVisitForLinkedLead(
+  conversationId: string, tenantId: string, analysis: AnalysisResult,
+  callId: string | null, leadId: string,
+): Promise<void> {
+  try {
+    const ke: any = analysis.key_entities || {};
+    const callOutcome = String(analysis.call_outcome || (analysis as any).outcome || '').toLowerCase();
+    const leadStatusUp = String((analysis as any).lead_status || '').toUpperCase();
+    // Never create on a clear rejection / non-contact.
+    if (callOutcome.includes('not interested')
+      || ['NOT_INTERESTED', 'LOST', 'UNQUALIFIED', 'WRONG_NUMBER', 'NO_ANSWER'].includes(leadStatusUp)) return;
+    const apptRaw = ke.appointment_time || (analysis as any).appointment_time || analysis.recommended_follow_up_time;
+    const parsed = parseFollowUpTimeLocal(apptRaw);
+    if (!parsed) return;
+    const visitWhen = clampVisitToFuture(parsed);
+    // De-dupe: skip if the lead already has an open visit.
+    const existing = await pool.query(
+      `SELECT id FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`,
+      [leadId],
+    );
+    if (existing.rows.length > 0) return;
+    const y = visitWhen.getFullYear();
+    const mo = String(visitWhen.getMonth() + 1).padStart(2, '0');
+    const d = String(visitWhen.getDate()).padStart(2, '0');
+    const hh = String(visitWhen.getHours()).padStart(2, '0');
+    const mm = String(visitWhen.getMinutes()).padStart(2, '0');
+    const rec = await pool.query(`SELECT recording_url FROM conversations WHERE id = $1 LIMIT 1`, [conversationId]);
+    const recordingUrl = rec.rows[0]?.recording_url || null;
+    const callSummary = (analysis as any).detailed_summary || (analysis as any).short_summary || null;
+    await pool.query(
+      `INSERT INTO visit_schedules
+         (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, visitor_type, notes,
+          conversation_id, confirmation_call_id, recording_url, call_summary)
+       VALUES ($1, $2, NULL, $3, $4, 'SCHEDULED', 'AI_CALL', $5, $6, $7::uuid, $8, $9, $10)`,
+      [tenantId, leadId, `${y}-${mo}-${d}`, `${hh}:${mm}`,
+       ke.visitor_type || null, (analysis as any).short_summary?.slice(0, 300) || null,
+       conversationId, callId, recordingUrl, callSummary],
+    );
+    await updateLeadPipeline(tenantId, leadId, 'VISIT_SCHEDULED').catch(() => {});
+    logger.info({ conv: conversationId, lead: leadId, visit_date: `${y}-${mo}-${d}` }, 'visit auto-created from lead-linked call (no task)');
+  } catch (err: any) {
+    logger.warn({ conv: conversationId, err: err?.message }, 'maybeCreateVisitForLinkedLead failed');
+  }
+}
+
 export async function processCallEnd(
   conversationId: string,
   tenantId: string,
@@ -121,6 +183,11 @@ export async function processCallEnd(
   if (followupTaskId) {
     await handleFollowupCallAutomation(conversationId, tenantId, analysis!, followupTaskId, callId)
       .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'follow-up automation hook failed'));
+  } else if (crmLeadId) {
+    // Non-scheduler call (recall / brochure follow-up / bulk / inbound) that
+    // still booked a visit for a known lead → create the Visit Card too.
+    await maybeCreateVisitForLinkedLead(conversationId, tenantId, analysis!, callId, crmLeadId)
+      .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'linked-lead visit hook failed'));
   }
 
   // Fire the WhatsApp workflow for the resolved lead_status. Best-effort —
@@ -147,7 +214,9 @@ export async function runFollowupAutomation(
 ): Promise<void> {
   try {
     const r = await pool.query(
-      `SELECT ca.id::text AS call_id, ca.metadata->>'followup_task_id' AS followup_task_id
+      `SELECT ca.id::text AS call_id,
+              ca.metadata->>'followup_task_id' AS followup_task_id,
+              c.analysis->>'crm_lead_id' AS lead_id
          FROM conversations c
          LEFT JOIN calls ca ON ca.conversation_id = c.id
         WHERE c.id = $1 AND c.tenant_id = $2
@@ -155,8 +224,15 @@ export async function runFollowupAutomation(
       [conversationId, tenantId],
     );
     const followupTaskId = r.rows[0]?.followup_task_id || null;
-    if (!followupTaskId) return;
-    await handleFollowupCallAutomation(conversationId, tenantId, analysis, followupTaskId, r.rows[0]?.call_id || null);
+    const callId = r.rows[0]?.call_id || null;
+    const leadId = r.rows[0]?.lead_id || null;
+    if (followupTaskId) {
+      await handleFollowupCallAutomation(conversationId, tenantId, analysis, followupTaskId, callId);
+    } else if (leadId) {
+      // Non-scheduler call that booked a visit for a known lead → create the
+      // Visit Card so it appears in /followups (recall / brochure / bulk / inbound).
+      await maybeCreateVisitForLinkedLead(conversationId, tenantId, analysis, callId, leadId);
+    }
   } catch (e: any) {
     logger.warn({ conv: conversationId, err: e?.message }, 'runFollowupAutomation failed');
   }
@@ -208,7 +284,8 @@ async function handleFollowupCallAutomation(
 
   // 2. AI-extracted visit → create a visit_schedules row (when a date/time was captured).
   const apptRaw = ke.appointment_time || (analysis as any).appointment_time || analysis.recommended_follow_up_time;
-  const visitWhen = parseFollowUpTimeLocal(apptRaw);
+  const visitWhenRaw = parseFollowUpTimeLocal(apptRaw);
+  const visitWhen = visitWhenRaw ? clampVisitToFuture(visitWhenRaw) : null;
   // Relaxed gate: on a visit-planning follow-up call (already gated by
   // followup_task_id, and excluded for feedback calls), create the Visit Card
   // whenever a parseable date/time was captured — the old keyword gate
@@ -348,7 +425,24 @@ async function handleFollowupCallAutomation(
       await markLeadNotInterested(task.tenant_id, task.lead_id, 'FEEDBACK', rejectionReason || feedbackReason);
       logger.info({ conv: conversationId, lead: task.lead_id, rejectionReason }, 'post-visit feedback: lead NOT_INTERESTED — automation stopped');
     } else {
-      await updateLeadPipeline(task.tenant_id, task.lead_id, interestLevel >= 80 ? 'ADMISSION_READY' : 'FEEDBACK_COLLECTED');
+      // Interested (not alternative, not rejected). If the caller confirmed they
+      // want to proceed with admission, mark ADMISSION_INTERESTED (additive
+      // alias) and capture the expected joining date. Otherwise keep the
+      // existing ADMISSION_READY / FEEDBACK_COLLECTED behaviour unchanged.
+      const ai = String(ke.admission_interest || '').toLowerCase();
+      const admissionYes = ai === 'true' || ai === 'yes' || interestLevel >= 75;
+      const joiningDate = String(ke.expected_joining_date || '').trim();
+      if (admissionYes) {
+        await updateLeadFields(task.tenant_id, task.lead_id, {
+          admission_interest: 'yes',
+          expected_joining_date: joiningDate || undefined,
+          extended_lead_status: 'ADMISSION_INTERESTED',
+        });
+        await updateLeadPipeline(task.tenant_id, task.lead_id, 'ADMISSION_INTERESTED');
+        logger.info({ conv: conversationId, lead: task.lead_id, joiningDate }, 'post-visit feedback: ADMISSION_INTERESTED + joining date captured');
+      } else {
+        await updateLeadPipeline(task.tenant_id, task.lead_id, interestLevel >= 80 ? 'ADMISSION_READY' : 'FEEDBACK_COLLECTED');
+      }
     }
     logger.info({ conv: conversationId, lead: task.lead_id, finalStatus }, 'post-visit feedback stored');
   } else if (!rejectedNow) {

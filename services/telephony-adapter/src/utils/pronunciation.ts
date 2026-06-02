@@ -36,10 +36,11 @@ export const PRONUNCIATION_OVERRIDES: Record<string, string> = {
  * college/board acronyms even when they happen to look pronounceable.
  */
 const FORCE_SPELL = new Set([
-  'SRM', 'JNTUH', 'JNTU', 'JNTUK', 'JNTUA', 'KL', 'VIT', 'CBIT', 'BITS',
-  'NIT', 'IIT', 'IIIT', 'NITW', 'GITAM', 'SVU', 'OU', 'AU', 'KLU',
+  'SRM', 'SRMAP', 'JNTUH', 'JNTU', 'JNTUK', 'JNTUA', 'KL', 'KLEF', 'VIT', 'VITAP',
+  'CBIT', 'BITS', 'NIT', 'IIT', 'IIIT', 'NITW', 'GITAM', 'SVU', 'OU', 'AU', 'ANU',
+  'KLU', 'MRU', 'MGIT', 'VNR', 'CVR', 'BVRIT', 'GRIET', 'VVIT', 'SNIST',
   'EAMCET', 'EAPCET', 'ECET', 'ICET', 'NEET', 'JEE', 'GATE',
-  'CSE', 'ECE', 'EEE', 'MEC', 'CEC', 'MPC', 'BIPC',
+  'CSE', 'AIML', 'ECE', 'EEE', 'MEC', 'CEC', 'MPC', 'BIPC',
   'MBA', 'MCA', 'BCA', 'BBA', 'MBBS', 'BDS',
 ]);
 
@@ -59,6 +60,46 @@ function spellOut(token: string): string {
 }
 
 /**
+ * Native-script letter names so an Indic TTS engine (Sarvam bulbul:v2) speaks
+ * an acronym clearly. On a Telugu call, the Latin spaced form "S R M" is read
+ * as a garbled English blur; the Telugu letters "ఎస్ ఆర్ ఎం" are read crisply.
+ */
+const INDIC_LETTER_NAMES: Record<string, Record<string, string>> = {
+  te: {
+    A: 'ఏ', B: 'బీ', C: 'సీ', D: 'డీ', E: 'ఈ', F: 'ఎఫ్', G: 'జీ', H: 'హెచ్',
+    I: 'ఐ', J: 'జే', K: 'కే', L: 'ఎల్', M: 'ఎం', N: 'ఎన్', O: 'ఓ', P: 'పీ',
+    Q: 'క్యూ', R: 'ఆర్', S: 'ఎస్', T: 'టీ', U: 'యూ', V: 'వీ', W: 'డబ్ల్యూ',
+    X: 'ఎక్స్', Y: 'వై', Z: 'జెడ్',
+  },
+  hi: {
+    A: 'ए', B: 'बी', C: 'सी', D: 'डी', E: 'ई', F: 'एफ', G: 'जी', H: 'एच',
+    I: 'आई', J: 'जे', K: 'के', L: 'एल', M: 'एम', N: 'एन', O: 'ओ', P: 'पी',
+    Q: 'क्यू', R: 'आर', S: 'एस', T: 'टी', U: 'यू', V: 'वी', W: 'डब्ल्यू',
+    X: 'एक्स', Y: 'वाई', Z: 'ज़ेड',
+  },
+};
+
+/** Whole-acronym native words that are spoken as a word, not letter-by-letter. */
+const INDIC_ACRONYM_WORDS: Record<string, Record<string, string>> = {
+  te: { EAMCET: 'ఎంసెట్', EAPCET: 'ఎప్ సెట్', NEET: 'నీట్', GATE: 'గేట్' },
+  hi: { EAMCET: 'एमसेट', NEET: 'नीट', GATE: 'गेट' },
+};
+
+/** Spell a token in the call's script when Indic, else Latin spaced form. */
+function spellOutForLang(token: string, language?: string | null): string {
+  const lang2 = String(language || '').toLowerCase().slice(0, 2);
+  const up = token.toUpperCase();
+  const words = INDIC_ACRONYM_WORDS[lang2];
+  if (words && words[up]) return words[up];
+  const letters = INDIC_LETTER_NAMES[lang2];
+  if (letters) {
+    const mapped = up.split('').map((ch) => letters[ch] || ch);
+    return mapped.join(' ');
+  }
+  return spellOut(token);
+}
+
+/**
  * Normalize a sanitized reply string for clearer TTS pronunciation.
  *
  * @param text     The TTS-bound reply (already run through sanitizeForTts).
@@ -68,6 +109,13 @@ function spellOut(token: string): string {
  */
 export function normalizePronunciation(text: string, _language?: string | null): string {
   if (!text) return text;
+
+  // Collapse dotted abbreviations written in Indic script ("సి.ఎస్.ఈ." →
+  // "సిఎస్ఈ"). A period BETWEEN two Indic letters (no space) is never a
+  // sentence boundary — it's an abbreviation, and the dots make Sarvam's TTS
+  // stutter/break. Safe: real sentence ends have a space or end-of-string after
+  // the period, so they don't match the lookahead.
+  text = text.replace(/([ऀ-෿])\.(?=[ऀ-෿])/gu, '$1');
 
   // Split on whitespace but KEEP the whitespace so we can rejoin verbatim and
   // not collapse intentional spacing.
@@ -98,8 +146,11 @@ export function normalizePronunciation(text: string, _language?: string | null):
     }
 
     // 2. Force-spell known acronyms (case-insensitive match on the bare core).
+    //    On an Indic call these are spelled in the call's own script so the
+    //    Indic TTS says them crisply ("SRM" → "ఎస్ ఆర్ ఎం"); on English calls
+    //    they stay the Latin spaced form ("S R M").
     if (FORCE_SPELL.has(core.toUpperCase())) {
-      parts[i] = lead + spellOut(core) + trail;
+      parts[i] = lead + spellOutForLang(core, _language) + trail;
       continue;
     }
 
@@ -107,7 +158,7 @@ export function normalizePronunciation(text: string, _language?: string | null):
     //    real word. Requires the ORIGINAL token to be all-caps (so "Srm" typed
     //    in mixed case is left alone — only shouted acronyms are spelled).
     if (/^[A-Z]{2,6}$/.test(core) && !NOT_ACRONYM.has(core)) {
-      parts[i] = lead + spellOut(core) + trail;
+      parts[i] = lead + spellOutForLang(core, _language) + trail;
       continue;
     }
   }

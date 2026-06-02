@@ -27,6 +27,7 @@ import fs from 'fs';
 import path from 'path';
 import { WebSocketServer, WebSocket, RawData } from 'ws';
 import pino from 'pino';
+import { Pool } from 'pg';
 import { pool } from '../index';
 import { config } from '../config';
 import { buildVoiceAgentPrompt, buildVoiceAgentPromptSlim } from '../prompts/voiceAgent';
@@ -246,6 +247,90 @@ export function normalizeLanguageCode(raw: string | null | undefined): string | 
     urdu: 'ur-IN', ur: 'ur-IN',
   };
   return NAME_TO_CODE[s] || null;
+}
+
+/**
+ * Transliterate Latin-script strings (name, college) into the call's Indic
+ * script via Sarvam's transliteration API, so the Indic TTS pronounces them
+ * natively. "Baji Babu" on a Telugu call was read as "OG Babu" because the
+ * Latin letters confuse Sarvam's Telugu TTS; "బాజీ బాబు" is read correctly.
+ * Best-effort + parallel: any failure yields null and the caller keeps the
+ * original Latin string. Skips inputs with no Latin letters (already native).
+ */
+async function transliterateToIndic(texts: string[], targetLang: string): Promise<(string | null)[]> {
+  const key = process.env.SARVAM_API_KEY;
+  if (!key) return texts.map(() => null);
+  return Promise.all(
+    texts.map(async (t): Promise<string | null> => {
+      const s = String(t || '').trim();
+      if (!s || !/[A-Za-z]/.test(s)) return null;
+      try {
+        const resp = await fetch('https://api.sarvam.ai/transliterate', {
+          method: 'POST',
+          headers: { 'api-subscription-key': key, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            input: s,
+            source_language_code: 'en-IN',
+            target_language_code: targetLang,
+            spoken_form: true,
+          }),
+        });
+        if (!resp.ok) return null;
+        const j: any = await resp.json();
+        const out = String(j?.transliterated_text || '').trim();
+        return out || null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+}
+
+// CRM pool (crm_db) for inbound lead lookup — separate from the conversation_db
+// `pool`. Lazily created; mirrors the scheduler services' getCrmPool pattern.
+const CRM_DB_URL = process.env.CRM_DB_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/crm_db';
+let inboundCrmPool: Pool | null = null;
+function getInboundCrmPool(): Pool {
+  if (!inboundCrmPool) inboundCrmPool = new Pool({ connectionString: CRM_DB_URL });
+  return inboundCrmPool;
+}
+
+/**
+ * Find the most relevant existing CRM lead for an inbound caller by phone
+ * (last-10-digits match). Prefers real leads over placeholder NEEDS_REVIEW
+ * rows, newest first. Best-effort — returns null on any failure.
+ */
+async function lookupLeadByPhone(phone: string): Promise<any | null> {
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length < 10) return null;
+  try {
+    const r = await getInboundCrmPool().query(
+      `SELECT id, first_name, last_name, email, phone, status, custom_fields
+         FROM leads
+        WHERE right(regexp_replace(phone, '\\D', '', 'g'), 10) = $1
+        ORDER BY (status = 'NEEDS_REVIEW') ASC,
+                 (COALESCE(custom_fields->>'interested_university', custom_fields->>'interested_college', '') <> '') DESC,
+                 updated_at DESC
+        LIMIT 1`,
+      [digits],
+    );
+    return r.rows[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Derive the caller's current admission stage from their lead's custom_fields,
+ *  for an inbound stage-aware greeting. */
+function deriveInboundStage(cf: Record<string, any>): 'VISIT_PLANNING' | 'POST_VISIT_FEEDBACK' | 'ADMISSION_INTERESTED' | 'NOT_INTERESTED' | 'BROCHURE_SENT' | 'NEW_CALLER' {
+  const ps = String(cf?.pipeline_stage || '').toUpperCase();
+  const ext = String(cf?.extended_lead_status || '').toUpperCase();
+  if (ps === 'NOT_INTERESTED' || ext === 'NOT_INTERESTED') return 'NOT_INTERESTED';
+  if (ext === 'ADMISSION_INTERESTED' || ps === 'ADMISSION_INTERESTED' || ps === 'ADMISSION_READY') return 'ADMISSION_INTERESTED';
+  if (ps === 'VISITED' || ps === 'FEEDBACK_COLLECTED' || ps.includes('FEEDBACK')) return 'POST_VISIT_FEEDBACK';
+  if (ps === 'VISIT_SCHEDULED' || ps === 'ALTERNATIVE_COLLEGE_INTERESTED') return 'VISIT_PLANNING';
+  if (String(cf?.brochure_sent || '') === 'true' || ps.includes('BROCHURE')) return 'BROCHURE_SENT';
+  return 'NEW_CALLER';
 }
 
 async function loadAgent(
@@ -1128,6 +1213,7 @@ async function callLLM(
     contactVariables: campaignContext?.variables || null,
     isFollowup: !!(campaignContext as any)?.isFollowup,
     isFeedback: !!(campaignContext as any)?.isFeedback,
+    stage: (campaignContext as any)?.stage || null,
   });
 
   // Latency optimization 2: trim history to the last 14 turns. Sarvam-M is
@@ -1153,6 +1239,7 @@ async function callLLM(
       contactVariables: campaignContext?.variables || null,
       isFollowup: !!(campaignContext as any)?.isFollowup,
     isFeedback: !!(campaignContext as any)?.isFeedback,
+    stage: (campaignContext as any)?.stage || null,
     });
     const sarvamHistory = trimmedHistory.length > 10 ? trimmedHistory.slice(-10) : trimmedHistory;
     let sarvamReply = await callSarvamLLM({
@@ -1290,6 +1377,7 @@ async function streamLLMReply(
     contactVariables: campaignContext?.variables || null,
     isFollowup: !!(campaignContext as any)?.isFollowup,
     isFeedback: !!(campaignContext as any)?.isFeedback,
+    stage: (campaignContext as any)?.stage || null,
   });
   const trimmedHistory = history.length > 10 ? history.slice(-10) : history;
 
@@ -1315,6 +1403,7 @@ async function streamLLMReply(
       contactVariables: campaignContext?.variables || null,
       isFollowup: !!(campaignContext as any)?.isFollowup,
     isFeedback: !!(campaignContext as any)?.isFeedback,
+    stage: (campaignContext as any)?.stage || null,
     });
     const sarvamHistory = trimmedHistory.length > 6 ? trimmedHistory.slice(-6) : trimmedHistory;
 
@@ -1334,7 +1423,14 @@ async function streamLLMReply(
       ? `\n\nCALL SUMMARY SO FAR (DO NOT re-ask these):\n${histSummaryParts.slice(0, -4).map(l => `- ${l}`).join('\n')}`
       : '';
 
-    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply ONLY in ${langName} script. Never reply in English unless the caller explicitly asks.\n\nBREVITY (HARD RULE — this is a phone call, long replies sound robotic and get cut off):\n- Reply in ONE short sentence whenever possible; TWO only if the caller asked a real question. Target under 18 words.\n- Answer the question in a few words, then ask ONE short next question. Do NOT explain, elaborate, or give background.\n- NEVER list more than TWO items. If asked for options/colleges/fees, name at most two, then ask if they want more — do not enumerate everything.\n- Always COMPLETE the sentence fully (proper ending punctuation). Never trail off.\n\nONE QUESTION PER TURN (STRICT):\n- Ask EXACTLY ONE thing per reply. NEVER combine two asks in one sentence. Forbidden: "your group and marks?" — ask group THIS turn, marks the NEXT turn.\n- No "and"/"మరియు"/"&" joining two questions. One '?' per reply, maximum.\n- Phrase questions simply and naturally — ask WHAT, not WHY. Forbidden: "why are you interested in this college / ఎందుకు ఆసక్తి". Correct: "which college are you interested in? / మీరు ఏ కళాశాల ఆసక్తి?".\n- Capture order, one per turn: group → marks → EAMCET rank → college → branch → name → mobile → email. Ask only the NEXT uncaptured field.\n\nCRITICAL: Read the conversation history AND the CALL SUMMARY below. NEVER repeat a question you already asked. NEVER ignore what the caller just said. Acknowledge their answer in 2-3 words, then ask the NEXT question. Move FORWARD every turn. If the caller says "already told you", apologize briefly and ask the NEXT new question.${histSummary}`;
+    // Keep this append SHORT: the slim prompt already carries brevity, one-
+    // question, voice-friendly and anti-repetition rules. Re-stating them all
+    // (plus a full call summary) every turn made each Groq request ~1600+
+    // tokens, which exhausted Groq's per-minute token budget after ~1-2 turns
+    // → 429 → fall back to slow Sarvam. This compact lock keeps requests small
+    // so fast Groq stays primary. (histSummary dropped — the message history is
+    // already passed to the model below.)
+    const langLockedPrompt = `${slimPrompt}\n\nLANGUAGE: Reply ONLY in ${langName} script (course/branch names too: బీటెక్, సీఎస్ఈ, ఐటీ, ఏఐ — never English letters or dotted abbreviations). ONE short complete sentence, under 18 words, ONE question max. Acknowledge their last answer in 2-3 words, then move FORWARD — never repeat a question already asked.`;
 
     // Single-model strategy: Groq llama is the fastest and most reliable for
     // Indic voice. Only fall back to Sarvam if Groq is down.
@@ -1361,10 +1457,13 @@ async function streamLLMReply(
       if (force && emitBuf.trim()) { onSentence(emitBuf.trim()); emitBuf = ''; streamedSentences = true; }
     };
 
-    // PRIMARY: Groq — try multiple models with separate rate-limit pools.
-    // llama-3.1-8b-instant (fastest, 500K TPD) → llama-3.3-70b-versatile (best, 100K TPD).
+    // PRIMARY: Groq — try multiple models, each with its OWN rate-limit pool, so
+    // a 429 on one rolls to another FAST model before falling back to slow
+    // Sarvam. Order: fastest/best-Telugu first. Each pool is independent, so
+    // adding models materially raises the odds a turn stays on fast Groq (~1s)
+    // instead of Sarvam (~2.5s).
     const groqKey = config.groq?.apiKey || process.env.GROQ_API_KEY || '';
-    const groqModels = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'];
+    const groqModels = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'gemma2-9b-it'];
     // Telugu/Indic is token-heavy in the llama tokenizer — 120 tokens cut
     // replies mid-word ("…ఈశ్వరుని ఆ."). 300 gives a 1-2 sentence Telugu reply
     // room to FINISH; brevity is enforced by the prompt (model stops naturally
@@ -1434,7 +1533,7 @@ async function streamLLMReply(
             const errBody = await groqResp.text().catch(() => '');
             const is429 = groqResp.status === 429;
             if (is429) {
-              logger.info({ model: groqModel, latencyMs: Date.now() - t0 }, 'streamLLMReply (Indic): Groq 429 — trying next model');
+              logger.info({ model: groqModel, latencyMs: Date.now() - t0, retryAfter: (groqResp.headers as any)?.get?.('retry-after') || null, limit: errBody.slice(0, 160) }, 'streamLLMReply (Indic): Groq 429 — trying next model');
             } else {
               logger.warn({ status: groqResp.status, model: groqModel, body: errBody.slice(0, 150), latencyMs: Date.now() - t0 }, 'streamLLMReply (Indic): Groq HTTP error');
             }
@@ -1473,8 +1572,11 @@ async function streamLLMReply(
       return sayAgain;
     }
     // If Groq streamed, sentences were already emitted incrementally above —
-    // don't re-emit (that would double-speak). Only the buffered Sarvam
-    // fallback path needs to sentence-split and emit here.
+    // don't re-emit (that would double-speak). For the buffered Sarvam fallback,
+    // emit per-sentence: the first sentence's TTS starts while the rest is still
+    // synthesizing, so the caller hears audio sooner (lower first-audio latency).
+    // (Emitting the whole reply as one chunk made the agent wait for the entire
+    // reply to synthesize before speaking — noticeably slower.)
     if (!streamedSentences) {
       const sents = finalReply.split(/(?<=[.!?।॥])\s+/u).map((s) => s.trim()).filter(Boolean);
       if (sents.length === 0) {
@@ -1670,6 +1772,11 @@ type CampaignContext = {
    *  post_visit_feedback_call) — selects the feedback FLOW vs the
    *  visit-planning FLOW in the prompt builders. */
   isFeedback?: boolean;
+  /** Explicit admissions-journey stage derived from call metadata:
+   *  BULK_CALL | FOLLOW_UP | VISIT_PLANNING | POST_VISIT_FEEDBACK. Drives the
+   *  stage-specific opening script + flow in the prompt builders. Additive —
+   *  isFollowup/isFeedback remain for backward-compat. */
+  stage?: 'BULK_CALL' | 'FOLLOW_UP' | 'VISIT_PLANNING' | 'POST_VISIT_FEEDBACK';
 };
 
 interface StreamSession {
@@ -2030,6 +2137,15 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
       );
       const md = (cr.rows[0]?.metadata as any) || {};
       if (md && (md.campaign_id || md.target_name || md.campaign_instruction)) {
+        // Derive the explicit admissions-journey stage from existing metadata.
+        // No scheduler change needed — keys off is_followup + followup_type that
+        // the schedulers already thread through. isFollowup/isFeedback stay as-is.
+        const followupType = String(md.followup_type || '');
+        const stage: CampaignContext['stage'] =
+          followupType === 'post_visit_feedback_call' ? 'POST_VISIT_FEEDBACK'
+          : followupType === 'visit_confirmation' ? 'VISIT_PLANNING'
+          : md.is_followup ? 'FOLLOW_UP'
+          : 'BULK_CALL';
         session.campaignContext = {
           campaignId: md.campaign_id || null,
           instruction: typeof md.campaign_instruction === 'string' && md.campaign_instruction.trim()
@@ -2038,14 +2154,55 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
           targetName: md.target_name || null,
           isFollowup: !!md.is_followup,
           isFeedback: md.followup_type === 'post_visit_feedback_call',
+          stage,
         };
         logger.info(
-          { callSid: session.callSid, campaignId: session.campaignContext.campaignId, hasInstruction: !!session.campaignContext.instruction, varKeys: Object.keys(session.campaignContext.variables) },
+          { callSid: session.callSid, stage: session.campaignContext.stage, campaignId: session.campaignContext.campaignId, hasInstruction: !!session.campaignContext.instruction, varKeys: Object.keys(session.campaignContext.variables) },
           'Stream handler: campaign overlay loaded',
         );
       }
     } catch (err: any) {
       logger.warn({ err: err.message }, 'Failed to load campaign overlay from calls.metadata');
+    }
+  }
+
+  // INBOUND: no campaign metadata. Look up the caller's CRM lead so the agent
+  // can greet with their name + current admission stage and reuse known
+  // details (CONTACT_CONTEXT) instead of treating them as a stranger. We do NOT
+  // set isFollowup/isFeedback (those drive the scripted OUTBOUND flows) — inbound
+  // stays caller-led; we only supply context + an inbound stage for the greeting.
+  if (session.isInbound && !session.campaignContext?.instruction && session.callerNumber) {
+    try {
+      const lead = await lookupLeadByPhone(session.callerNumber);
+      if (lead) {
+        const cf = (lead.custom_fields || {}) as Record<string, any>;
+        const name = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+        const college = cf.interested_university || cf.interested_college || '';
+        const course = cf.interested_course || '';
+        const inboundStage = deriveInboundStage(cf);
+        session.campaignContext = {
+          campaignId: null,
+          instruction: null,
+          variables: {
+            name, college, course,
+            visit_date: cf.last_visit_date || cf.visit_date || '',
+            visit_time: cf.visit_time || '',
+            inbound_stage: inboundStage,
+          },
+          targetName: name || null,
+          isFollowup: false,
+          isFeedback: false,
+          stage: undefined,
+        };
+        logger.info(
+          { callSid: session.callSid, leadId: lead.id, inboundStage, hasCollege: !!college },
+          'Inbound: matched caller to existing lead',
+        );
+      } else {
+        logger.info({ callSid: session.callSid, caller: session.callerNumber }, 'Inbound: no lead matched — new caller');
+      }
+    } catch (e: any) {
+      logger.warn({ callSid: session.callSid, err: e?.message }, 'Inbound lead lookup failed');
     }
   }
 
@@ -2073,6 +2230,32 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     );
   }
   session.language = lang;
+
+  // Transliterate the lead's name + college into the call's Indic script so the
+  // Indic TTS pronounces them natively (Latin "Baji Babu"/"SRM University" were
+  // mangled into "OG Babu"/garble). Runs once per call before the greeting;
+  // best-effort, ~200-400ms, falls back to the Latin form on any failure.
+  const isIndicForTranslit = !/^en/i.test(lang) && /^(te|hi|ta|kn|ml|mr|bn|gu|pa|or|as)/i.test(lang);
+  if (isIndicForTranslit && session.campaignContext) {
+    const v = session.campaignContext.variables || {};
+    const nm = String(session.campaignContext.targetName || v.name || '').trim();
+    const col = String(v.college || '').trim();
+    if ((nm && /[A-Za-z]/.test(nm)) || (col && /[A-Za-z]/.test(col))) {
+      try {
+        const [tlName, tlCollege] = await transliterateToIndic([nm, col], lang);
+        if (tlName) { session.campaignContext.targetName = tlName; v.name = tlName; }
+        if (tlCollege) { v.college = tlCollege; }
+        session.campaignContext.variables = v;
+        logger.info(
+          { callSid: session.callSid, lang, name: tlName || nm, college: tlCollege || col },
+          'Stream: transliterated name/college to call script',
+        );
+      } catch (err: any) {
+        logger.warn({ callSid: session.callSid, err: err?.message }, 'Transliteration failed — keeping Latin form');
+      }
+    }
+  }
+
   // Honor per-agent barge-in override (voice_config.barge_in_grace_ms). When
   // unset, bargeInGraceMs() falls back to language-default 1500/2000ms.
   const agentGraceRaw =
@@ -2315,6 +2498,105 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     ...(session.campaignContext.variables || {}),
     name: safeName,
   };
+
+  // ── INBOUND stage-aware greeting ───────────────────────────────────────────
+  // The caller dialed us. Greet by name + their current admission stage (from
+  // the matched lead) then hand control to the caller — inbound is caller-led,
+  // not a scripted outbound flow. Deterministic (instant). Unknown callers get a
+  // generic admissions greeting.
+  if (session.isInbound) {
+    const v = session.campaignContext.variables || {};
+    const inStage = String((v as any).inbound_stage || 'NEW_CALLER');
+    const col = String((v as any).college || '').trim() || 'the college';
+    const vdate = String((v as any).visit_date || '').trim();
+    const vtime = String((v as any).visit_time || '').trim();
+    const lk = String(session.language || 'en-IN');
+    const isTe = lk.startsWith('te'); const isHi = lk.startsWith('hi');
+    const nm = safeName ? (isTe ? `${safeName} గారు` : isHi ? `${safeName} जी` : `${safeName} garu`) : '';
+    let g = '';
+    if (safeName && inStage === 'VISIT_PLANNING') {
+      const whenTe = vdate ? ` ${vdate}${vtime ? ' ' + vtime : ''}కి` : '';
+      const whenEn = vdate ? ` on ${vdate}${vtime ? ' at ' + vtime : ''}` : '';
+      g = isTe ? `నమస్తే ${nm}. మీ ${col} క్యాంపస్ విజిట్${whenTe} షెడ్యూల్ అయింది. నేను మీకు ఎలా సహాయం చేయగలను?`
+        : isHi ? `नमस्ते ${nm}। आपकी ${col} कैंपस विज़िट${whenEn} शेड्यूल है। मैं आपकी कैसे मदद करूँ?`
+        : `Hello ${nm}. Your ${col} campus visit${whenEn} is scheduled. How can I help you?`;
+    } else if (safeName && inStage === 'POST_VISIT_FEEDBACK') {
+      g = isTe ? `నమస్తే ${nm}. మీ ఇటీవలి ${col} విజిట్ గురించి మాట్లాడుతున్నాను. నేను మీకు ఎలా సహాయం చేయగలను?`
+        : isHi ? `नमस्ते ${nm}। आपकी हाल की ${col} विज़िट के बारे में। मैं कैसे मदद करूँ?`
+        : `Hello ${nm}. This is regarding your recent visit to ${col}. How can I help you?`;
+    } else if (safeName && inStage === 'ADMISSION_INTERESTED') {
+      g = isTe ? `నమస్తే ${nm}. మీ ${col} అడ్మిషన్ గురించి. నేను మీకు ఎలా సహాయం చేయగలను?`
+        : isHi ? `नमस्ते ${nm}। आपके ${col} एडमिशन के बारे में। मैं कैसे मदद करूँ?`
+        : `Hello ${nm}. Regarding your ${col} admission. How can I help you?`;
+    } else if (safeName) {
+      g = isTe ? `నమస్తే ${nm}. అడ్మిషన్ సపోర్ట్‌కి కాల్ చేసినందుకు ధన్యవాదాలు. నేను మీకు ఎలా సహాయం చేయగలను?`
+        : isHi ? `नमस्ते ${nm}। एडमिशन सपोर्ट को कॉल करने के लिए धन्यवाद। मैं कैसे मदद करूँ?`
+        : `Hello ${nm}. Thank you for calling admissions support. How can I help you?`;
+    } else {
+      g = isTe ? `నమస్తే! అడ్మిషన్ సపోర్ట్‌కి ధన్యవాదాలు. మీకు బీటెక్ అడ్మిషన్ వివరాలు కావాలా?`
+        : isHi ? `नमस्ते! एडमिशन सपोर्ट में आपका स्वागत है। क्या आपको बी.टेक एडमिशन की जानकारी चाहिए?`
+        : `Hello! Thank you for calling admissions support. Are you looking for B.Tech admission details?`;
+    }
+    if (g) {
+      if (session.conversationId) await appendMessage(session.conversationId, session.tenantId, 'assistant', g);
+      session.history.push({ role: 'assistant', content: g });
+      logger.info({ callSid: session.callSid, inboundStage: inStage, named: !!safeName }, 'Greeting: inbound stage-aware opener');
+      await playText(plivoWs, session, g);
+      return;
+    }
+  }
+
+  // ── Stage-aware greeting override ──────────────────────────────────────────
+  // For FOLLOW_UP / VISIT_PLANNING / POST_VISIT_FEEDBACK calls the lead ALREADY
+  // exists, so the opening line must state the call's purpose (brochure review /
+  // visit planning / feedback) — NOT the generic cold-call greeting template,
+  // which on this agent asks "have you completed Intermediate?" and pushes the
+  // whole call into the capture flow (re-asking known details). We seed the
+  // opener via the LLM in the call's language; the stage prompt is already in
+  // context. On any failure we fall through to the normal greeting below.
+  const stageForGreeting = session.campaignContext.stage;
+  if (stageForGreeting && stageForGreeting !== 'BULK_CALL' && !session.isInbound) {
+    const gCollege = String(session.campaignContext.variables?.college || session.campaignContext.variables?.interested_university || '').trim() || 'your preferred college';
+    const gCourse = String(session.campaignContext.variables?.course || session.campaignContext.variables?.interested_course || '').trim();
+    // Deterministic per-language stage opener — NO LLM round-trip (seeding it via
+    // the LLM added 30s+ of dead air on pickup when the provider was throttled).
+    // Built instantly by string interpolation, mirroring LANG_GREETING_TEMPLATES.
+    // Falls back to en-IN for languages without an explicit template; if no
+    // opener is produced we fall through to the normal greeting below.
+    const enName = safeName ? `${safeName} garu` : 'sir';
+    const teName = safeName ? `${safeName} గారు` : 'గారు';
+    const hiName = safeName ? `${safeName} जी` : 'जी';
+    const enCourse = gCourse ? ` for ${gCourse}` : '';
+    const STAGE_GREETINGS: Record<string, Record<string, string>> = {
+      FOLLOW_UP: {
+        'en-IN': `Hello ${enName}. Previously our admissions team spoke with you regarding ${gCollege}${enCourse}. I am calling to check whether you had a chance to review the information we shared.`,
+        'te-IN': `నమస్తే ${teName}. గతంలో మా అడ్మిషన్స్ టీం మీతో ${gCollege} గురించి మాట్లాడింది. మేము పంపిన సమాచారాన్ని మీరు చూడగలిగారా అని అడగడానికి కాల్ చేస్తున్నాను.`,
+        'hi-IN': `नमस्ते ${hiName}। पहले हमारी एडमिशन टीम ने आपसे ${gCollege} के बारे में बात की थी। मैं यह जानने के लिए कॉल कर रही हूँ कि क्या आपने हमारी भेजी जानकारी देखी।`,
+      },
+      VISIT_PLANNING: {
+        'en-IN': `Hello ${enName}. Previously our admissions team connected with you regarding admission to ${gCollege}${enCourse}. I am calling to help plan your campus visit. Are you still interested in visiting ${gCollege}?`,
+        'te-IN': `నమస్తే ${teName}. గతంలో మా అడ్మిషన్స్ టీం మీతో ${gCollege} అడ్మిషన్ గురించి మాట్లాడింది. మీ క్యాంపస్ విజిట్ ప్లాన్ చేయడంలో సహాయం చేయడానికి కాల్ చేస్తున్నాను. మీరు ఇంకా ${gCollege} సందర్శించాలనుకుంటున్నారా?`,
+        'hi-IN': `नमस्ते ${hiName}। पहले हमारी एडमिशन टीम ने आपसे ${gCollege} एडमिशन के बारे में बात की थी। मैं आपकी कैंपस विज़िट प्लान करने में मदद के लिए कॉल कर रही हूँ। क्या आप अब भी ${gCollege} देखने में रुचि रखते हैं?`,
+      },
+      POST_VISIT_FEEDBACK: {
+        'en-IN': `Hello ${enName}. This call is regarding your recent visit to ${gCollege}. I would like to understand your experience and help with the next steps. How was your visit?`,
+        'te-IN': `నమస్తే ${teName}. మీరు ఇటీవల ${gCollege} సందర్శించిన విషయంలో ఈ కాల్ చేస్తున్నాను. మీ అనుభవం తెలుసుకుని తదుపరి దశల్లో సహాయం చేయాలనుకుంటున్నాను. మీ విజిట్ ఎలా జరిగింది?`,
+        'hi-IN': `नमस्ते ${hiName}। यह कॉल आपकी हाल की ${gCollege} विज़िट के बारे में है। मैं आपका अनुभव समझकर अगले कदमों में मदद करना चाहती हूँ। आपकी विज़िट कैसी रही?`,
+      },
+    };
+    const stageMap = STAGE_GREETINGS[stageForGreeting];
+    const lk = String(session.language || 'en-IN');
+    const stageGreeting = stageMap && (stageMap[lk] || stageMap[lk.slice(0, 2) + '-IN'] || stageMap['en-IN']);
+    if (stageGreeting && stageGreeting.trim()) {
+      const g = stageGreeting.trim();
+      if (session.conversationId) await appendMessage(session.conversationId, session.tenantId, 'assistant', g);
+      session.history.push({ role: 'assistant', content: g });
+      logger.info({ callSid: session.callSid, stage: stageForGreeting, lang: lk }, 'Greeting: stage-aware opener (deterministic)');
+      await playText(plivoWs, session, g);
+      return;
+    }
+  }
+
   // Per-language fallback greeting templates. Used when the agent has either
   // (a) no greeting_message at all, or (b) a greeting_message whose script
   // doesn't match the call's language (e.g. English template on a Telugu
@@ -3749,13 +4031,17 @@ async function dispatchUserUtterance(session: StreamSession, rawText: string): P
   // utterance can still fire a fresh turn. Without this a hung Gemini /
   // Sarvam request silently kills the conversation.
   if (session.inFlightWatchdog) clearTimeout(session.inFlightWatchdog);
+  // 15s, not 8s: the Indic LLM (Sarvam-M) legitimately takes 8-11s per turn,
+  // so an 8s watchdog fired mid-reply and cleared the in-flight flag, making
+  // the agent look unresponsive. 15s still catches a truly hung request.
+  const INFLIGHT_WATCHDOG_MS = 15000;
   session.inFlightWatchdog = setTimeout(() => {
     if (!session.inFlightReply) return;  // completed normally before timeout
     session.inFlightReply = false;
     session.inFlightWatchdog = null;
-    emit(session, 'INFLIGHT_WATCHDOG_FIRED', { elapsed_ms: 8000 });
+    emit(session, 'INFLIGHT_WATCHDOG_FIRED', { elapsed_ms: INFLIGHT_WATCHDOG_MS });
     logger.warn({ callSid: session.callSid }, 'inFlightReply watchdog fired — clearing stuck flag');
-  }, 8000);
+  }, INFLIGHT_WATCHDOG_MS);
 
   handleUserUtterance(session).finally(() => {
     session.inFlightReply = false;
@@ -3799,8 +4085,11 @@ async function handleUserUtterance(session: StreamSession): Promise<void> {
     // "lecturing"; the prompt asks for 1-2 short sentences but Sarvam
     // ignores that, so we enforce it post-LLM.
     const isIndicCall = !/^en/i.test(String(session.language || ''));
+    // Indic replies were running 7-11s of TTS (long monologues) which sounded
+    // choppy and made callers hang up. Cap tighter: 2 short sentences but ~26
+    // words so a reply is ~3-4s of speech. English stays roomy.
     const maxSent = isIndicCall ? 2 : 4;
-    const maxWords = isIndicCall ? 40 : 130;
+    const maxWords = isIndicCall ? 26 : 130;
     let spoken = '';
     if (session.plivoWs) {
       const full = await streamAndPlayReply(session.plivoWs, session);
