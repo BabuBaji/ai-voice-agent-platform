@@ -1711,7 +1711,13 @@ async function ttsDeepgramMulaw(text: string, voiceIdRaw?: string): Promise<stri
     orpheus: 'aura-orpheus-en', helios: 'aura-helios-en', zeus: 'aura-zeus-en',
     alloy: 'aura-orion-en',
   };
-  const model = voiceMap[(voiceIdRaw || '').toLowerCase()] || 'aura-asteria-en';
+  // Optional tenant-wide forced Aura voice: DEEPGRAM_FORCE_VOICE (e.g. 'luna')
+  // wins over the per-call voice id so every Deepgram TTS response uses one
+  // voice. Voice selection ONLY — the /v1/speak model family, mulaw encoding,
+  // 8k sample rate and streaming stay exactly as before. Unset = legacy.
+  const forcedDgVoice = String(process.env.DEEPGRAM_FORCE_VOICE || '').toLowerCase();
+  const pickedVoice = forcedDgVoice || (voiceIdRaw || '').toLowerCase();
+  const model = voiceMap[pickedVoice] || 'aura-asteria-en';
   try {
     const resp = await fetch(
       `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(model)}&encoding=mulaw&sample_rate=8000&container=none`,
@@ -2343,9 +2349,17 @@ async function onStart(plivoWs: WebSocket, session: StreamSession): Promise<void
     // a mature, warm male counsellor voice). Locked onto the session so every
     // turn, language switch, and STT fallback reuses the exact same voice.
     const cfgVoice = String(voiceCfg.voice_id || '').toLowerCase();
-    session.ttsVoiceId = SARVAM_PREMIUM_SPEAKERS.has(cfgVoice)
-      ? cfgVoice
-      : (process.env.PREMIUM_VOICE_ID || 'abhilash');
+    // Optional tenant-wide forced speaker: SARVAM_FORCE_VOICE (a valid bulbul:v2
+    // speaker) wins over the agent's voice_config and the premium default, so
+    // every Sarvam TTS response uses one speaker (e.g. 'vidya'). Voice selection
+    // ONLY — model (bulbul:v2), pace, pitch, sample rate are untouched. Unset =
+    // legacy behaviour (agent voice_config → PREMIUM_VOICE_ID → abhilash).
+    const forcedSarvamVoice = String(process.env.SARVAM_FORCE_VOICE || '').toLowerCase();
+    session.ttsVoiceId = SARVAM_PREMIUM_SPEAKERS.has(forcedSarvamVoice)
+      ? forcedSarvamVoice
+      : SARVAM_PREMIUM_SPEAKERS.has(cfgVoice)
+        ? cfgVoice
+        : (process.env.PREMIUM_VOICE_ID || 'abhilash');
     logger.info(
       { callSid: session.callSid, lang, stt, tts, voice: session.ttsVoiceId },
       'Stream: premium single-voice pinned (Sarvam) for whole call',

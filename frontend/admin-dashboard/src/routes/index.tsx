@@ -131,6 +131,7 @@ import { CommunicationsPage as SuperAdminCommunicationsPage } from '@/pages/supe
 import { RemindersPage as SuperAdminRemindersPage } from '@/pages/superAdmin/RemindersPage';
 import { ProvidersPage as SuperAdminProvidersPage } from '@/pages/superAdmin/ProvidersPage';
 import { AnalyticsPage as SuperAdminAnalyticsPage } from '@/pages/superAdmin/AnalyticsPage';
+import { VoicesPage as SuperAdminVoicesPage } from '@/pages/superAdmin/VoicesPage';
 
 export const routes: RouteObject[] = [
   // Public landing page
@@ -185,6 +186,7 @@ export const routes: RouteObject[] = [
       { path: '/super-admin/reminders', element: <SuperAdminRemindersPage /> },
       { path: '/super-admin/providers', element: <SuperAdminProvidersPage /> },
       { path: '/super-admin/analytics', element: <SuperAdminAnalyticsPage /> },
+      { path: '/super-admin/voices', element: <SuperAdminVoicesPage /> },
     ],
   },
   // Public docs hub (dedicated dark layout, no auth required)

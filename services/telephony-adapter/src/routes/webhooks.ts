@@ -133,7 +133,11 @@ function shortId(): string {
 async function ttsDeepgram(clean: string, voiceIdRaw?: string): Promise<Buffer | null> {
   const apiKey = process.env.DEEPGRAM_API_KEY;
   if (!apiKey) return null;
-  const model = DEEPGRAM_VOICE_MAP[(voiceIdRaw || '').toLowerCase()] || 'aura-asteria-en';
+  // DEEPGRAM_FORCE_VOICE (e.g. 'luna') forces one Aura voice across all Deepgram
+  // TTS responses; unset = legacy per-call voice. Voice selection only — the
+  // /v1/speak model family + mp3 encoding below are unchanged.
+  const forcedDgVoice = String(process.env.DEEPGRAM_FORCE_VOICE || '').toLowerCase();
+  const model = DEEPGRAM_VOICE_MAP[forcedDgVoice || (voiceIdRaw || '').toLowerCase()] || 'aura-asteria-en';
   try {
     // Deepgram truncates at 2000 chars; we stay well under.
     const resp = await fetch(
@@ -1148,9 +1152,16 @@ webhookRouter.post('/plivo/voice', async (req: Request, res: Response, next: Nex
     let isInboundCall = false;
     if (!agentId || !tenantId) {
       isInboundCall = true;
+      // Match on digits only so we resolve whether or not Plivo includes the
+      // leading "+" (Indian DIDs often arrive as "912269981101" without it) or
+      // any spacing/dashes. Prefer the exact string match first, then fall back
+      // to the digit-normalized comparison.
       const phoneResult = await pool.query(
         `SELECT id, agent_id, tenant_id, deployment_status, inbound_enabled FROM phone_numbers
-         WHERE phone_number = $1 AND is_active = TRUE LIMIT 1`,
+         WHERE (phone_number = $1
+                OR regexp_replace(phone_number, '[^0-9]', '', 'g') = regexp_replace($1, '[^0-9]', '', 'g'))
+           AND is_active = TRUE
+         ORDER BY (phone_number = $1) DESC LIMIT 1`,
         [To]
       );
       if (phoneResult.rows.length === 0) {

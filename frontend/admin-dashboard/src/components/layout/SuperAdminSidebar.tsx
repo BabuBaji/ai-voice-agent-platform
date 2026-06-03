@@ -3,7 +3,7 @@ import {
   Shield, LayoutDashboard, Building2, PhoneCall, Bot, CreditCard,
   ScrollText, Plug, LogOut, Activity, AlertTriangle, TrendingDown,
   Webhook, Megaphone, Lock, Crown, MessageSquare, Server,
-  Layers, Send, BellRing, Radio, BarChart3,
+  Layers, Send, BellRing, Radio, BarChart3, AudioLines,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -20,6 +20,7 @@ const sections: Array<{ title?: string; items: Item[] }> = [
     { label: 'Communications', path: '/super-admin/communications', icon: Send },
     { label: 'Reminders',      path: '/super-admin/reminders',      icon: BellRing },
     { label: 'Providers',      path: '/super-admin/providers',      icon: Radio },
+    { label: 'Voices',         path: '/super-admin/voices',         icon: AudioLines },
     { label: 'Analytics',      path: '/super-admin/analytics',      icon: BarChart3 },
   ]},
   { title: 'Operations', items: [

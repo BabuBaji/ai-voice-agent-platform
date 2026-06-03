@@ -1,4 +1,5 @@
 import { pool } from '../index';
+import { Pool } from 'pg';
 import { analyzeConversation, AnalysisResult } from './analyzer';
 import { triggerWorkflow, mapStatusToEvent } from './whatsappWorkflowEngine';
 import { updateFollowupFromCallEnd, cancelLeadAutomation } from './followupScheduler';
@@ -8,6 +9,37 @@ import pino from 'pino';
 const logger = pino({ name: 'post-call-processor' });
 
 const PROCESSOR_VERSION = 'v1';
+
+// Read-only pool to crm_db (leads live there, not in conversation_db). Mirrors
+// the pattern in brochureDelivery.ts. Used only to resolve an EXISTING lead by
+// phone when a visit-booking call wasn't lead-linked by the analyzer.
+const CRM_DB_URL = process.env.CRM_DB_URL || 'postgresql://voiceagent:voiceagent_dev@localhost:5432/crm_db';
+let crmPool: Pool | null = null;
+function getCrmPool(): Pool {
+  if (!crmPool) crmPool = new Pool({ connectionString: CRM_DB_URL });
+  return crmPool;
+}
+
+/** Resolve an existing CRM lead id by phone number, matching on the last 10
+ *  digits so "+919493324795" and "9493324795" unify. Returns the most recent
+ *  matching lead, or null. Best-effort — never throws. */
+async function resolveLeadIdByPhone(tenantId: string, phone: string | null | undefined): Promise<string | null> {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  try {
+    const r = await getCrmPool().query(
+      `SELECT id FROM leads
+        WHERE tenant_id = $1
+          AND right(regexp_replace(phone, '\\D', '', 'g'), 10) = right($2, 10)
+        ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, digits],
+    );
+    return r.rows[0]?.id || null;
+  } catch (e: any) {
+    logger.warn({ err: e?.message }, 'resolveLeadIdByPhone failed');
+    return null;
+  }
+}
 
 /**
  * Post-call lead processor.
@@ -67,12 +99,6 @@ async function maybeCreateVisitForLinkedLead(
     const parsed = parseFollowUpTimeLocal(apptRaw);
     if (!parsed) return;
     const visitWhen = clampVisitToFuture(parsed);
-    // De-dupe: skip if the lead already has an open visit.
-    const existing = await pool.query(
-      `SELECT id FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED') LIMIT 1`,
-      [leadId],
-    );
-    if (existing.rows.length > 0) return;
     const y = visitWhen.getFullYear();
     const mo = String(visitWhen.getMonth() + 1).padStart(2, '0');
     const d = String(visitWhen.getDate()).padStart(2, '0');
@@ -81,6 +107,35 @@ async function maybeCreateVisitForLinkedLead(
     const rec = await pool.query(`SELECT recording_url FROM conversations WHERE id = $1 LIMIT 1`, [conversationId]);
     const recordingUrl = rec.rows[0]?.recording_url || null;
     const callSummary = (analysis as any).detailed_summary || (analysis as any).short_summary || null;
+    // One open visit per lead. If one already exists, RESCHEDULE it to the
+    // newly-confirmed date/time (a later call wins) instead of creating a
+    // duplicate — but skip the write when nothing changed.
+    const existing = await pool.query(
+      `SELECT id, visit_date::text AS visit_date, visit_time::text AS visit_time
+         FROM visit_schedules WHERE lead_id = $1 AND status IN ('SCHEDULED','CONFIRMED')
+        ORDER BY created_at DESC LIMIT 1`,
+      [leadId],
+    );
+    if (existing.rows.length > 0) {
+      const ex = existing.rows[0];
+      const unchanged = String(ex.visit_date) === `${y}-${mo}-${d}`
+        && String(ex.visit_time || '').slice(0, 5) === `${hh}:${mm}`;
+      if (unchanged) return;
+      await pool.query(
+        `UPDATE visit_schedules
+            SET visit_date = $1, visit_time = $2, status = 'SCHEDULED',
+                conversation_id = $3::uuid, confirmation_call_id = $4,
+                recording_url = COALESCE($5, recording_url),
+                call_summary = COALESCE($6, call_summary),
+                reschedule_count = COALESCE(reschedule_count, 0) + 1,
+                customer_confirmed = TRUE, updated_at = NOW()
+          WHERE id = $7`,
+        [`${y}-${mo}-${d}`, `${hh}:${mm}`, conversationId, callId, recordingUrl, callSummary, ex.id],
+      );
+      await updateLeadPipeline(tenantId, leadId, 'VISIT_SCHEDULED').catch(() => {});
+      logger.info({ conv: conversationId, lead: leadId, visit_date: `${y}-${mo}-${d}`, rescheduled_from: `${ex.visit_date} ${ex.visit_time}`, visit_id: ex.id }, 'open visit rescheduled from newer lead-linked call');
+      return;
+    }
     await pool.query(
       `INSERT INTO visit_schedules
          (tenant_id, lead_id, followup_task_id, visit_date, visit_time, status, created_from, visitor_type, notes,
@@ -119,11 +174,17 @@ export async function processCallEnd(
   let callId: string | null = null;
   let campaignId: string | null = null;
   let followupTaskId: string | null = null;
+  let callDirection: string | null = null;
+  let callerNumber: string | null = null;
+  let calledNumber: string | null = null;
   try {
     const r = await pool.query(
       `SELECT
          c.analysis->>'crm_lead_id' AS lead_id,
+         c.direction AS direction,
          ca.id::text AS call_id,
+         ca.caller_number AS caller_number,
+         ca.called_number AS called_number,
          ca.metadata->>'campaign_id' AS campaign_id,
          ca.metadata->>'followup_task_id' AS followup_task_id
        FROM conversations c
@@ -136,6 +197,9 @@ export async function processCallEnd(
     callId = r.rows[0]?.call_id || null;
     campaignId = r.rows[0]?.campaign_id || null;
     followupTaskId = r.rows[0]?.followup_task_id || null;
+    callDirection = r.rows[0]?.direction || null;
+    callerNumber = r.rows[0]?.caller_number || null;
+    calledNumber = r.rows[0]?.called_number || null;
   } catch { /* non-fatal — audit row just won't have these refs */ }
 
   // Audit row — always written, even on failure, so the dashboard surfaces
@@ -183,11 +247,22 @@ export async function processCallEnd(
   if (followupTaskId) {
     await handleFollowupCallAutomation(conversationId, tenantId, analysis!, followupTaskId, callId)
       .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'follow-up automation hook failed'));
-  } else if (crmLeadId) {
+  } else {
     // Non-scheduler call (recall / brochure follow-up / bulk / inbound) that
-    // still booked a visit for a known lead → create the Visit Card too.
-    await maybeCreateVisitForLinkedLead(conversationId, tenantId, analysis!, callId, crmLeadId)
-      .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'linked-lead visit hook failed'));
+    // still booked a visit for a known lead → create the Visit Card too. When
+    // the analyzer didn't link a lead (strict gate on a NEW lead), fall back to
+    // resolving the EXISTING lead by the contact's phone number.
+    let visitLeadId = crmLeadId;
+    if (!visitLeadId) {
+      const dir = String(callDirection || '').toUpperCase();
+      const contactPhone = dir === 'OUTBOUND' ? calledNumber : callerNumber;
+      visitLeadId = await resolveLeadIdByPhone(tenantId, contactPhone);
+      if (visitLeadId) logger.info({ conv: conversationId, lead: visitLeadId }, 'visit hook: resolved existing lead by phone (analyzer left it unlinked)');
+    }
+    if (visitLeadId) {
+      await maybeCreateVisitForLinkedLead(conversationId, tenantId, analysis!, callId, visitLeadId)
+        .catch((err) => logger.warn({ conv: conversationId, err: err?.message }, 'linked-lead visit hook failed'));
+    }
   }
 
   // Fire the WhatsApp workflow for the resolved lead_status. Best-effort —
@@ -216,6 +291,9 @@ export async function runFollowupAutomation(
     const r = await pool.query(
       `SELECT ca.id::text AS call_id,
               ca.metadata->>'followup_task_id' AS followup_task_id,
+              ca.caller_number AS caller_number,
+              ca.called_number AS called_number,
+              c.direction AS direction,
               c.analysis->>'crm_lead_id' AS lead_id
          FROM conversations c
          LEFT JOIN calls ca ON ca.conversation_id = c.id
@@ -225,7 +303,17 @@ export async function runFollowupAutomation(
     );
     const followupTaskId = r.rows[0]?.followup_task_id || null;
     const callId = r.rows[0]?.call_id || null;
-    const leadId = r.rows[0]?.lead_id || null;
+    let leadId = r.rows[0]?.lead_id || null;
+    // Fallback: the analyzer's strict gate may decline to (re)link a NEW lead
+    // even when the call is to an EXISTING lead. Resolve by the contact's phone
+    // (the dialed number on outbound, the caller on inbound) so a visit booked
+    // on such a call still produces a Visit Card in /followups.
+    if (!followupTaskId && !leadId) {
+      const dir = String(r.rows[0]?.direction || '').toUpperCase();
+      const contactPhone = dir === 'OUTBOUND' ? r.rows[0]?.called_number : r.rows[0]?.caller_number;
+      leadId = await resolveLeadIdByPhone(tenantId, contactPhone);
+      if (leadId) logger.info({ conv: conversationId, lead: leadId }, 'visit hook: resolved existing lead by phone (analyzer left it unlinked)');
+    }
     if (followupTaskId) {
       await handleFollowupCallAutomation(conversationId, tenantId, analysis, followupTaskId, callId);
     } else if (leadId) {

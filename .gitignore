@@ -51,3 +51,6 @@ htmlcov/
 # Temp
 tmp/
 temp/
+
+# Generated TTS voice preview samples (not source)
+voice-samples/

@@ -13,6 +13,7 @@ import { recordingsRouter } from './routes/recordings';
 import { campaignRouter } from './routes/campaigns';
 import { dncRouter } from './routes/dnc';
 import { plivoFeaturesRouter } from './routes/plivoFeatures';
+import { voicePreviewRouter } from './routes/voicePreview';
 import { requestLogger } from './middleware/requestLogger';
 import { errorHandler } from './middleware/errorHandler';
 import { verifyTwilioSignature, verifyPlivoSignature } from './middleware/webhookSignature';
@@ -62,6 +63,8 @@ app.use('/api/v1/phone-numbers', phoneNumberRouter);
 app.use('/api/v1/campaigns', campaignRouter);
 app.use('/api/v1/dnc', dncRouter);
 app.use('/api/v1/plivo', plivoFeaturesRouter);
+// Voice preview (Super Admin → Voices). Read-only TTS sample synthesis.
+app.use('/api/v1/voice-preview', voicePreviewRouter);
 
 app.use(errorHandler);
 

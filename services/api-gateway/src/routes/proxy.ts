@@ -111,6 +111,8 @@ proxyRouter.all('/api/v1/voice-clones', authMiddleware, forwardRequest(config.se
 // --- Telephony adapter ---
 proxyRouter.all('/api/v1/calls/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/calls', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/voice-preview/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
+proxyRouter.all('/api/v1/voice-preview', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/phone-numbers/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/phone-numbers', authMiddleware, forwardRequest(config.services.telephony, keepPath));
 proxyRouter.all('/api/v1/campaigns/*', authMiddleware, forwardRequest(config.services.telephony, keepPath));
